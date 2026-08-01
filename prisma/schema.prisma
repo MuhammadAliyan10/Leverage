@@ -1,0 +1,28 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["reactNative"]
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Transaction {
+  id        String   @id @default(uuid())
+  amount    Float
+  type      String   @default("Expense")
+  category  String
+  accountId String?
+  note      String?
+  date      DateTime @default(now())
+  synced    Boolean  @default(false)
+}
+
+model Account {
+  id        String   @id @default(uuid())
+  name      String
+  type      String   @default("Bank")
+  balance   Float    @default(0)
+  createdAt DateTime @default(now())
+  synced    Boolean  @default(false)
+}
