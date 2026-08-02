@@ -1,5 +1,6 @@
 import React from 'react';
-import { View, Text, KeyboardAvoidingView, Platform, SafeAreaView } from 'react-native';
+import { View, Text, KeyboardAvoidingView, Platform } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';

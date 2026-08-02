@@ -1,5 +1,6 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react';
-import { View, Text, SafeAreaView, SectionList, TextInput, Pressable, Alert } from 'react-native';
+import { View, Text, SectionList, TextInput, Pressable, Alert } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { Filter, Search, ShoppingCart, DollarSign, Edit, Trash2 } from 'lucide-react-native';
 import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';

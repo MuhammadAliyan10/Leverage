@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { View, Text, ScrollView, SafeAreaView, Pressable, Platform } from 'react-native';
+import { View, Text, ScrollView, Pressable, Platform } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { Bell, ShoppingCart, Coffee, Car, DollarSign } from 'lucide-react-native';
 import { BarChart } from 'react-native-gifted-charts';

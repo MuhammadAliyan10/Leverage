@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { View, Text, SafeAreaView, ScrollView, Pressable } from 'react-native';
+import { View, Text, ScrollView, Pressable } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { ChevronLeft, ChevronRight, ShoppingCart, Home, Car, Zap, Coffee, AlertCircle } from 'lucide-react-native';
 import { PieChart } from 'react-native-gifted-charts';

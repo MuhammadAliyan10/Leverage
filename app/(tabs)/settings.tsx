@@ -1,5 +1,6 @@
 import React from 'react';
-import { View, Text, SafeAreaView, ScrollView, Pressable, Switch, Alert } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, Switch, Alert } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { useColorScheme } from 'nativewind';
 import { Building2, Target, Moon, Coins, CloudSync, FileText, LogOut, Trash2, ChevronRight } from 'lucide-react-native';
@@ -22,7 +23,7 @@ const SettingRow: React.FC<SettingRowProps> = ({
   showChevron = false 
 }) => {
   return (
-    <Pressable 
+    <TouchableOpacity 
       onPress={onPress}
       className={`flex-row items-center justify-between py-4 border-b border-gray-100 dark:border-neutral-800 active:opacity-70`}
       disabled={!onPress}
@@ -39,16 +40,25 @@ const SettingRow: React.FC<SettingRowProps> = ({
         {rightComponent}
         {showChevron && <ChevronRight size={20} color="#9ca3af" className="ml-2" />}
       </View>
-    </Pressable>
+    </TouchableOpacity>
   );
 };
 
 import { useRouter } from 'expo-router';
+import { useAuth } from '../../src/context/AuthContext';
 
 export default function SettingsScreen() {
   const { colorScheme, toggleColorScheme } = useColorScheme();
   const isDark = colorScheme === 'dark';
   const router = useRouter();
+  const { user, signOut } = useAuth();
+
+  const userInitials = user?.fullName
+    .split(' ')
+    .map((n) => n[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2) ?? '?';
 
   const handleWipeData = () => {
     Alert.alert(
@@ -64,7 +74,7 @@ export default function SettingsScreen() {
   const handleSignOut = () => {
     Alert.alert("Sign Out", "Are you sure you want to sign out?", [
       { text: "Cancel", style: "cancel" },
-      { text: "Sign Out", style: "destructive", onPress: () => console.log("Signed out") }
+      { text: "Sign Out", style: "destructive", onPress: () => signOut() }
     ]);
   };
 
@@ -78,13 +88,13 @@ export default function SettingsScreen() {
       <ScrollView className="flex-1 px-6 pt-4" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 60 }}>
         
         {/* User Profile Card */}
-        <View className="mb-6 flex-row items-center rounded-3xl bg-white dark:bg-neutral-900 p-5 shadow-sm shadow-gray-200 dark:shadow-none">
+        <View className="mb-6 flex-row items-center rounded-3xl bg-white dark:bg-neutral-900 p-5">
           <View className="h-16 w-16 items-center justify-center rounded-full bg-primary">
-            <Text className="text-2xl font-bold text-white">MA</Text>
+            <Text className="text-2xl font-bold text-white">{userInitials}</Text>
           </View>
           <View className="ml-4 flex-1">
-            <Text className="text-xl font-bold text-gray-900 dark:text-white">Muhammad Aliyan</Text>
-            <Text className="text-sm text-gray-500 dark:text-neutral-400 mt-0.5">aliyan@example.com</Text>
+            <Text className="text-xl font-bold text-gray-900 dark:text-white">{user?.fullName ?? '—'}</Text>
+            <Text className="text-sm text-gray-500 dark:text-neutral-400 mt-0.5">{user?.email ?? '—'}</Text>
           </View>
         </View>
 

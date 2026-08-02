@@ -1,8 +1,8 @@
 import React from 'react';
-import { Pressable, Text, ActivityIndicator, PressableProps } from 'react-native';
+import { TouchableOpacity, Text, ActivityIndicator, TouchableOpacityProps } from 'react-native';
 import * as Haptics from 'expo-haptics';
 
-interface ButtonProps extends PressableProps {
+interface ButtonProps extends TouchableOpacityProps {
   title: string;
   isLoading?: boolean;
 }
@@ -11,7 +11,7 @@ export const Button: React.FC<ButtonProps> = ({ title, isLoading, disabled, ...p
   const isDisabled = disabled || isLoading;
 
   return (
-    <Pressable
+    <TouchableOpacity
       className={`w-full flex-row items-center justify-center rounded-xl py-3.5 
         ${isDisabled ? 'bg-primary/60' : 'bg-primary active:bg-primary/90'}
       `}
@@ -30,6 +30,6 @@ export const Button: React.FC<ButtonProps> = ({ title, isLoading, disabled, ...p
       <Text className="text-center text-base font-semibold text-white">
         {title}
       </Text>
-    </Pressable>
+    </TouchableOpacity>
   );
 };
