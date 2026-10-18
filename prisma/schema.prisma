@@ -1,28 +1,44 @@
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["reactNative"]
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
 }
 
 model Transaction {
   id        String   @id @default(uuid())
-  amount    Float
+  ownerId   String
+  amount    Decimal  @db.Decimal(19, 2)
+  amountMinor BigInt?
   type      String   @default("Expense")
   category  String
   accountId String?
+  toAccountId String?
   note      String?
+  sourceName String?
+  paymentMethod String?
+  sourceAmountMinor BigInt?
+  sourceCurrency String?
+  exchangeRate String?
+  referenceNumber String?
+  taxStatus String @default("unreviewed")
+  taxYear Int?
   date      DateTime @default(now())
   synced    Boolean  @default(false)
+
+  @@index([ownerId, date])
 }
 
 model Account {
   id        String   @id @default(uuid())
+  ownerId   String
   name      String
   type      String   @default("Bank")
-  balance   Float    @default(0)
+  balance   Decimal  @default(0) @db.Decimal(19, 2)
   createdAt DateTime @default(now())
   synced    Boolean  @default(false)
+
+  @@index([ownerId])
 }

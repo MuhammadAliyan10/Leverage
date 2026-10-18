@@ -2,15 +2,16 @@ import React, { useState } from 'react';
 import { View, Text, ScrollView, Pressable, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
-import { Bell, ShoppingCart, Coffee, Car, DollarSign } from 'lucide-react-native';
+import { Bell, ShoppingCart, Coffee, Car, DollarSign, ArrowLeftRight } from 'lucide-react-native';
 import { BarChart } from 'react-native-gifted-charts';
 import { useDashboardMetrics } from '../../hooks/queries/useDashboardMetrics';
+import { formatMinorUnits } from '../../src/finance/ledger';
 
 type FilterType = 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
 
 export default function DashboardScreen() {
   const [filter, setFilter] = useState<FilterType>('Weekly');
-  const { data: metrics, isLoading } = useDashboardMetrics();
+  const { data: metrics, isLoading, isError } = useDashboardMetrics();
 
   const chartData = metrics?.chartData[filter] || [];
   const transactions = metrics?.transactions || [];
@@ -19,6 +20,15 @@ export default function DashboardScreen() {
     return (
       <SafeAreaView className="flex-1 bg-white items-center justify-center">
         <Text>Loading Dashboard...</Text>
+      </SafeAreaView>
+    );
+  }
+
+  if (isError || !metrics) {
+    return (
+      <SafeAreaView className="flex-1 bg-white items-center justify-center px-8">
+        <Text className="text-center text-base font-semibold text-gray-800">We couldn’t calculate your summary.</Text>
+        <Text className="mt-2 text-center text-sm text-gray-500">Your saved records have not been changed. Reopen the app and try again.</Text>
       </SafeAreaView>
     );
   }
@@ -34,24 +44,33 @@ export default function DashboardScreen() {
       
       <ScrollView className="flex-1 px-6" showsVerticalScrollIndicator={false}>
         
-        {/* Total Balance Card */}
+        {/* Period summary. Account balances belong in the future balance-sheet view. */}
         <View className="mt-2 w-full overflow-hidden rounded-3xl bg-primary p-6 shadow-xl shadow-primary/40 relative">
-          {/* Subtle Background Pattern Mock using Absolute Elements */}
           <View className="absolute -right-8 -top-8 h-32 w-32 rounded-full bg-white opacity-10" />
           <View className="absolute -bottom-10 -left-10 h-40 w-40 rounded-full bg-white opacity-5" />
           
-          <Text className="text-sm font-medium text-white/80">Total Balance</Text>
-          <Text className="mt-2 text-4xl font-bold tracking-tight text-white">₨ {metrics?.totalBalance?.toLocaleString() || 0}</Text>
-          <View className="mt-4 flex-row items-center">
-            <View className="rounded-full bg-white/20 px-3 py-1">
-              <Text className="text-xs font-semibold text-white">+ ₨ 12,000 this month</Text>
+          <Text className="text-sm font-medium text-white/80">This month · {metrics?.monthLabel ?? ''}</Text>
+          <View className="mt-5 flex-row justify-between">
+            <View>
+              <Text className="text-xs font-medium text-white/75">Money in</Text>
+              <Text className="mt-1 text-xl font-bold text-white">{formatMinorUnits(metrics?.incomeMinor ?? 0)}</Text>
+              <Text className="mt-1 text-[10px] text-white/70">Includes gifts and other receipts, not only earnings</Text>
             </View>
+            <View className="ml-3">
+              <Text className="text-xs font-medium text-white/75">Money out</Text>
+              <Text className="mt-1 text-xl font-bold text-white">{formatMinorUnits(metrics?.expenseMinor ?? 0)}</Text>
+            </View>
+          </View>
+          <View className="mt-4 border-t border-white/20 pt-3">
+            <Text className="text-xs font-medium text-white/75">Net change from recorded money in and out</Text>
+            <Text className="mt-1 text-lg font-bold text-white">{formatMinorUnits(metrics?.netMinor ?? 0)}</Text>
           </View>
         </View>
 
         {/* Expense Analytics Section */}
         <View className="mt-8 mb-2">
-          <Text className="text-xl font-bold text-black mb-4">Expense Analytics</Text>
+            <Text className="text-xl font-bold text-black mb-1">Spending over time</Text>
+            <Text className="text-sm text-gray-500 mb-4">Expenses only. Moving money between your own accounts is not spending.</Text>
           
           {/* Segmented Control */}
           <View className="flex-row rounded-xl bg-gray-100 p-1 mb-6">
@@ -114,21 +133,22 @@ export default function DashboardScreen() {
               transactions.map((tx: any) => {
                 // Determine icon mapping inside UI for now
                 const isIncome = tx.type === 'Income';
-                const Icon = isIncome ? DollarSign : ShoppingCart; 
+                const isTransfer = tx.type === 'Transfer';
+                const Icon = isIncome ? DollarSign : isTransfer ? ArrowLeftRight : ShoppingCart;
                 
                 return (
                   <View key={tx.id} className="flex-row items-center justify-between rounded-2xl bg-gray-50 p-4">
                     <View className="flex-row items-center">
-                      <View className={`h-12 w-12 items-center justify-center rounded-full ${isIncome ? 'bg-green-100' : 'bg-red-100'}`}>
-                        <Icon size={24} color={isIncome ? '#16a34a' : '#dc2626'} />
+                      <View className={`h-12 w-12 items-center justify-center rounded-full ${isIncome ? 'bg-green-100' : isTransfer ? 'bg-blue-100' : 'bg-red-100'}`}>
+                        <Icon size={24} color={isIncome ? '#16a34a' : isTransfer ? '#2563eb' : '#dc2626'} />
                       </View>
                       <View className="ml-4">
                         <Text className="text-base font-bold text-black">{tx.category}</Text>
                         <Text className="text-xs text-gray-500 mt-1">{new Date(tx.date).toLocaleDateString()}</Text>
                       </View>
                     </View>
-                    <Text className={`text-base font-bold ${isIncome ? 'text-green-600' : 'text-red-600'}`}>
-                      {isIncome ? '+' : '-'} ₨ {Math.abs(tx.amount).toLocaleString()}
+                    <Text className={`text-base font-bold ${isIncome ? 'text-green-600' : isTransfer ? 'text-blue-600' : 'text-red-600'}`}>
+                      {isIncome ? '+' : isTransfer ? '↔' : '-'} {formatMinorUnits(tx.amountMinor)}
                     </Text>
                   </View>
                 );

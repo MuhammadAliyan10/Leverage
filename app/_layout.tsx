@@ -58,7 +58,7 @@ function RootNavigator() {
     if (user && segments[0] === '(tabs)') {
       (async () => {
         try {
-          const accountCount = await localDb.account.count();
+          const accountCount = await localDb.account.count(user.id);
           if (accountCount === 0) {
             router.replace('/onboarding');
           }

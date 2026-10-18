@@ -61,14 +61,7 @@ export default function SettingsScreen() {
     .slice(0, 2) ?? '?';
 
   const handleWipeData = () => {
-    Alert.alert(
-      "Wipe Local Data",
-      "Are you sure you want to delete all local data? This action cannot be undone.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Wipe Data", style: "destructive", onPress: () => console.log("Data wiped") }
-      ]
-    );
+    Alert.alert('Wipe unavailable', 'Local data deletion is not available yet. No records have been changed.');
   };
 
   const handleSignOut = () => {
@@ -107,7 +100,7 @@ export default function SettingsScreen() {
               icon={Building2} 
               title="Manage Accounts" 
               showChevron 
-              onPress={() => console.log('Navigate to Manage Accounts')} 
+              onPress={() => Alert.alert('Account management unavailable', 'You can add your first account during setup. Account editing is not available yet.')}
             />
             <SettingRow 
               icon={Target} 
@@ -148,15 +141,14 @@ export default function SettingsScreen() {
               icon={CloudSync} 
               title="Cloud Sync" 
               rightComponent={
-                <Text className="text-sm text-gray-500 dark:text-neutral-400">Synced 2 mins ago</Text>
+                <Text className="text-sm text-gray-500 dark:text-neutral-400">Local only</Text>
               }
-              onPress={() => console.log("Manual Sync Triggered")}
             />
             <SettingRow 
               icon={FileText} 
               title="Export Data" 
               showChevron 
-              onPress={() => console.log('Export CSV')} 
+              onPress={() => Alert.alert('Export unavailable', 'Export is not available yet. Your local records remain on this device.')}
             />
           </View>
 

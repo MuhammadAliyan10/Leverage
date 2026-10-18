@@ -6,6 +6,7 @@ node_modules/
 # Expo
 .expo/
 dist/
+build/
 web-build/
 expo-env.d.ts
 
@@ -25,14 +26,17 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+*.log
 
 # macOS
 .DS_Store
 *.pem
 
-# Environment variables
-.env
-.env*.local
+# Environment variables and local secrets
+.env*
+!.env.example
+!.env.template
+.secrets/
 
 # typescript
 *.tsbuildinfo
@@ -44,9 +48,12 @@ yarn-error.*
 # Prisma
 /src/generated/prisma
 prisma/*.db
-prisma/*.db-journal
 *.db
-*.db-journal
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 
 # NativeWind
 .nativewind/
@@ -54,3 +61,5 @@ prisma/*.db-journal
 # Misc
 example/
 .vercel
+coverage/
+.turbo/

@@ -2,17 +2,25 @@ import React, { useState, useRef, useMemo, useCallback } from 'react';
 import { View, Text, SectionList, TextInput, Pressable, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
-import { Filter, Search, ShoppingCart, DollarSign, Edit, Trash2 } from 'lucide-react-native';
+import { Filter, Search, ShoppingCart, DollarSign, Edit, Trash2, ArrowLeftRight } from 'lucide-react-native';
 import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { useTransactions } from '../../hooks/queries/useTransactions';
+import { formatMinorUnits } from '../../src/finance/ledger';
 
 interface Transaction {
   id: string;
-  amount: number;
-  type: 'income' | 'expense';
+  amountMinor: number;
+  type: 'Income' | 'Expense' | 'Transfer';
   category: string;
   date: string;
   note: string;
+  sourceName?: string | null;
+  paymentMethod?: string | null;
+  sourceAmountMinor?: number | null;
+  sourceCurrency?: string | null;
+  exchangeRate?: string | null;
+  referenceNumber?: string | null;
+  taxStatus?: 'unreviewed' | 'taxable' | 'non_taxable';
   icon: any;
 }
 
@@ -21,7 +29,13 @@ export default function TransactionsScreen() {
   const [isFocused, setIsFocused] = useState(false);
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
 
-  const { data: groupedTransactions = [], isLoading } = useTransactions();
+  const { data: groupedTransactions = [], isLoading, isError } = useTransactions();
+  const filteredTransactions = groupedTransactions.map((section: any) => ({
+    ...section,
+    data: section.data.filter((tx: Transaction) =>
+      `${tx.category} ${tx.note}`.toLowerCase().includes(searchQuery.trim().toLowerCase())
+    ),
+  })).filter((section: any) => section.data.length > 0);
 
   // Bottom Sheet Configuration
   const bottomSheetRef = useRef<BottomSheet>(null);
@@ -49,24 +63,14 @@ export default function TransactionsScreen() {
 
   const handleEdit = () => {
     handleClosePress();
-    console.log("Edit Transaction", selectedTx?.id);
+    Alert.alert('Editing unavailable', 'Transaction editing is not available yet.');
   };
 
   const handleDelete = () => {
     Alert.alert(
       "Delete Transaction",
-      "Are you sure you want to delete this transaction?",
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "Delete", 
-          style: "destructive",
-          onPress: () => {
-            console.log("Deleted Transaction", selectedTx?.id);
-            handleClosePress();
-          }
-        }
-      ]
+      "Transaction deletion is not available yet. No records have been changed.",
+      [{ text: "OK", onPress: handleClosePress }]
     );
   };
 
@@ -105,10 +109,15 @@ export default function TransactionsScreen() {
         </View>
       ) : (
         <SectionList
-          sections={groupedTransactions as any}
+          sections={filteredTransactions as any}
           keyExtractor={(item: any) => item.id}
           stickySectionHeadersEnabled={false}
           contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: 40 }}
+          ListEmptyComponent={(
+            <Text className="mt-8 text-center text-sm text-gray-500">
+              {isError ? 'Your transactions could not be loaded.' : searchQuery ? 'No transactions match your search.' : 'No transactions recorded yet.'}
+            </Text>
+          )}
           renderSectionHeader={({ section: { title } }) => (
             <View className="mb-3 mt-6 rounded-lg bg-gray-100 px-3 py-1.5 self-start">
               <Text className="text-sm font-bold text-gray-700">{title}</Text>
@@ -116,7 +125,8 @@ export default function TransactionsScreen() {
           )}
           renderItem={({ item }) => {
             const isIncome = item.type === 'Income';
-            const Icon = isIncome ? DollarSign : ShoppingCart;
+            const isTransfer = item.type === 'Transfer';
+            const Icon = isIncome ? DollarSign : isTransfer ? ArrowLeftRight : ShoppingCart;
 
             return (
               <Pressable 
@@ -124,17 +134,17 @@ export default function TransactionsScreen() {
                 onPress={() => handlePresentModalPress(item as any)}
               >
                 <View className="flex-row items-center flex-1">
-                  <View className={`h-12 w-12 items-center justify-center rounded-full ${isIncome ? 'bg-green-100' : 'bg-red-100'}`}>
-                    <Icon size={24} color={isIncome ? '#16a34a' : '#dc2626'} />
+                  <View className={`h-12 w-12 items-center justify-center rounded-full ${isIncome ? 'bg-green-100' : isTransfer ? 'bg-blue-100' : 'bg-red-100'}`}>
+                    <Icon size={24} color={isIncome ? '#16a34a' : isTransfer ? '#2563eb' : '#dc2626'} />
                   </View>
                   <View className="ml-4 flex-1">
                     <Text className="text-base font-bold text-black" numberOfLines={1}>{item.category}</Text>
-                    <Text className="text-sm text-gray-500 mt-0.5" numberOfLines={1}>{item.note}</Text>
+                    <Text className="text-sm text-gray-500 mt-0.5" numberOfLines={1}>{item.sourceName || item.note}</Text>
                   </View>
                 </View>
                 <View className="items-end pl-2">
-                  <Text className={`text-base font-bold ${isIncome ? 'text-green-600' : 'text-red-600'}`}>
-                    {isIncome ? '+' : '-'} ₨ {Math.abs(item.amount).toLocaleString()}
+                  <Text className={`text-base font-bold ${isIncome ? 'text-green-600' : isTransfer ? 'text-blue-600' : 'text-red-600'}`}>
+                    {isIncome ? '+' : isTransfer ? '↔' : '-'} {formatMinorUnits(item.amountMinor)}
                   </Text>
                   <Text className="text-xs text-gray-400 mt-0.5">{new Date(item.date).toLocaleDateString()}</Text>
                 </View>
@@ -157,10 +167,14 @@ export default function TransactionsScreen() {
           <View className="flex-1 px-6 pt-2">
             <View className="items-center mb-8">
               <Text className="text-gray-500 mb-1">{selectedTx.category} • {selectedTx.date}</Text>
-              <Text className={`text-4xl font-bold ${selectedTx.type === 'income' ? 'text-green-600' : 'text-red-600'}`}>
-                {selectedTx.type === 'income' ? '+' : '-'} ₨ {Math.abs(selectedTx.amount).toLocaleString()}
+              <Text className={`text-4xl font-bold ${selectedTx.type === 'Income' ? 'text-green-600' : selectedTx.type === 'Transfer' ? 'text-blue-600' : 'text-red-600'}`}>
+                {selectedTx.type === 'Income' ? '+' : selectedTx.type === 'Transfer' ? '↔' : '-'} {formatMinorUnits(selectedTx.amountMinor)}
               </Text>
-              <Text className="text-base text-gray-700 mt-2 text-center">{selectedTx.note}</Text>
+              <Text className="text-base text-gray-700 mt-2 text-center">{selectedTx.sourceName || selectedTx.note}</Text>
+              {!!selectedTx.paymentMethod && <Text className="mt-1 text-sm text-gray-500">Received by {selectedTx.paymentMethod}</Text>}
+              {!!selectedTx.sourceAmountMinor && !!selectedTx.sourceCurrency && <Text className="mt-1 text-sm text-gray-600">Original: {formatMinorUnits(selectedTx.sourceAmountMinor, selectedTx.sourceCurrency)} · Rate: PKR {selectedTx.exchangeRate}</Text>}
+              {!!selectedTx.referenceNumber && <Text className="mt-1 text-sm text-gray-600">Reference: {selectedTx.referenceNumber}</Text>}
+              {selectedTx.type === 'Income' && <Text className="mt-1 text-sm text-gray-600">Tax record: {selectedTx.taxStatus === 'taxable' ? 'Taxable' : selectedTx.taxStatus === 'non_taxable' ? 'Marked non-taxable' : 'Not reviewed'}</Text>}
             </View>
 
             <Pressable 

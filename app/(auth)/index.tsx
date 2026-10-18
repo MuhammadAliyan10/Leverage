@@ -97,7 +97,7 @@ export default function AuthScreen() {
             </View>
             <Text className="text-3xl font-bold text-black">HouseLog</Text>
             <Text className="mt-2 text-center text-gray-500">
-              Manage your finances offline and sync seamlessly to the cloud.
+              Your records stay on this device. Cloud sync is not available yet.
             </Text>
           </View>
 

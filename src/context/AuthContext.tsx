@@ -27,6 +27,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const storedId = await SecureStore.getItemAsync(SESSION_KEY);
         if (storedId) {
           const found = await localDb.user.findById(storedId);
+          if (found) await localDb.user.claimLegacyData(found.id);
           setUser(found);
         }
       } catch {
@@ -41,6 +42,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signIn = useCallback(async (email: string, password: string) => {
     const result = await localDb.user.signIn(email, password);
     if (result.success) {
+      await localDb.user.claimLegacyData(result.user.id);
       await SecureStore.setItemAsync(SESSION_KEY, result.user.id);
       setUser(result.user);
       return { success: true };
@@ -51,6 +53,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signUp = useCallback(async (fullName: string, email: string, password: string) => {
     const result = await localDb.user.register(fullName, email, password);
     if (result.success) {
+      await localDb.user.claimLegacyData(result.user.id);
       await SecureStore.setItemAsync(SESSION_KEY, result.user.id);
       setUser(result.user);
       return { success: true };

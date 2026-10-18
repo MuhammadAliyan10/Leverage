@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, ScrollView, TextInput, Pressable } from 'react-native';
+import { Alert, View, Text, ScrollView, TextInput, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../components/ui/GlobalHeader';
 import { Button } from '../components/ui/Button';
@@ -21,9 +21,7 @@ export default function BudgetsScreen() {
   );
 
   const handleSave = () => {
-    console.log("Saving limits", limits);
-    // Persist to localDb logic goes here...
-    router.back();
+    Alert.alert('Budgets are not saved yet', 'Budget editing is a preview. Your limits have not been stored.');
   };
 
   return (

@@ -8,17 +8,28 @@ import { useRouter } from 'expo-router';
 import { Input } from '../components/ui/Input';
 import { Button } from '../components/ui/Button';
 import { localDb } from '../src/db/local/client';
+import { parseMinorUnits } from '../src/finance/ledger';
+import { useAuth } from '../src/context/AuthContext';
 
 const onboardingSchema = z.object({
   name: z.string().min(2, 'Account name must be at least 2 characters'),
   type: z.string().min(2, 'Account type is required'),
-  balance: z.string().refine((val) => !isNaN(Number(val)), 'Must be a valid number'),
+  balance: z.string().refine((value) => {
+    if (/^0+(?:\.0+)?$/.test(value.trim())) return true;
+    try {
+      parseMinorUnits(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }, 'Enter a valid amount with up to two decimal places'),
 });
 
 type OnboardingFormData = z.infer<typeof onboardingSchema>;
 
 export default function OnboardingScreen() {
   const router = useRouter();
+  const { user } = useAuth();
 
   const {
     control,
@@ -36,9 +47,11 @@ export default function OnboardingScreen() {
     try {
       await localDb.account.create({
         data: {
+          ownerId: user!.id,
           name: data.name,
           type: data.type,
-          balance: parseFloat(data.balance),
+          balanceMinor: /^0+(?:\.0+)?$/.test(data.balance.trim()) ? 0 : parseMinorUnits(data.balance),
+          currency: 'PKR',
         },
       });
       router.replace('/(tabs)');
