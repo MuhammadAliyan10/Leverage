@@ -3,45 +3,42 @@ import { View, Text, SectionList, TextInput, Pressable, Alert } from 'react-nati
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { Filter, Search, ShoppingCart, DollarSign, Edit, Trash2, ArrowLeftRight } from 'lucide-react-native';
-import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
-import { useTransactions } from '../../hooks/queries/useTransactions';
+import BottomSheet, { BottomSheetBackdrop, type BottomSheetBackdropProps } from '@gorhom/bottom-sheet';
+import { useTransactions, type TransactionSection } from '../../hooks/queries/useTransactions';
+import type { LocalTransaction } from '../../src/db/local/client';
 import { formatMinorUnits } from '../../src/finance/ledger';
-
-interface Transaction {
-  id: string;
-  amountMinor: number;
-  type: 'Income' | 'Expense' | 'Transfer';
-  category: string;
-  date: string;
-  note: string;
-  sourceName?: string | null;
-  paymentMethod?: string | null;
-  sourceAmountMinor?: number | null;
-  sourceCurrency?: string | null;
-  exchangeRate?: string | null;
-  referenceNumber?: string | null;
-  taxStatus?: 'unreviewed' | 'taxable' | 'non_taxable';
-  icon: any;
-}
+import { localDb } from '../../src/db/local/client';
+import { useAuth } from '../../src/context/AuthContext';
+import { useQueryClient } from '@tanstack/react-query';
+import * as Crypto from 'expo-crypto';
+import { useRouter } from 'expo-router';
 
 export default function TransactionsScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isFocused, setIsFocused] = useState(false);
-  const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+  const [selectedTx, setSelectedTx] = useState<LocalTransaction | null>(null);
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const router = useRouter();
 
-  const { data: groupedTransactions = [], isLoading, isError } = useTransactions();
-  const filteredTransactions = groupedTransactions.map((section: any) => ({
+  const { data: groupedTransactions = [], isLoading, isError, hasNextPage, isFetchingNextPage, fetchNextPage } = useTransactions();
+  const filteredTransactions: TransactionSection[] = groupedTransactions.map((section) => ({
     ...section,
-    data: section.data.filter((tx: Transaction) =>
+    data: section.data.filter((tx) =>
       `${tx.category} ${tx.note}`.toLowerCase().includes(searchQuery.trim().toLowerCase())
     ),
-  })).filter((section: any) => section.data.length > 0);
+  })).filter((section) => section.data.length > 0);
+  const selectedOriginalType = selectedTx?.reversalOfId
+    ? groupedTransactions.flatMap((section) => section.data).find((tx) => tx.id === selectedTx.reversalOfId)?.type
+    : undefined;
+  const selectedIsIncome = selectedTx?.type === 'Income' || selectedTx?.type === 'Refund' || (selectedTx?.type === 'Reversal' && selectedOriginalType === 'Expense');
+  const selectedIsTransfer = selectedTx?.type === 'Transfer' || (selectedTx?.type === 'Reversal' && selectedOriginalType === 'Transfer');
 
   // Bottom Sheet Configuration
   const bottomSheetRef = useRef<BottomSheet>(null);
   const snapPoints = useMemo(() => ['40%'], []);
   
-  const handlePresentModalPress = useCallback((tx: Transaction) => {
+  const handlePresentModalPress = useCallback((tx: LocalTransaction) => {
     setSelectedTx(tx);
     bottomSheetRef.current?.expand();
   }, []);
@@ -51,7 +48,7 @@ export default function TransactionsScreen() {
   }, []);
 
   const renderBackdrop = useCallback(
-    (props: any) => (
+    (props: BottomSheetBackdropProps) => (
       <BottomSheetBackdrop
         {...props}
         disappearsOnIndex={-1}
@@ -63,7 +60,11 @@ export default function TransactionsScreen() {
 
   const handleEdit = () => {
     handleClosePress();
-    Alert.alert('Editing unavailable', 'Transaction editing is not available yet.');
+    if (!selectedTx || selectedTx.type === 'Refund' || selectedTx.type === 'Reversal') {
+      Alert.alert('Correction unavailable', 'This adjustment record cannot be edited again.');
+      return;
+    }
+    router.push({ pathname: '/(tabs)/add', params: { correctionOf: selectedTx.id } });
   };
 
   const handleDelete = () => {
@@ -72,6 +73,28 @@ export default function TransactionsScreen() {
       "Transaction deletion is not available yet. No records have been changed.",
       [{ text: "OK", onPress: handleClosePress }]
     );
+  };
+
+  const handleRefund = () => {
+    if (!selectedTx || !user || !selectedTx.accountId) return;
+    Alert.alert('Record refund', 'Record any remaining refundable balance into the original account?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Record refund', onPress: () => {
+        void localDb.transaction.refund({
+          id: Crypto.randomUUID(), ownerId: user.id, originalTransactionId: selectedTx.id,
+          accountId: selectedTx.accountId!, refundRemaining: true,
+          date: new Date(), note: `Refund for ${selectedTx.category}`,
+        }).then(() => {
+          void Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+            queryClient.invalidateQueries({ queryKey: ['financial-report', user.id] }),
+            queryClient.invalidateQueries({ queryKey: ['transactions'] }),
+            queryClient.invalidateQueries({ queryKey: ['accounts', user.id] }),
+          ]);
+          handleClosePress();
+        }).catch((error) => Alert.alert('Refund not saved', error instanceof Error ? error.message : 'Please try again.'));
+      } },
+    ]);
   };
 
   return (
@@ -108,9 +131,12 @@ export default function TransactionsScreen() {
           <Text>Loading transactions...</Text>
         </View>
       ) : (
-        <SectionList
-          sections={filteredTransactions as any}
-          keyExtractor={(item: any) => item.id}
+        <SectionList<LocalTransaction, TransactionSection>
+          sections={filteredTransactions}
+          onEndReached={() => { if (hasNextPage && !isFetchingNextPage) void fetchNextPage(); }}
+          onEndReachedThreshold={0.4}
+          ListFooterComponent={isFetchingNextPage ? <Text className="py-4 text-center text-sm text-gray-500">Loading more transactions…</Text> : null}
+          keyExtractor={(item) => item.id}
           stickySectionHeadersEnabled={false}
           contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: 40 }}
           ListEmptyComponent={(
@@ -124,14 +150,15 @@ export default function TransactionsScreen() {
             </View>
           )}
           renderItem={({ item }) => {
-            const isIncome = item.type === 'Income';
-            const isTransfer = item.type === 'Transfer';
+            const linkedType = item.reversalOfId ? groupedTransactions.flatMap((section) => section.data).find((tx) => tx.id === item.reversalOfId)?.type : undefined;
+            const isIncome = item.type === 'Income' || item.type === 'Refund' || (item.type === 'Reversal' && linkedType === 'Expense');
+            const isTransfer = item.type === 'Transfer' || (item.type === 'Reversal' && linkedType === 'Transfer');
             const Icon = isIncome ? DollarSign : isTransfer ? ArrowLeftRight : ShoppingCart;
 
             return (
               <Pressable 
                 className="mb-4 flex-row items-center justify-between rounded-2xl bg-gray-50 p-4 active:bg-gray-100"
-                onPress={() => handlePresentModalPress(item as any)}
+                onPress={() => handlePresentModalPress(item)}
               >
                 <View className="flex-row items-center flex-1">
                   <View className={`h-12 w-12 items-center justify-center rounded-full ${isIncome ? 'bg-green-100' : isTransfer ? 'bg-blue-100' : 'bg-red-100'}`}>
@@ -144,7 +171,7 @@ export default function TransactionsScreen() {
                 </View>
                 <View className="items-end pl-2">
                   <Text className={`text-base font-bold ${isIncome ? 'text-green-600' : isTransfer ? 'text-blue-600' : 'text-red-600'}`}>
-                    {isIncome ? '+' : isTransfer ? '↔' : '-'} {formatMinorUnits(item.amountMinor)}
+                    {isIncome ? '+' : isTransfer ? '↔' : '-'} {formatMinorUnits(item.amountMinor, item.accountCurrency ?? 'PKR')}
                   </Text>
                   <Text className="text-xs text-gray-400 mt-0.5">{new Date(item.date).toLocaleDateString()}</Text>
                 </View>
@@ -167,8 +194,8 @@ export default function TransactionsScreen() {
           <View className="flex-1 px-6 pt-2">
             <View className="items-center mb-8">
               <Text className="text-gray-500 mb-1">{selectedTx.category} • {selectedTx.date}</Text>
-              <Text className={`text-4xl font-bold ${selectedTx.type === 'Income' ? 'text-green-600' : selectedTx.type === 'Transfer' ? 'text-blue-600' : 'text-red-600'}`}>
-                {selectedTx.type === 'Income' ? '+' : selectedTx.type === 'Transfer' ? '↔' : '-'} {formatMinorUnits(selectedTx.amountMinor)}
+              <Text className={`text-4xl font-bold ${selectedIsIncome ? 'text-green-600' : selectedIsTransfer ? 'text-blue-600' : 'text-red-600'}`}>
+                {selectedIsIncome ? '+' : selectedIsTransfer ? '↔' : '-'} {formatMinorUnits(selectedTx.amountMinor, selectedTx.accountCurrency ?? 'PKR')}
               </Text>
               <Text className="text-base text-gray-700 mt-2 text-center">{selectedTx.sourceName || selectedTx.note}</Text>
               {!!selectedTx.paymentMethod && <Text className="mt-1 text-sm text-gray-500">Received by {selectedTx.paymentMethod}</Text>}
@@ -184,6 +211,12 @@ export default function TransactionsScreen() {
               <Edit size={20} color="#ffffff" className="mr-2" />
               <Text className="text-base font-bold text-white">Edit Transaction</Text>
             </Pressable>
+
+            {selectedTx.type === 'Expense' && (
+              <Pressable className="mb-3 items-center justify-center rounded-xl border-2 border-green-600 py-4" onPress={handleRefund}>
+                <Text className="text-base font-bold text-green-700">Refund remaining balance</Text>
+              </Pressable>
+            )}
 
             <Pressable 
               className="flex-row items-center justify-center rounded-xl border-2 border-red-500 py-4"

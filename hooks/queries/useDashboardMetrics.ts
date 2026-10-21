@@ -1,36 +1,16 @@
 import { useQuery } from '@tanstack/react-query';
 import { localDb } from '../../src/db/local/client';
 import { useAuth } from '../../src/context/AuthContext';
-
-type Transaction = {
-  id: string;
-  amountMinor: number;
-  type: 'Income' | 'Expense' | 'Transfer';
-  category: string;
-  accountId: string | null;
-  date: string;
-  note: string;
-};
+import { calculateFinancialReport, type FinancialReportRow } from '../../src/finance/reporting';
 
 type ChartPoint = { value: number; label: string };
 type ChartPeriod = 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
-
-function sumMinorUnits(values: number[]): number {
-  const sum = values.reduce((total, value) => {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error('A saved transaction has an invalid amount.');
-    }
-    return total + BigInt(value);
-  }, 0n);
-  if (sum > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Financial total is out of range.');
-  return Number(sum);
-}
 
 function monthStart(date: Date, offset: number): Date {
   return new Date(date.getFullYear(), date.getMonth() + offset, 1);
 }
 
-function expenseChart(transactions: Transaction[], period: ChartPeriod, today: Date): ChartPoint[] {
+function expenseChart(transactions: FinancialReportRow[], period: ChartPeriod, today: Date): ChartPoint[] {
   const bucketDates: Date[] = [];
   const labels: string[] = [];
 
@@ -71,18 +51,11 @@ function expenseChart(transactions: Transaction[], period: ChartPeriod, today: D
         : period === 'Monthly'
           ? monthStart(start, 1)
           : new Date(start.getFullYear() + 1, 0, 1);
-    const minor = sumMinorUnits(
-      transactions
-        .filter((tx) => tx.type === 'Expense')
-        .filter((tx) => {
-          const date = new Date(tx.date);
-          if (Number.isNaN(date.getTime())) throw new Error('A transaction has an invalid date.');
-          return date >= start && date < next;
-        })
-        .map((tx) => tx.amountMinor),
-    );
+    const total = calculateFinancialReport(transactions, 'PKR', {
+      startDate: start.toISOString(), endDate: next.toISOString(),
+    }).expenseMinor;
     // The chart library takes display values as numbers. Financial totals remain integer minor units.
-    return { value: minor / 100, label: labels[index] };
+    return { value: Math.max(0, total) / 100, label: labels[index] };
   });
 }
 
@@ -92,32 +65,25 @@ export function useDashboardMetrics() {
     queryKey: ['dashboard', 'metrics', user?.id],
     enabled: !!user,
     queryFn: async () => {
-      const transactions = await localDb.transaction.findMany({
-        ownerId: user!.id,
-        orderBy: { date: 'desc' },
-      }) as Transaction[];
+      if (!user) throw new Error('Sign in to view the dashboard.');
       const today = new Date();
-      const currentMonth = transactions.filter((tx) => {
-        const date = new Date(tx.date);
-        if (Number.isNaN(date.getTime())) throw new Error('A transaction has an invalid date.');
-        return date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth();
+      const reportStart = new Date(today.getFullYear() - 4, 0, 1);
+      const reportEnd = new Date(today.getFullYear() + 1, 0, 1);
+      const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+      const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+      const [transactions, recentTransactions] = await Promise.all([
+        localDb.transaction.findReportRows({ ownerId: user.id, startDate: reportStart.toISOString(), endDate: reportEnd.toISOString() }),
+        localDb.transaction.findMany({ ownerId: user.id, orderBy: { date: 'desc' }, take: 4 }),
+      ]);
+      const monthReport = calculateFinancialReport(transactions, 'PKR', {
+        startDate: monthStart.toISOString(), endDate: nextMonth.toISOString(),
       });
 
-      const incomeMinor = sumMinorUnits(
-        currentMonth.filter((tx) => tx.type === 'Income').map((tx) => tx.amountMinor),
-      );
-      const expenseMinor = sumMinorUnits(
-        currentMonth.filter((tx) => tx.type === 'Expense').map((tx) => tx.amountMinor),
-      );
-      const netMinorBigInt = BigInt(incomeMinor) - BigInt(expenseMinor);
-      if (netMinorBigInt > BigInt(Number.MAX_SAFE_INTEGER) || netMinorBigInt < BigInt(Number.MIN_SAFE_INTEGER)) {
-        throw new Error('Monthly net amount is out of range.');
-      }
-
       return {
-        incomeMinor,
-        expenseMinor,
-        netMinor: Number(netMinorBigInt),
+        incomeMinor: monthReport.incomeMinor,
+        expenseMinor: monthReport.expenseMinor,
+        netMinor: monthReport.netMinor,
+        excludedCurrencies: monthReport.excludedCurrencies,
         monthLabel: today.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }),
         chartData: {
           Daily: expenseChart(transactions, 'Daily', today),
@@ -125,7 +91,7 @@ export function useDashboardMetrics() {
           Monthly: expenseChart(transactions, 'Monthly', today),
           Yearly: expenseChart(transactions, 'Yearly', today),
         },
-        transactions: transactions.slice(0, 4),
+        transactions: recentTransactions,
       };
     },
   });

@@ -10,10 +10,11 @@ import { Button } from '../components/ui/Button';
 import { localDb } from '../src/db/local/client';
 import { parseMinorUnits } from '../src/finance/ledger';
 import { useAuth } from '../src/context/AuthContext';
+import { normalizeAccountType } from '../src/finance/domain';
 
 const onboardingSchema = z.object({
   name: z.string().min(2, 'Account name must be at least 2 characters'),
-  type: z.string().min(2, 'Account type is required'),
+  type: z.string().refine((value) => normalizeAccountType(value) !== null, 'Choose Cash, Bank, Savings, Mobile wallet, Investment or Other'),
   balance: z.string().refine((value) => {
     if (/^0+(?:\.0+)?$/.test(value.trim())) return true;
     try {
@@ -45,9 +46,10 @@ export default function OnboardingScreen() {
 
   const onSubmit = async (data: OnboardingFormData) => {
     try {
+      if (!user) throw new Error('Sign in before creating an account.');
       await localDb.account.create({
         data: {
-          ownerId: user!.id,
+          ownerId: user.id,
           name: data.name,
           type: data.type,
           balanceMinor: /^0+(?:\.0+)?$/.test(data.balance.trim()) ? 0 : parseMinorUnits(data.balance),
@@ -67,7 +69,7 @@ export default function OnboardingScreen() {
         className="flex-1 justify-center px-6"
       >
         <View className="mb-10 items-center">
-          <Text className="font-fargie text-3xl font-bold text-black text-center">Let's set up your first account.</Text>
+          <Text className="font-fargie text-3xl font-bold text-black text-center">Let&apos;s set up your first account.</Text>
           <Text className="text-gray-500 mt-2 text-center">Create your main account to start tracking your finances.</Text>
         </View>
 
@@ -91,7 +93,7 @@ export default function OnboardingScreen() {
             name="type"
             render={({ field: { onChange, onBlur, value } }) => (
               <Input
-                placeholder="Account Type (e.g. Cash, Bank)"
+                placeholder="Cash, Bank, Savings, Mobile wallet, Investment or Other"
                 onBlur={onBlur}
                 onChangeText={onChange}
                 value={value}

@@ -39,26 +39,24 @@ export function useAppLock(enabled: boolean = true) {
   }, [appState, enabled]);
 
   const unlock = async () => {
-    const hasHardware = await LocalAuthentication.hasHardwareAsync();
-    const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+    try {
+      const securityLevel = await LocalAuthentication.getEnrolledLevelAsync();
+      if (securityLevel === LocalAuthentication.SecurityLevel.NONE) return false;
 
-    if (!hasHardware || !isEnrolled) {
-      // Fallback if no biometrics are set up
-      setIsLocked(false);
-      return true;
-    }
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Unlock Finance App',
+        fallbackLabel: 'Use device passcode',
+        cancelLabel: 'Cancel',
+        disableDeviceFallback: false,
+      });
 
-    const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: 'Unlock Finance App',
-      fallbackLabel: 'Use PIN',
-      cancelLabel: 'Cancel',
-      disableDeviceFallback: false,
-    });
-
-    if (result.success) {
-      setIsLocked(false);
-      backgroundTimeRef.current = Date.now();
-      return true;
+      if (result.success) {
+        setIsLocked(false);
+        backgroundTimeRef.current = Date.now();
+        return true;
+      }
+    } catch {
+      // An unavailable or cancelled authentication never unlocks financial data.
     }
     return false;
   };

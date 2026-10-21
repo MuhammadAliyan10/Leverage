@@ -3,6 +3,7 @@ import { localDb } from '../../src/db/local/client';
 import * as Haptics from 'expo-haptics';
 import Toast from 'react-native-toast-message';
 import { useAuth } from '../../src/context/AuthContext';
+import type { TransactionType } from '../../src/finance/domain';
 
 export function useAddTransaction() {
   const queryClient = useQueryClient();
@@ -10,9 +11,10 @@ export function useAddTransaction() {
 
   return useMutation({
     mutationFn: async (data: {
+      id: string;
       amountMinor: number;
-      type: 'Expense' | 'Income' | 'Transfer';
-      category: string;
+      type: TransactionType;
+      classificationId?: string;
       accountId: string;
       toAccountId?: string;
       note?: string;
@@ -26,12 +28,14 @@ export function useAddTransaction() {
       taxYear?: number;
       date: Date;
     }) => {
+      if (!user) throw new Error('Sign in before recording a transaction.');
       return await localDb.transaction.create({
         data: {
-          ownerId: user!.id,
+          id: data.id,
+          ownerId: user.id,
           amountMinor: data.amountMinor,
           type: data.type,
-          category: data.category,
+          classificationId: data.classificationId,
           accountId: data.accountId,
           toAccountId: data.toAccountId,
           note: data.note,
@@ -49,6 +53,7 @@ export function useAddTransaction() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['financial-report', user?.id] });
       queryClient.invalidateQueries({ queryKey: ['transactions'] });
       queryClient.invalidateQueries({ queryKey: ['accounts', user?.id] });
       

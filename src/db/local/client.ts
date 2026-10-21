@@ -1,385 +1,750 @@
 import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
+import { Platform } from 'react-native';
+import {
+  normalizeAccountDraft,
+  normalizeTransactionDraft,
+  createValidatedTransaction,
+  validateStoredClassification,
+  isCurrencyCode,
+  isPaymentMethod,
+  isTaxStatus,
+  isTransactionType,
+  type AccountDraft,
+  type CurrencyCode,
+  type PaymentMethod,
+  type TaxStatus,
+  type ClassificationId,
+  type TransactionType,
+  type NormalizedTransactionDraft,
+  type TransactionDraft,
+} from '../../finance/domain';
+import { migrateLocalDatabase, type MigrationDatabase } from './migrations';
+import { createLocalWriteQueue } from './writeQueue';
+import { archiveAccount as archiveAccountRecord, editAccount } from '../../finance/accountOperations';
+import { assertCorrectionCanPost, resolveRefundAmount } from '../../finance/transactionOperations';
+import { buildFinancialReportQuery, type FinancialReportRow } from '../../finance/reporting';
+import { buildTransactionPagePredicate } from './queryBuilders';
+import { createBudgetingStore, type BudgetingSql } from './budgetingStore';
+import { createObligationsStore, type ObligationsSql } from './obligationsStore';
+import { derivePasswordHash, verifyAndUpgradePassword } from '../../security/passwordHash';
+
+type SqlExecutor = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getFirstAsync' | 'getAllAsync'>;
 
 let expoDb: SQLite.SQLiteDatabase | null = null;
+let openingDatabase: Promise<SQLite.SQLiteDatabase> | null = null;
+const runSerializedWrite = createLocalWriteQueue();
 
-async function hashPassword(password: string): Promise<string> {
+async function hashLegacyPassword(password: string): Promise<string> {
   return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, password);
 }
 
-async function getDb() {
-  if (expoDb) return expoDb;
+async function hashPassword(password: string): Promise<string> {
+  const salt = await Crypto.getRandomBytesAsync(16);
+  return derivePasswordHash(password, salt);
+}
+
+function asMigrationDatabase(database: SQLite.SQLiteDatabase): MigrationDatabase {
+  return {
+    execAsync: (source) => database.execAsync(source),
+    runAsync: (source, params = []) => database.runAsync(source, [...params]),
+    getFirstAsync: <T>(source: string, params: readonly (string | number | null)[] = []) =>
+      database.getFirstAsync<T>(source, [...params]),
+    getAllAsync: <T>(source: string, params: readonly (string | number | null)[] = []) =>
+      database.getAllAsync<T>(source, [...params]),
+    withTransactionAsync: (task) => database.withTransactionAsync(task),
+  };
+}
+
+async function openAndMigrateDatabase(): Promise<SQLite.SQLiteDatabase> {
+  const database = await SQLite.openDatabaseAsync('finance.db');
   try {
-    expoDb = await SQLite.openDatabaseAsync('finance.db');
-    await expoDb.execAsync(`
-      CREATE TABLE IF NOT EXISTS User (
-        id TEXT PRIMARY KEY,
-        fullName TEXT NOT NULL,
-        email TEXT NOT NULL UNIQUE,
-        passwordHash TEXT NOT NULL,
-        createdAt TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS Account (
-        id TEXT PRIMARY KEY,
-        ownerId TEXT,
-        name TEXT,
-        type TEXT NOT NULL DEFAULT 'Bank',
-        balance REAL,
-        balanceMinor INTEGER,
-        currency TEXT NOT NULL DEFAULT 'PKR',
-        createdAt TEXT,
-        synced INTEGER DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS "Transaction" (
-        id TEXT PRIMARY KEY,
-        ownerId TEXT,
-        amount REAL,
-        amountMinor INTEGER,
-        type TEXT,
-        categoryId TEXT,
-        accountId TEXT,
-        toAccountId TEXT,
-        date TEXT,
-        note TEXT,
-        sourceName TEXT,
-        paymentMethod TEXT,
-        sourceAmountMinor INTEGER,
-        sourceCurrency TEXT,
-        exchangeRate TEXT,
-        referenceNumber TEXT,
-        taxStatus TEXT NOT NULL DEFAULT 'unreviewed',
-        taxYear INTEGER,
-        synced INTEGER DEFAULT 0
-      );
-    `);
-
-    const accountColumns = await expoDb.getAllAsync<{ name: string }>('PRAGMA table_info(Account)');
-    const existingAccountColumns = new Set(accountColumns.map((column) => column.name));
-    if (!existingAccountColumns.has('ownerId')) {
-      await expoDb.execAsync('ALTER TABLE Account ADD COLUMN ownerId TEXT');
-    }
-    if (!existingAccountColumns.has('type')) {
-      await expoDb.execAsync("ALTER TABLE Account ADD COLUMN type TEXT NOT NULL DEFAULT 'Bank'");
-    }
-    if (!existingAccountColumns.has('balanceMinor')) {
-      await expoDb.execAsync('ALTER TABLE Account ADD COLUMN balanceMinor INTEGER');
-      await expoDb.execAsync(
-        'UPDATE Account SET balanceMinor = CAST(ROUND(balance * 100) AS INTEGER) WHERE balanceMinor IS NULL AND balance IS NOT NULL'
-      );
-    }
-    if (!existingAccountColumns.has('createdAt')) {
-      await expoDb.execAsync('ALTER TABLE Account ADD COLUMN createdAt TEXT');
-      await expoDb.execAsync("UPDATE Account SET createdAt = datetime('now') WHERE createdAt IS NULL");
-    }
-    if (!existingAccountColumns.has('synced')) {
-      await expoDb.execAsync('ALTER TABLE Account ADD COLUMN synced INTEGER NOT NULL DEFAULT 0');
-    }
-
-    // Add the exact-value column to databases created by earlier app versions.
-    const transactionColumns = await expoDb.getAllAsync<{ name: string }>(
-      'PRAGMA table_info("Transaction")'
-    );
-    if (!transactionColumns.some((column) => column.name === 'ownerId')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN ownerId TEXT');
-    }
-    if (!transactionColumns.some((column) => column.name === 'amountMinor')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN amountMinor INTEGER');
-    }
-    if (!transactionColumns.some((column) => column.name === 'sourceName')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN sourceName TEXT');
-    }
-    if (!transactionColumns.some((column) => column.name === 'paymentMethod')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN paymentMethod TEXT');
-    }
-    if (!transactionColumns.some((column) => column.name === 'toAccountId')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN toAccountId TEXT');
-    }
-    if (!transactionColumns.some((column) => column.name === 'sourceAmountMinor')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN sourceAmountMinor INTEGER');
-    }
-    if (!transactionColumns.some((column) => column.name === 'sourceCurrency')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN sourceCurrency TEXT');
-    }
-    if (!transactionColumns.some((column) => column.name === 'exchangeRate')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN exchangeRate TEXT');
-    }
-    if (!transactionColumns.some((column) => column.name === 'referenceNumber')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN referenceNumber TEXT');
-    }
-    if (!transactionColumns.some((column) => column.name === 'taxStatus')) {
-      await expoDb.execAsync("ALTER TABLE \"Transaction\" ADD COLUMN taxStatus TEXT NOT NULL DEFAULT 'unreviewed'");
-    }
-    if (!transactionColumns.some((column) => column.name === 'taxYear')) {
-      await expoDb.execAsync('ALTER TABLE "Transaction" ADD COLUMN taxYear INTEGER');
-    }
-    await expoDb.execAsync(
-      'UPDATE "Transaction" SET amountMinor = CAST(ROUND(amount * 100) AS INTEGER) WHERE amountMinor IS NULL AND amount IS NOT NULL'
-    );
-    await expoDb.execAsync('CREATE INDEX IF NOT EXISTS Account_owner_idx ON Account(ownerId)');
-    await expoDb.execAsync('CREATE INDEX IF NOT EXISTS Transaction_owner_date_idx ON "Transaction"(ownerId, date)');
-    return expoDb;
-  } catch (e) {
-    expoDb = null;
-    console.error("Failed to initialize SQLite:", e);
-    return null;
+    await database.execAsync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    await migrateLocalDatabase(asMigrationDatabase(database));
+    return database;
+  } catch (error) {
+    await database.closeAsync();
+    throw error instanceof Error
+      ? new Error(`Local database could not be safely opened: ${error.message}`, { cause: error })
+      : new Error('Local database could not be safely opened.');
   }
 }
 
-export type DbUser = { id: string; fullName: string; email: string; passwordHash: string; createdAt: string };
+async function getDb(): Promise<SQLite.SQLiteDatabase> {
+  if (expoDb) return expoDb;
+  openingDatabase ??= openAndMigrateDatabase();
+  try {
+    expoDb = await openingDatabase;
+    return expoDb;
+  } finally {
+    openingDatabase = null;
+  }
+}
+
+/** Serializes writes on web (which lacks exclusive transactions) and uses exclusive native transactions. */
+async function withLocalWrite<T>(database: SQLite.SQLiteDatabase, task: (executor: SqlExecutor) => Promise<T>): Promise<T> {
+  return runSerializedWrite(async () => {
+    let resolveResult: ((value: T) => void) | null = null;
+    const result = new Promise<T>((resolve) => { resolveResult = resolve; });
+    const persist = async (executor: SqlExecutor): Promise<void> => {
+      const value = await task(executor);
+      if (!resolveResult) throw new Error('The local write result could not be delivered.');
+      resolveResult(value);
+    };
+    if (Platform.OS === 'web') {
+      await database.withTransactionAsync(() => persist(database));
+    } else {
+      await database.withExclusiveTransactionAsync(async (transaction) => persist(transaction));
+    }
+    return result;
+  });
+}
+
+function asBudgetingSql(database: SqlExecutor): BudgetingSql {
+  return {
+    getFirstAsync: <T>(sql: string, params: readonly (string | number | null)[] = []) => database.getFirstAsync<T>(sql, [...params]),
+    getAllAsync: <T>(sql: string, params: readonly (string | number | null)[] = []) => database.getAllAsync<T>(sql, [...params]),
+    runAsync: (sql, params = []) => database.runAsync(sql, [...params]),
+  };
+}
+
+function asObligationsSql(database: SqlExecutor): ObligationsSql {
+  return {
+    getFirstAsync: <T>(sql: string, params: readonly (string | number | null)[] = []) => database.getFirstAsync<T>(sql, [...params]),
+    getAllAsync: <T>(sql: string, params: readonly (string | number | null)[] = []) => database.getAllAsync<T>(sql, [...params]),
+    runAsync: (sql, params = []) => database.runAsync(sql, [...params]),
+  };
+}
+
+async function insertObligationCashTransaction(
+  sql: ObligationsSql,
+  input: { id: string; ownerId: string; amountMinor: number; type: 'Income'|'Expense'; categoryId: string; accountId: string; date: string; note: string; taxStatus?: TaxStatus },
+): Promise<void> {
+  if (!input.id.trim() || !input.ownerId.trim() || !Number.isSafeInteger(input.amountMinor) || input.amountMinor <= 0) throw new Error('Financial posting details are invalid.');
+  const date = new Date(input.date);
+  if (!Number.isFinite(date.getTime())) throw new Error('Financial posting date is invalid.');
+  const account = await sql.getFirstAsync<{id:string;currency:string}>('SELECT id,currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[input.accountId,input.ownerId]);
+  if (!account) throw new Error('Choose an active account owned by this profile.');
+  const existing = await sql.getFirstAsync<{ownerId:string;amountMinor:number;type:string;categoryId:string;accountId:string;date:string}>('SELECT ownerId,amountMinor,type,categoryId,accountId,date FROM "Transaction" WHERE id=?',[input.id]);
+  if (existing) {
+    if (existing.ownerId!==input.ownerId||existing.amountMinor!==input.amountMinor||existing.type!==input.type||existing.categoryId!==input.categoryId||existing.accountId!==input.accountId||existing.date!==date.toISOString()) throw new Error('Transaction ID was already used for different financial details.');
+    return;
+  }
+  await sql.runAsync('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,classificationId,accountId,toAccountId,date,note,taxStatus,taxYear,synced) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,0)',[input.id,input.ownerId,input.amountMinor/100,input.amountMinor,input.type,input.categoryId,input.categoryId,null,input.accountId,date.toISOString(),input.note.slice(0,2000),input.taxStatus ?? 'unreviewed',null]);
+}
+
+async function insertObligationReversal(sql: ObligationsSql, input: { id: string; ownerId: string; originalTransactionId: string; amountMinor: number; accountId: string; date: string; note: string }): Promise<void> {
+  const at=new Date(input.date);
+  if(!input.id.trim()||!input.ownerId.trim()||!Number.isSafeInteger(input.amountMinor)||input.amountMinor<=0||!Number.isFinite(at.getTime())) throw new Error('Obligation reversal details are invalid.');
+  const original=await sql.getFirstAsync<{id:string;ownerId:string;amountMinor:number;accountId:string;type:string}>('SELECT id,ownerId,amountMinor,accountId,type FROM "Transaction" WHERE id=? AND ownerId=?',[input.originalTransactionId,input.ownerId]);
+  if(!original||original.amountMinor!==input.amountMinor||original.accountId!==input.accountId||!['Income','Expense'].includes(original.type)) throw new Error('The original obligation transaction cannot be reversed with these details.');
+  const existing=await sql.getFirstAsync<{type:string;ownerId:string;reversalOfId:string|null;amountMinor:number}>('SELECT type,ownerId,reversalOfId,amountMinor FROM "Transaction" WHERE id=?',[input.id]);
+  if(existing){if(existing.type!=='Reversal'||existing.ownerId!==input.ownerId||existing.reversalOfId!==input.originalTransactionId||existing.amountMinor!==input.amountMinor) throw new Error('Reversal ID was already used for different details.');return;}
+  await sql.runAsync('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,toAccountId,date,note,taxStatus,synced,reversalOfId) VALUES(?,?,?,?,?,?,?,?,NULL,?,?,\'unreviewed\',0,?)',[input.id,input.ownerId,input.amountMinor/100,input.amountMinor,'Reversal','Obligation correction','correction_reversal',input.accountId,at.toISOString(),input.note.slice(0,2000),input.originalTransactionId]);
+}
+
+const budgetingStore = createBudgetingStore(
+  async () => asBudgetingSql(await getDb()),
+  async (task) => {
+    const database = await getDb();
+    return withLocalWrite(database, (transaction) => task(asBudgetingSql(transaction)));
+  },
+);
+
+const obligationsStore = createObligationsStore(
+  async () => asObligationsSql(await getDb()),
+  async (task) => {
+    const database = await getDb();
+    return withLocalWrite(database, (transaction) => task(asObligationsSql(transaction)));
+  },
+);
+
+export interface DbUser {
+  id: string;
+  fullName: string;
+  email: string;
+  passwordHash: string;
+  createdAt: string;
+}
 
 export type AuthResult =
-  | { success: true; user: Omit<DbUser, 'passwordHash'> }
+  | { success: true; user: Omit<DbUser, 'passwordHash'>; passwordUpgradePending?: boolean }
   | { success: false; error: string };
 
+interface ExistingUserRow { id: string }
+interface AccountRow {
+  id: string;
+  ownerId: string;
+  name: string;
+  type: string;
+  balanceMinor: number;
+  currency: string;
+  createdAt: string;
+  archivedAt: string | null;
+  synced: number;
+}
+interface TransactionRow {
+  id: string;
+  ownerId: string;
+  amountMinor: number;
+  type: string;
+  categoryId: string;
+  classificationId: string | null;
+  accountId: string | null;
+  toAccountId: string | null;
+  date: string;
+  note: string;
+  sourceName: string | null;
+  paymentMethod: string | null;
+  sourceAmountMinor: number | null;
+  sourceCurrency: string | null;
+  exchangeRate: string | null;
+  referenceNumber: string | null;
+  taxStatus: string;
+  taxYear: number | null;
+  reversalOfId?: string | null;
+  correctionOfId?: string | null;
+  accountCurrency?: string | null;
+  synced: number;
+}
+
+export interface LocalTransaction {
+  id: string;
+  ownerId: string;
+  amountMinor: number;
+  type: TransactionType;
+  category: string;
+  classificationId: string | null;
+  accountId: string | null;
+  toAccountId: string | null;
+  date: string;
+  note: string;
+  sourceName: string | null;
+  paymentMethod: string | null;
+  sourceAmountMinor: number | null;
+  sourceCurrency: string | null;
+  exchangeRate: string | null;
+  referenceNumber: string | null;
+  taxStatus: 'unreviewed' | 'taxable' | 'non_taxable';
+  taxYear: number | null;
+  reversalOfId?: string | null;
+  correctionOfId?: string | null;
+  /** Currency of the transaction's account; null means the legacy row has no account. */
+  accountCurrency: CurrencyCode | null;
+  synced: boolean;
+}
+
+function validateAccountRow(row: AccountRow): Omit<AccountRow, 'currency' | 'synced'> & { currency: CurrencyCode; synced: boolean } {
+    if (!row.id || !row.ownerId || !row.name || !Number.isSafeInteger(row.balanceMinor) || row.balanceMinor < 0) {
+    throw new Error('A saved account is invalid. Restore the database from a trusted backup or contact support.');
+  }
+  if (!isCurrencyCode(row.currency)) throw new Error(`Account ${row.id} has an unsupported currency.`);
+  if (typeof row.type !== 'string' || !row.type.trim() || row.type.length > 80) throw new Error(`Account ${row.id} has an invalid type.`);
+  if (row.synced !== 0 && row.synced !== 1) throw new Error(`Account ${row.id} has an invalid sync state.`);
+  return { ...row, currency: row.currency, synced: row.synced === 1 };
+}
+
+type ValidatedTransactionRow = Omit<TransactionRow, 'type' | 'classificationId' | 'paymentMethod' | 'taxStatus' | 'synced'> & {
+  type: TransactionType;
+  classificationId: ClassificationId | null;
+  paymentMethod: PaymentMethod | null;
+  taxStatus: TaxStatus;
+  synced: boolean;
+};
+
+function validateTransactionRow(row: TransactionRow): ValidatedTransactionRow {
+  if (!row.id || !row.ownerId || !Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0) {
+    throw new Error('A saved transaction is invalid. Restore the database from a trusted backup or contact support.');
+  }
+  if (!Number.isFinite(new Date(row.date).getTime())) throw new Error(`Transaction ${row.id} has an invalid date.`);
+  if (!isTransactionType(row.type)) {
+    throw new Error(`Transaction ${row.id} has an unsupported type.`);
+  }
+  if (typeof row.categoryId !== 'string' || !row.categoryId.trim()) throw new Error(`Transaction ${row.id} has no category.`);
+  if (row.synced !== 0 && row.synced !== 1) throw new Error(`Transaction ${row.id} has an invalid sync state.`);
+  if (!isTaxStatus(row.taxStatus)) throw new Error(`Transaction ${row.id} has an invalid tax status.`);
+  if (row.paymentMethod !== null && !isPaymentMethod(row.paymentMethod)) throw new Error(`Transaction ${row.id} has an invalid payment method.`);
+  const classificationId = validateStoredClassification(row.type, row.classificationId);
+  if (row.sourceAmountMinor !== null && (!Number.isSafeInteger(row.sourceAmountMinor) || row.sourceAmountMinor <= 0)) {
+    throw new Error(`Transaction ${row.id} has an invalid original-currency amount.`);
+  }
+  if (row.sourceCurrency !== null && !isCurrencyCode(row.sourceCurrency)) {
+    throw new Error(`Transaction ${row.id} has an unsupported original currency.`);
+  }
+  return {
+    ...row,
+    type: row.type,
+    classificationId,
+    paymentMethod: row.paymentMethod,
+    taxStatus: row.taxStatus,
+    synced: row.synced === 1,
+  };
+}
+
+function accountMatchesDraft(row: AccountRow, data: ReturnType<typeof normalizeAccountDraft>): boolean {
+  return row.ownerId === data.ownerId && row.name === data.name && row.type === data.type &&
+    row.balanceMinor === data.balanceMinor && row.currency === data.currency;
+}
+
 export const localDb = {
+  budget: budgetingStore.budget,
+  savings: budgetingStore.savings,
+  emergencyFund: budgetingStore.emergency,
+  obligations: {
+    schedules: obligationsStore.schedule,
+    bills: obligationsStore.bill,
+    debts: obligationsStore.debt,
+    postOccurrence: async ({ownerId,id,transactionId}:{ownerId:string;id:string;transactionId:string}) => obligationsStore.schedule.postOccurrence(ownerId,id,transactionId,async(sql,schedule,occurrence)=>{
+      if(schedule.scheduleType==='bill') throw new Error('A scheduled bill is a payable reminder; record an explicit bill payment to post cash.');
+      if(schedule.scheduleType==='transfer') {
+        const source=await sql.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[schedule.accountId,ownerId]);
+        const destination=await sql.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[schedule.toAccountId!,ownerId]);
+        if(!source||!destination||source.currency!==destination.currency||source.currency!==schedule.currency) throw new Error('Transfer schedule accounts must be active, profile-owned and in the same currency.');
+        const date=new Date(`${occurrence.occurrenceDate}T12:00:00.000Z`).toISOString();
+        await sql.runAsync('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,classificationId,accountId,toAccountId,date,note,taxStatus,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)',[transactionId,ownerId,schedule.amountMinor/100,schedule.amountMinor,'Transfer','Scheduled transfer','scheduled_transfer',null,schedule.accountId,schedule.toAccountId!,date,schedule.name,'unreviewed']);
+        return;
+      }
+      await insertObligationCashTransaction(sql,{id:transactionId,ownerId,amountMinor:schedule.amountMinor,type:schedule.scheduleType==='income'?'Income':'Expense',categoryId:schedule.classificationId ?? (schedule.scheduleType==='income'?'other_income':'other_expense'),accountId:schedule.accountId,date:new Date(`${occurrence.occurrenceDate}T12:00:00.000Z`).toISOString(),note:schedule.name});
+      if(schedule.scheduleType==='expense') await budgetingStore.validatePostTransaction(sql as BudgetingSql,ownerId,schedule.accountId);
+    }),
+    skipOccurrence: (ownerId:string,id:string) => obligationsStore.schedule.skipOccurrence(ownerId,id),
+    createRecurringBill: (input:Parameters<typeof obligationsStore.bill.createRecurring>[0]) => obligationsStore.bill.createRecurring(input),
+    setBillReminder: obligationsStore.bill.setReminder,
+    setBillStatus: obligationsStore.bill.setStatus,
+    cancelBill: obligationsStore.bill.cancel,
+    createBillPayment: async(input:{id:string;ownerId:string;billId:string;amountMinor:number;transactionId:string;idempotencyKey:string;paidAt:string})=>{
+      return obligationsStore.bill.recordPayment(input,async(sql)=>{
+        const bill=await sql.getFirstAsync<{accountId:string;categoryId:string}>('SELECT accountId,categoryId FROM Bill WHERE id=? AND ownerId=?',[input.billId,input.ownerId]);
+        if(!bill) throw new Error('Bill is not available.');
+        await insertObligationCashTransaction(sql,{id:input.transactionId,ownerId:input.ownerId,amountMinor:input.amountMinor,type:'Expense',categoryId:bill.categoryId,accountId:bill.accountId,date:input.paidAt,note:`Bill payment ${input.billId}`});
+        await budgetingStore.validatePostTransaction(sql as BudgetingSql,input.ownerId,bill.accountId);
+      });
+    },
+    correctBillPayment: (input:{id:string;ownerId:string;billId:string;paymentId:string;reversalTransactionId:string;reason:string;replacement?:{id:string;transactionId:string;amountMinor:number;accountId?:string;idempotencyKey:string;paidAt:string}})=>obligationsStore.bill.correctPayment(input,async(sql,payment)=>{
+      await insertObligationReversal(sql,{id:input.reversalTransactionId,ownerId:input.ownerId,originalTransactionId:payment.transactionId,amountMinor:payment.amountMinor,accountId:payment.accountId,date:new Date().toISOString(),note:`Bill payment correction: ${input.reason}`});
+    },async(sql,bill,replacement)=>{
+      const accountId=replacement.accountId??bill.accountId;
+      await insertObligationCashTransaction(sql,{id:replacement.transactionId,ownerId:input.ownerId,amountMinor:replacement.amountMinor,type:'Expense',categoryId:bill.categoryId,accountId,date:replacement.paidAt,note:`Corrected bill payment ${input.billId}`});
+      await budgetingStore.validatePostTransaction(sql as BudgetingSql,input.ownerId,accountId);
+    }),
+    createDebt: async(input:{id:string;ownerId:string;direction:'borrowed'|'lent';counterparty:string;principalMinor:number;currency:string;accountId:string;interestRateBps?:number;openedAt:string;dueDate?:string|null;transactionId:string;idempotencyKey:string})=>obligationsStore.debt.create({...input,eventId:`${input.id}:opening`,idempotencyKey:input.idempotencyKey},async(sql)=>{
+      await insertObligationCashTransaction(sql,{id:input.transactionId,ownerId:input.ownerId,amountMinor:input.principalMinor,type:input.direction==='borrowed'?'Income':'Expense',categoryId:input.direction==='borrowed'?'debt_borrowing':'debt_lending',accountId:input.accountId,date:input.openedAt,note:`${input.direction==='borrowed'?'Borrowed from':'Lent to'} ${input.counterparty}`});
+    }),
+    recordDebtEvent: async(input:{id:string;ownerId:string;debtId:string;eventType:'principal_repayment'|'receivable_payment'|'interest'|'settlement';principalMinor:number;interestMinor:number;accountId:string;transactionId:string;eventDate:string;idempotencyKey:string;note?:string})=>obligationsStore.debt.recordEvent(input,async(sql)=>{
+      const debt=await sql.getFirstAsync<{direction:string;counterparty:string}>('SELECT direction,counterparty FROM Debt WHERE id=? AND ownerId=?',[input.debtId,input.ownerId]);
+      if(!debt) throw new Error('Debt is unavailable.');
+      const isInterest=input.eventType==='interest';
+      const isInflow=input.eventType==='receivable_payment'||(input.eventType==='settlement'&&debt.direction==='lent');
+      const categoryId=isInterest?'debt_interest':input.eventType==='principal_repayment'?'debt_principal_repayment':input.eventType==='settlement'?'debt_settlement':'debt_receivable_payment';
+      await insertObligationCashTransaction(sql,{id:input.transactionId,ownerId:input.ownerId,amountMinor:input.principalMinor+input.interestMinor,type:isInflow?'Income':'Expense',categoryId,accountId:input.accountId,date:input.eventDate,note:input.note?.trim()||`Debt payment · ${debt.counterparty}`});
+    }),
+    correctDebtEvent: (input:{id:string;ownerId:string;debtId:string;eventId:string;reversalTransactionId:string;reason:string;replacement?:{id:string;eventType:'borrow'|'lend'|'principal_repayment'|'receivable_payment'|'interest'|'settlement';principalMinor:number;interestMinor:number;accountId:string;transactionId:string;eventDate:string;idempotencyKey:string;note?:string}})=>obligationsStore.debt.correctEvent(input,async(sql,event)=>{
+      await insertObligationReversal(sql,{id:input.reversalTransactionId,ownerId:input.ownerId,originalTransactionId:event.transactionId,amountMinor:event.principalMinor+event.interestMinor,accountId:event.accountId,date:new Date().toISOString(),note:`Debt event correction: ${input.reason}`});
+    },async(sql,replacement)=>{
+      const debt=await sql.getFirstAsync<{direction:string;counterparty:string}>('SELECT direction,counterparty FROM Debt WHERE id=? AND ownerId=?',[input.debtId,input.ownerId]);
+      if(!debt) throw new Error('Debt is unavailable.');
+      let type:'Income'|'Expense'; let categoryId:string;
+      switch(replacement.eventType){
+        case 'borrow': type='Income'; categoryId='debt_borrowing'; break;
+        case 'lend': type='Expense'; categoryId='debt_lending'; break;
+        case 'receivable_payment': type='Income'; categoryId='debt_receivable_payment'; break;
+        case 'principal_repayment': type='Expense'; categoryId='debt_principal_repayment'; break;
+        case 'interest': type='Expense'; categoryId='debt_interest'; break;
+        default: type=debt.direction==='borrowed'?'Expense':'Income'; categoryId='debt_settlement';
+      }
+      await insertObligationCashTransaction(sql,{id:replacement.transactionId,ownerId:input.ownerId,amountMinor:replacement.principalMinor+replacement.interestMinor,type,categoryId,accountId:replacement.accountId,date:replacement.eventDate,note:replacement.note?.trim()||`Corrected debt event · ${debt.counterparty}`});
+    }),
+  },
+
   user: {
     register: async (fullName: string, email: string, password: string): Promise<AuthResult> => {
-      const db = await getDb();
-      if (!db) return { success: false, error: 'Database unavailable' };
-
-      const existing = await db.getFirstAsync<DbUser>(
-        'SELECT id FROM User WHERE email = ?',
-        [email.toLowerCase()]
-      );
-      if (existing) return { success: false, error: 'An account with this email already exists' };
-
+      const normalizedName = fullName.trim();
+      const normalizedEmail = email.trim().toLocaleLowerCase('en-US');
+      if (normalizedName.length < 2 || normalizedName.length > 100) return { success: false, error: 'Enter a valid full name.' };
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return { success: false, error: 'Enter a valid email address.' };
+      if (password.length < 10) return { success: false, error: 'Password must contain at least 10 characters.' };
       const id = Crypto.randomUUID();
-      const passwordHash = await hashPassword(password);
       const createdAt = new Date().toISOString();
 
-      await db.runAsync(
-        'INSERT INTO User (id, fullName, email, passwordHash, createdAt) VALUES (?, ?, ?, ?, ?)',
-        [id, fullName, email.toLowerCase(), passwordHash, createdAt]
-      );
-
-      return { success: true, user: { id, fullName, email: email.toLowerCase(), createdAt } };
+      try {
+        const passwordHash = await hashPassword(password);
+        const database = await getDb();
+        await withLocalWrite(database, async (transaction) => {
+          const existing = await transaction.getFirstAsync<ExistingUserRow>(
+            'SELECT id FROM User WHERE email = ?', [normalizedEmail],
+          );
+          if (existing) throw new Error('An account with this email already exists.');
+          await transaction.runAsync(
+            'INSERT INTO User (id, fullName, email, passwordHash, createdAt) VALUES (?, ?, ?, ?, ?)',
+            [id, normalizedName, normalizedEmail, passwordHash, createdAt],
+          );
+          return undefined;
+        });
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : 'Account could not be created.' };
+      }
+      return { success: true, user: { id, fullName: normalizedName, email: normalizedEmail, createdAt } };
     },
 
     signIn: async (email: string, password: string): Promise<AuthResult> => {
-      const db = await getDb();
-      if (!db) return { success: false, error: 'Database unavailable' };
-
-      const user = await db.getFirstAsync<DbUser>(
-        'SELECT * FROM User WHERE email = ?',
-        [email.toLowerCase()]
-      );
-      if (!user) return { success: false, error: 'No account found with this email' };
-
-      const passwordHash = await hashPassword(password);
-      if (passwordHash !== user.passwordHash) {
-        return { success: false, error: 'Incorrect password' };
+      try {
+        const database = await getDb();
+        const user = await database.getFirstAsync<DbUser>(
+          'SELECT id, fullName, email, passwordHash, createdAt FROM User WHERE email = ?',
+          [email.trim().toLocaleLowerCase('en-US')],
+        );
+        if (!user) return { success: false, error: 'No account found with this email.' };
+        const verification = await verifyAndUpgradePassword(password, user.passwordHash, {
+          verifyLegacy: async (candidate, legacyHash) => (await hashLegacyPassword(candidate)) === legacyHash,
+          createCurrentHash: hashPassword,
+          replaceStoredHash: async (legacyHash, currentHash) => {
+            await withLocalWrite(database, async (transaction) => {
+              await transaction.runAsync('UPDATE User SET passwordHash = ? WHERE id = ? AND passwordHash = ?',
+                [currentHash, user.id, legacyHash]);
+              return undefined;
+            });
+          },
+        });
+        if (!verification.valid) return { success: false, error: 'Incorrect password.' };
+        return {
+          success: true,
+          user: { id: user.id, fullName: user.fullName, email: user.email, createdAt: user.createdAt },
+          passwordUpgradePending: !user.passwordHash.startsWith('pbkdf2-sha256$') && !verification.upgraded,
+        };
+      } catch {
+        return { success: false, error: 'Local sign in could not complete. Check device storage and try again.' };
       }
-
-      return { success: true, user: { id: user.id, fullName: user.fullName, email: user.email, createdAt: user.createdAt } };
     },
 
     findById: async (id: string): Promise<Omit<DbUser, 'passwordHash'> | null> => {
-      const db = await getDb();
-      if (!db) return null;
-      const user = await db.getFirstAsync<DbUser>('SELECT id, fullName, email, createdAt FROM User WHERE id = ?', [id]);
-      return user ?? null;
+      if (!id.trim()) return null;
+      const database = await getDb();
+      return database.getFirstAsync<Omit<DbUser, 'passwordHash'>>(
+        'SELECT id, fullName, email, createdAt FROM User WHERE id = ?', [id],
+      );
     },
+
     claimLegacyData: async (ownerId: string): Promise<void> => {
-      const db = await getDb();
-      if (!db) throw new Error('Database unavailable.');
-      const userCount = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM User');
-      // Existing ownerless records can be assigned safely only when there is one local profile.
-      if (userCount?.count !== 1) return;
-      await db.withTransactionAsync(async () => {
-        await db.runAsync('UPDATE Account SET ownerId = ? WHERE ownerId IS NULL', [ownerId]);
-        await db.runAsync('UPDATE "Transaction" SET ownerId = ? WHERE ownerId IS NULL', [ownerId]);
+      if (!ownerId.trim()) throw new Error('A profile is required to claim existing records.');
+      const database = await getDb();
+      await withLocalWrite(database, async (transaction) => {
+        const userCount = await transaction.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM User');
+        if (userCount?.count !== 1) return;
+        await transaction.runAsync('UPDATE Account SET ownerId = ? WHERE ownerId IS NULL', [ownerId]);
+        await transaction.runAsync('UPDATE "Transaction" SET ownerId = ? WHERE ownerId IS NULL', [ownerId]);
       });
     },
   },
+
   account: {
-    count: async (ownerId: string) => {
-      const db = await getDb();
-      if (!db) throw new Error('Database unavailable.');
-      const result = await db.getFirstAsync<{count: number}>(
-        'SELECT COUNT(*) as count FROM Account WHERE ownerId = ?',
-        [ownerId],
+    count: async (ownerId: string): Promise<number> => {
+      if (!ownerId.trim()) throw new Error('A profile is required to count accounts.');
+      const database = await getDb();
+      const result = await database.getFirstAsync<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM Account WHERE ownerId = ? AND archivedAt IS NULL', [ownerId],
       );
-      return result?.count || 0;
+      return result?.count ?? 0;
     },
-    create: async ({ data }: { data: {
-      ownerId: string;
-      name: string;
-      type: string;
-      balanceMinor: number;
-      currency?: string;
-    } }) => {
-      const db = await getDb();
-      if (!data.ownerId) throw new Error('An account owner is required.');
-      if (!Number.isSafeInteger(data.balanceMinor) || data.balanceMinor < 0) {
-        throw new Error('Opening balance must be a non-negative integer in minor units.');
-      }
-      const id = Crypto.randomUUID();
-      if (db) {
-        const createdAt = new Date().toISOString();
-        await db.runAsync(
-          'INSERT INTO Account (id, ownerId, name, type, balance, balanceMinor, currency, createdAt, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
-          [id, data.ownerId, data.name, data.type, data.balanceMinor / 100, data.balanceMinor, data.currency ?? 'PKR', createdAt],
+
+    create: async ({ data }: { data: AccountDraft }): Promise<ReturnType<typeof normalizeAccountDraft> & { createdAt: string; synced: false }> => {
+      const normalized = normalizeAccountDraft(data);
+      const id = normalized.id ?? Crypto.randomUUID();
+      const database = await getDb();
+      return withLocalWrite(database, async (transaction) => {
+        const existing = await transaction.getFirstAsync<AccountRow>(
+          'SELECT id, ownerId, name, type, balanceMinor, currency, createdAt, archivedAt, synced FROM Account WHERE id = ?', [id],
         );
-        return { id, ...data, currency: data.currency ?? 'PKR', createdAt, synced: false };
-      }
-      throw new Error('Database unavailable. Account was not saved.');
+        if (existing) {
+          if (existing.archivedAt) throw new Error('This account ID belongs to an archived account.');
+          if (!accountMatchesDraft(existing, normalized)) throw new Error('This account ID was already used for different account details.');
+          return { ...normalized, id, createdAt: existing.createdAt, synced: false };
+        }
+        const createdAt = new Date().toISOString();
+        await transaction.runAsync(
+          'INSERT INTO Account (id, ownerId, name, type, balance, balanceMinor, currency, createdAt, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
+          [id, normalized.ownerId, normalized.name, normalized.type, normalized.balanceMinor / 100, normalized.balanceMinor, normalized.currency, createdAt],
+        );
+        return { ...normalized, id, createdAt, synced: false };
+      });
     },
-    findMany: async (ownerId: string) => {
-      const db = await getDb();
-      if (!db) throw new Error('Database unavailable.');
-      if (!ownerId) return [];
-      return await db.getAllAsync<{
-        id: string;
-        name: string;
-        type: string;
-        balanceMinor: number;
-        currency: string;
-        createdAt: string;
-        synced: number;
-      }>(
-        'SELECT id, name, type, balanceMinor, currency, createdAt, synced FROM Account WHERE ownerId = ? ORDER BY createdAt ASC',
+
+    update: async ({ ownerId, accountId, changes }: { ownerId: string; accountId: string; changes: Partial<Pick<AccountDraft, 'name' | 'type' | 'balanceMinor' | 'currency'>> }) => {
+      if (!ownerId.trim() || !accountId.trim()) throw new Error('A profile and account are required.');
+      const database = await getDb();
+      return withLocalWrite(database, async (transaction) => {
+        const account = await editAccount(ownerId, accountId, changes, {
+          findAccount: async (profileId, id) => transaction.getFirstAsync<AccountRow>('SELECT id, ownerId, name, type, balanceMinor, currency, createdAt, archivedAt, synced FROM Account WHERE id = ? AND ownerId = ?', [id, profileId]),
+          countTransactions: async (profileId, id) => (await transaction.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM "Transaction" WHERE ownerId = ? AND (accountId = ? OR toAccountId = ?)', [profileId, id, id]))?.count ?? 0,
+          updateAccount: async (candidate) => { await transaction.runAsync('UPDATE Account SET name = ?, type = ?, balanceMinor = ?, balance = ?, currency = ?, synced = 0 WHERE id = ? AND ownerId = ? AND archivedAt IS NULL', [candidate.name, candidate.type, candidate.balanceMinor, candidate.balanceMinor / 100, candidate.currency, accountId, ownerId]); },
+          archiveAccount: async () => { throw new Error('Unexpected archive call during account edit.'); },
+        });
+        return { ...account, synced: false };
+      });
+    },
+
+    archive: async ({ ownerId, accountId }: { ownerId: string; accountId: string }): Promise<void> => {
+      if (!ownerId.trim() || !accountId.trim()) throw new Error('A profile and account are required.');
+      const database = await getDb();
+      await withLocalWrite(database, async (transaction) => {
+        await archiveAccountRecord(ownerId, accountId, {
+          findAccount: async (profileId, id) => transaction.getFirstAsync<AccountRow>('SELECT id, ownerId, name, type, balanceMinor, currency, createdAt, archivedAt, synced FROM Account WHERE id = ? AND ownerId = ?', [id, profileId]),
+          countTransactions: async () => 0,
+          updateAccount: async () => { throw new Error('Unexpected edit call during account archive.'); },
+          archiveAccount: async (profileId, id, archivedAt) => { await transaction.runAsync('UPDATE Account SET archivedAt = COALESCE(archivedAt, ?), synced = 0 WHERE id = ? AND ownerId = ?', [archivedAt, id, profileId]); },
+        });
+      });
+    },
+
+    findMany: async (ownerId: string, options: { includeArchived?: boolean } = {}): Promise<(Omit<AccountRow, 'synced'> & { synced: boolean })[]> => {
+      if (!ownerId.trim()) throw new Error('A profile is required to read accounts.');
+      const database = await getDb();
+      const rows = await database.getAllAsync<AccountRow>(
+        `SELECT id, ownerId, name, type, balanceMinor, currency, createdAt, archivedAt, synced FROM Account WHERE ownerId = ?${options.includeArchived ? '' : ' AND archivedAt IS NULL'} ORDER BY createdAt ASC, id ASC`,
         [ownerId],
       );
-    }
+      return rows.map(validateAccountRow);
+    },
   },
+
   transaction: {
+    findReportRows: async ({ ownerId, startDate, endDate }: {
+      ownerId: string; startDate: string; endDate: string;
+    }): Promise<FinancialReportRow[]> => {
+      const database = await getDb();
+      const query = buildFinancialReportQuery(ownerId, startDate, endDate);
+      const rows = await database.getAllAsync<FinancialReportRow>(query.sql, query.params);
+      return rows;
+    },
+
+    findPage: async ({ ownerId, limit = 50, cursor, where }: {
+      ownerId: string; limit?: number; cursor?: { date: string; id: string }; where?: { synced?: boolean };
+    }): Promise<{ items: LocalTransaction[]; nextCursor: { date: string; id: string } | null }> => {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Transaction page size must be between 1 and 100.');
+      const rows = await localDb.transaction.findMany({ ownerId, orderBy: { date: 'desc' }, take: limit + 1, cursor, where });
+      const hasMore = rows.length > limit;
+      const items = hasMore ? rows.slice(0, limit) : rows;
+      const last = items.at(-1);
+      return { items, nextCursor: hasMore && last ? { date: last.date, id: last.id } : null };
+    },
+
     findMany: async ({
       where,
       ownerId,
       orderBy,
       take,
+      cursor,
     }: {
       where?: { synced?: boolean };
-      ownerId?: string;
+      ownerId: string;
       orderBy?: { date?: 'asc' | 'desc' };
       take?: number;
-    } = {}) => {
-      const db = await getDb();
-      if (!db) throw new Error('Database unavailable.');
-      if (!ownerId) return [];
-      let query = 'SELECT id, amountMinor, type, categoryId AS category, accountId, toAccountId, date, note, sourceName, paymentMethod, sourceAmountMinor, sourceCurrency, exchangeRate, referenceNumber, taxStatus, taxYear, synced FROM "Transaction" WHERE ownerId = ?';
-      const params: any[] = [ownerId];
-      if (where && where.synced !== undefined) {
-        query += ' AND synced = ?';
-        params.push(where.synced ? 1 : 0);
-      }
-      query += ` ORDER BY date ${orderBy?.date === 'asc' ? 'ASC' : 'DESC'}`;
-      if (take !== undefined) {
-        if (!Number.isSafeInteger(take) || take < 0) throw new Error('take must be a non-negative integer.');
-        query += ' LIMIT ?';
-        params.push(take);
-      }
-      const results = await db.getAllAsync(query, params);
-      return (results as any[]).map((r) => ({ ...r, synced: !!r.synced }));
+      cursor?: { date: string; id: string };
+    }): Promise<LocalTransaction[]> => {
+      const database = await getDb();
+      const page = buildTransactionPagePredicate({
+        ownerId,
+        order: orderBy?.date,
+        cursor,
+        synced: where?.synced,
+        take,
+      });
+      const query = `SELECT t.id, t.ownerId, t.amountMinor, t.type, t.categoryId, t.classificationId, t.accountId, t.toAccountId, t.date, t.note, t.sourceName, t.paymentMethod, t.sourceAmountMinor, t.sourceCurrency, t.exchangeRate, t.referenceNumber, t.taxStatus, t.taxYear, t.synced, t.reversalOfId, t.correctionOfId, a.currency AS accountCurrency FROM "Transaction" t LEFT JOIN Account a ON a.id = t.accountId AND a.ownerId = t.ownerId WHERE ${page.whereSql} ORDER BY ${page.orderSql}${page.limitSql}`;
+      const rows = await database.getAllAsync<TransactionRow>(query, page.params);
+      return rows.map(validateTransactionRow).map((row) => {
+        const accountCurrency: CurrencyCode | null = row.accountCurrency == null
+          ? null
+          : isCurrencyCode(row.accountCurrency)
+            ? row.accountCurrency
+            : (() => { throw new Error(`Transaction ${row.id} refers to an account with an unsupported currency.`); })();
+        return {
+        id: row.id,
+        ownerId: row.ownerId,
+        amountMinor: row.amountMinor,
+        type: row.type,
+        category: row.categoryId,
+        classificationId: row.classificationId,
+        accountId: row.accountId,
+        toAccountId: row.toAccountId,
+        date: row.date,
+        note: row.note,
+        sourceName: row.sourceName,
+        paymentMethod: row.paymentMethod,
+        sourceAmountMinor: row.sourceAmountMinor,
+        sourceCurrency: row.sourceCurrency,
+        exchangeRate: row.exchangeRate,
+        referenceNumber: row.referenceNumber,
+        taxStatus: row.taxStatus,
+        taxYear: row.taxYear,
+        synced: row.synced,
+        reversalOfId: row.reversalOfId ?? null,
+        correctionOfId: row.correctionOfId ?? null,
+        accountCurrency,
+      };
+      });
     },
-    create: async ({ data }: { data: {
-      ownerId: string;
-      amountMinor: number;
-      type: string;
-      category: string;
-      accountId?: string;
-      toAccountId?: string;
-      date?: Date | string;
-      note?: string;
-      sourceName?: string;
-      paymentMethod?: string;
-      sourceAmountMinor?: number;
-      sourceCurrency?: string;
-      exchangeRate?: string;
-      referenceNumber?: string;
-      taxStatus?: 'unreviewed' | 'taxable' | 'non_taxable';
-      taxYear?: number;
-      synced?: boolean;
-    } }) => {
-      const db = await getDb();
-      if (!db) throw new Error('Database unavailable. Transaction was not saved.');
-      if (!Number.isSafeInteger(data.amountMinor) || data.amountMinor <= 0) {
-        throw new Error('Transaction amount must be a positive integer in minor units.');
-      }
-      if (!data.ownerId) throw new Error('A transaction owner is required.');
-      if (!data.accountId) throw new Error('Choose an account for this transaction.');
-      const account = await db.getFirstAsync<{ id: string }>(
-        'SELECT id FROM Account WHERE id = ? AND ownerId = ?',
-        [data.accountId, data.ownerId],
-      );
-      if (!account) throw new Error('The selected account no longer exists.');
-      if (data.type === 'Transfer') {
-        if (!data.toAccountId || data.toAccountId === data.accountId) {
-          throw new Error('Choose two different accounts for a transfer.');
-        }
-        const destination = await db.getFirstAsync<{ id: string }>(
-          'SELECT id FROM Account WHERE id = ? AND ownerId = ?',
-          [data.toAccountId, data.ownerId],
-        );
-        if (!destination) throw new Error('The destination account no longer exists.');
-        const accountCurrencies = await db.getAllAsync<{ currency: string }>(
-          'SELECT currency FROM Account WHERE id IN (?, ?) AND ownerId = ?',
-          [data.accountId, data.toAccountId, data.ownerId],
-        );
-        if (accountCurrencies.length !== 2 || accountCurrencies[0].currency !== accountCurrencies[1].currency) {
-          throw new Error('Transfers between accounts with different currencies are not supported yet.');
-        }
-      } else if (data.toAccountId) {
-        throw new Error('A destination account is only valid for an internal transfer.');
-      }
-      if (data.type === 'Income' && data.category === 'Family gift' && !data.sourceName?.trim()) {
-        throw new Error('Record who gave you this family gift.');
-      }
-      if (data.sourceAmountMinor !== undefined && (!Number.isSafeInteger(data.sourceAmountMinor) || data.sourceAmountMinor < 0)) {
-        throw new Error('Original currency amount must be a non-negative safe integer.');
-      }
-      if (data.type === 'Income' && data.category === 'Family remittance' &&
-          (!data.sourceAmountMinor || !data.sourceCurrency || !data.exchangeRate || !data.referenceNumber)) {
-        throw new Error('A remittance requires its original amount, currency, exchange rate, and reference number.');
-      }
-      if (data.taxStatus && !['unreviewed', 'taxable', 'non_taxable'].includes(data.taxStatus)) {
-        throw new Error('Tax status is invalid.');
-      }
-      const id = Crypto.randomUUID();
-      const transactionDate = data.date
-        ? data.date instanceof Date ? data.date : new Date(data.date)
-        : new Date();
-      const dateIso = transactionDate.toISOString();
-      await db.runAsync(
-        'INSERT INTO "Transaction" (id, ownerId, amount, amountMinor, type, categoryId, accountId, toAccountId, date, note, sourceName, paymentMethod, sourceAmountMinor, sourceCurrency, exchangeRate, referenceNumber, taxStatus, taxYear, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [
-          id,
-          data.ownerId,
-          data.amountMinor / 100, // Transitional compatibility only; amountMinor is authoritative.
-          data.amountMinor,
-          data.type,
-          data.category,
-          data.accountId,
-          data.toAccountId || null,
-          dateIso,
-          data.note || '',
-          data.sourceName || null,
-          data.paymentMethod || null,
-          data.sourceAmountMinor ?? null,
-          data.sourceCurrency || null,
-          data.exchangeRate || null,
-          data.referenceNumber || null,
-          data.taxStatus || 'unreviewed',
-          data.taxYear ?? null,
-          data.synced ? 1 : 0,
-        ]
-      );
-      return { id, ...data, date: dateIso };
+
+    create: async ({ data }: { data: TransactionDraft }): Promise<NormalizedTransactionDraft> => {
+      if (data.type === 'Refund' || data.type === 'Reversal') throw new Error('Use the linked refund or correction operation for this transaction type.');
+      const transactionId = data.id ?? Crypto.randomUUID();
+      const database = await getDb();
+      return withLocalWrite(database, (transaction) => createValidatedTransaction(data, transactionId, {
+        findAccount: async (id, ownerId) => {
+          const row = await transaction.getFirstAsync<{ id: string; ownerId: string; currency: string; type: string }>(
+            'SELECT id, ownerId, currency, type FROM Account WHERE id = ? AND ownerId = ? AND archivedAt IS NULL', [id, ownerId],
+          );
+          return row ?? null;
+        },
+        findTransaction: async (id, ownerId) => {
+          const row = await transaction.getFirstAsync<TransactionRow>(
+            'SELECT id, ownerId, amountMinor, type, categoryId, classificationId, accountId, toAccountId, date, note, sourceName, paymentMethod, sourceAmountMinor, sourceCurrency, exchangeRate, referenceNumber, taxStatus, taxYear, synced FROM "Transaction" WHERE id = ? AND ownerId = ?',
+            [id, ownerId],
+          );
+          if (!row) return null;
+          const validated = validateTransactionRow(row);
+          if (!validated.accountId) throw new Error(`Transaction ${validated.id} has no source account and cannot be used as an idempotency match.`);
+          const sourceAccount = await transaction.getFirstAsync<{ id: string; ownerId: string; currency: string; type: string }>(
+            'SELECT id, ownerId, currency, type FROM Account WHERE id = ? AND ownerId = ?',
+            [validated.accountId, validated.ownerId],
+          );
+          if (!sourceAccount) throw new Error(`Transaction ${validated.id} refers to a missing account.`);
+          const destinationAccount = validated.toAccountId
+            ? await transaction.getFirstAsync<{ id: string; ownerId: string; currency: string; type: string }>(
+              'SELECT id, ownerId, currency, type FROM Account WHERE id = ? AND ownerId = ?',
+              [validated.toAccountId, validated.ownerId],
+            )
+            : null;
+          if (validated.toAccountId && !destinationAccount) throw new Error(`Transaction ${validated.id} refers to a missing destination account.`);
+          return normalizeTransactionDraft({
+            id: validated.id,
+            ownerId: validated.ownerId,
+            amountMinor: validated.amountMinor,
+            type: validated.type,
+            classificationId: validated.type === 'Transfer'
+              ? undefined
+              : validated.classificationId ?? validated.categoryId,
+            accountId: validated.accountId,
+            toAccountId: validated.toAccountId ?? undefined,
+            date: validated.date,
+            note: validated.note,
+            sourceName: validated.sourceName ?? undefined,
+            paymentMethod: validated.paymentMethod ?? undefined,
+            sourceAmountMinor: validated.sourceAmountMinor ?? undefined,
+            sourceCurrency: validated.sourceCurrency ?? undefined,
+            exchangeRate: validated.exchangeRate ?? undefined,
+            referenceNumber: validated.referenceNumber ?? undefined,
+            taxStatus: validated.taxStatus,
+            taxYear: validated.taxYear ?? undefined,
+          }, sourceAccount, destinationAccount ?? undefined);
+        },
+        insertTransaction: async (record) => {
+          await transaction.runAsync(
+            'INSERT INTO "Transaction" (id, ownerId, amount, amountMinor, type, category, categoryId, classificationId, accountId, toAccountId, date, note, sourceName, paymentMethod, sourceAmountMinor, sourceCurrency, exchangeRate, referenceNumber, taxStatus, taxYear, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
+            [record.id, record.ownerId, record.amountMinor / 100, record.amountMinor, record.type, record.categoryLabel, record.categoryLabel, record.classificationId, record.accountId, record.toAccountId, record.date, record.note, record.sourceName, record.paymentMethod, record.sourceAmountMinor, record.sourceCurrency, record.exchangeRate, record.referenceNumber, record.taxStatus, record.taxYear],
+          );
+          await budgetingStore.validatePostTransaction(asBudgetingSql(transaction), record.ownerId, record.accountId);
+        },
+      }));
     },
-    update: async ({ where, data }: {
-      where: { id: string; ownerId: string };
-      data: { synced?: boolean };
-    }) => {
-      const db = await getDb();
-      if (!db) throw new Error('Database unavailable.');
-      if (!where.ownerId) throw new Error('A transaction owner is required.');
-      if (data.synced !== undefined) {
-        await db.runAsync(
-          'UPDATE "Transaction" SET synced = ? WHERE id = ? AND ownerId = ?',
-          [data.synced ? 1 : 0, where.id, where.ownerId],
-        );
-      }
-      return { id: where.id, ...data };
-    }
-  }
+
+    refund: async ({ id, ownerId, originalTransactionId, accountId, amountMinor, refundRemaining = false, date = new Date(), note = '' }: {
+      id: string; ownerId: string; originalTransactionId: string; accountId: string; amountMinor?: number; refundRemaining?: boolean; date?: Date | string; note?: string;
+    }): Promise<LocalTransaction> => {
+      if (!id.trim() || !ownerId.trim() || !originalTransactionId.trim()) throw new Error('A refund ID, profile, and original transaction are required.');
+      if (!refundRemaining && (!Number.isSafeInteger(amountMinor) || amountMinor! <= 0)) throw new Error('Refund amount must be a positive integer in minor units.');
+      const at = date instanceof Date ? date.toISOString() : new Date(date).toISOString();
+      if (!Number.isFinite(new Date(at).getTime())) throw new Error('Refund date is invalid.');
+      if (note.length > 2000) throw new Error('Note must be 2,000 characters or fewer.');
+      const database = await getDb();
+      return withLocalWrite(database, async (transaction) => {
+        const existing = await transaction.getFirstAsync<TransactionRow>('SELECT * FROM "Transaction" WHERE id = ? AND ownerId = ?', [id, ownerId]);
+        if (existing) {
+          if (existing.type !== 'Refund' || existing.reversalOfId !== originalTransactionId || existing.accountId !== accountId || (!refundRemaining && existing.amountMinor !== amountMinor) || existing.date !== at || existing.note !== note.trim()) throw new Error('This refund ID was already used for different financial details.');
+          return mapTransactionRow(validateTransactionRow(existing));
+        }
+        const original = await transaction.getFirstAsync<TransactionRow>('SELECT * FROM "Transaction" WHERE id = ? AND ownerId = ?', [originalTransactionId, ownerId]);
+        if (!original || original.type !== 'Expense' || !original.accountId) throw new Error('Only a recorded expense can be refunded.');
+        const obligationLink=await transaction.getFirstAsync<{kind:string}>("SELECT 'bill' AS kind FROM BillPayment WHERE ownerId=? AND transactionId=? UNION ALL SELECT 'debt' AS kind FROM DebtEvent WHERE ownerId=? AND transactionId=? LIMIT 1",[ownerId,originalTransactionId,ownerId,originalTransactionId]);
+        if(obligationLink) throw new Error('This bill or debt cash entry must be corrected through its obligation history.');
+        validateTransactionRow(original);
+        const alreadyCorrected = await transaction.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM "Transaction" WHERE ownerId = ? AND type = ? AND reversalOfId = ?', [ownerId, 'Reversal', originalTransactionId]);
+        if (alreadyCorrected?.count) throw new Error('A corrected expense cannot receive another refund.');
+        const account = await transaction.getFirstAsync<{ id: string; ownerId: string; currency: string }>('SELECT id, ownerId, currency FROM Account WHERE id = ? AND ownerId = ? AND archivedAt IS NULL', [accountId, ownerId]);
+        const originalAccount = await transaction.getFirstAsync<{ currency: string }>('SELECT currency FROM Account WHERE id = ? AND ownerId = ?', [original.accountId, ownerId]);
+        if (!account || !originalAccount || account.currency !== originalAccount.currency) throw new Error('Refund account must belong to this profile and use the expense currency.');
+        const refunded = await transaction.getFirstAsync<{ amount: number | null }>('SELECT SUM(amountMinor) AS amount FROM "Transaction" WHERE ownerId = ? AND type = ? AND reversalOfId = ?', [ownerId, 'Refund', originalTransactionId]);
+        const refundAmount = resolveRefundAmount({
+          originalAmountMinor: original.amountMinor,
+          alreadyRefundedMinor: refunded?.amount ?? 0,
+          amountMinor,
+          refundRemaining,
+        });
+        await transaction.runAsync('INSERT INTO "Transaction" (id, ownerId, amount, amountMinor, type, category, categoryId, classificationId, accountId, toAccountId, date, note, taxStatus, synced, reversalOfId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, ?)', [id, ownerId, refundAmount / 100, refundAmount, 'Refund', 'Expense refund', 'expense_refund', 'expense_refund', accountId, at, note.trim(), 'unreviewed', originalTransactionId]);
+        return mapTransactionRow(validateTransactionRow({
+          id, ownerId, amountMinor: refundAmount, type: 'Refund', categoryId: 'expense_refund', classificationId: 'expense_refund', accountId, toAccountId: null,
+          date: at, note: note.trim(), sourceName: null, paymentMethod: null, sourceAmountMinor: null, sourceCurrency: null, exchangeRate: null,
+          referenceNumber: null, taxStatus: 'unreviewed', taxYear: null, synced: 0, reversalOfId: originalTransactionId,
+        }));
+      });
+    },
+
+    correct: async ({ ownerId, originalTransactionId, replacement }: { ownerId: string; originalTransactionId: string; replacement: TransactionDraft }): Promise<NormalizedTransactionDraft> => {
+      const replacementId = replacement.id;
+      if (!ownerId.trim() || !originalTransactionId.trim() || !replacementId?.trim()) throw new Error('A profile, original transaction, and stable replacement ID are required.');
+      if (replacement.ownerId !== ownerId || replacement.type === 'Refund' || replacement.type === 'Reversal') throw new Error('Correction replacement must be a standard transaction for the same profile.');
+      const reversalId = `correction:${replacementId}:reversal`;
+      const database = await getDb();
+      return withLocalWrite(database, async (transaction) => {
+        const original = await transaction.getFirstAsync<TransactionRow>('SELECT * FROM "Transaction" WHERE id = ? AND ownerId = ?', [originalTransactionId, ownerId]);
+        if (!original || original.type === 'Refund' || original.type === 'Reversal' || !original.accountId) throw new Error('This transaction cannot be corrected.');
+        const obligationLink=await transaction.getFirstAsync<{kind:string}>("SELECT 'bill' AS kind FROM BillPayment WHERE ownerId=? AND transactionId=? UNION ALL SELECT 'debt' AS kind FROM DebtEvent WHERE ownerId=? AND transactionId=? LIMIT 1",[ownerId,originalTransactionId,ownerId,originalTransactionId]);
+        if(obligationLink) throw new Error('This bill or debt cash entry must be corrected through its obligation history.');
+        const priorRefund = await transaction.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM "Transaction" WHERE ownerId = ? AND type = ? AND reversalOfId = ?', [ownerId, 'Refund', originalTransactionId]);
+        const existingReversal = await transaction.getFirstAsync<{ id: string }>('SELECT id FROM "Transaction" WHERE ownerId = ? AND type = ? AND reversalOfId = ?', [ownerId, 'Reversal', originalTransactionId]);
+        const existingReplacement = await transaction.getFirstAsync<TransactionRow>('SELECT * FROM "Transaction" WHERE id = ? AND ownerId = ?', [replacementId, ownerId]);
+        assertCorrectionCanPost({
+          originalTransactionId,
+          stableReversalId: reversalId,
+          existingReversalId: existingReversal?.id ?? null,
+          priorRefundCount: priorRefund?.count ?? 0,
+          replacementAlreadyExists: !!existingReplacement,
+          existingReplacementCorrectionOfId: existingReplacement?.correctionOfId ?? null,
+        });
+        const accounts = await Promise.all([original.accountId, original.toAccountId].filter((value): value is string => !!value).map(async (accountId) => transaction.getFirstAsync<{ id: string; ownerId: string; currency: string; type: string }>('SELECT id, ownerId, currency, type FROM Account WHERE id = ? AND ownerId = ?', [accountId, ownerId])));
+        if (accounts.some((account) => !account)) throw new Error('Original transaction refers to a missing account.');
+        const existingReversalById = await transaction.getFirstAsync<{ type: string; ownerId: string; reversalOfId: string | null }>('SELECT type, ownerId, reversalOfId FROM "Transaction" WHERE id = ?', [reversalId]);
+        if (existingReversalById && (existingReversalById.type !== 'Reversal' || existingReversalById.ownerId !== ownerId || existingReversalById.reversalOfId !== originalTransactionId)) throw new Error('Correction ID conflicts with an existing financial record.');
+        await transaction.runAsync('INSERT OR IGNORE INTO "Transaction" (id, ownerId, amount, amountMinor, type, category, categoryId, classificationId, accountId, toAccountId, date, note, taxStatus, synced, reversalOfId) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?)', [reversalId, ownerId, original.amountMinor / 100, original.amountMinor, 'Reversal', 'Correction reversal', 'correction_reversal', original.accountId, original.toAccountId, new Date().toISOString(), `Correction reversal for ${original.id}`, 'unreviewed', original.id]);
+        const result = await createValidatedTransaction(replacement, replacementId, {
+          findAccount: async (accountId, profileId) => transaction.getFirstAsync<{ id: string; ownerId: string; currency: string; type: string }>('SELECT id, ownerId, currency, type FROM Account WHERE id = ? AND ownerId = ? AND archivedAt IS NULL', [accountId, profileId]),
+          findTransaction: async (transactionId, profileId) => {
+            const row = await transaction.getFirstAsync<TransactionRow>('SELECT * FROM "Transaction" WHERE id = ? AND ownerId = ?', [transactionId, profileId]);
+            if (!row) return null;
+            const account = row.accountId ? await transaction.getFirstAsync<{ id: string; ownerId: string; currency: string; type: string }>('SELECT id, ownerId, currency, type FROM Account WHERE id = ? AND ownerId = ?', [row.accountId, profileId]) : null;
+            const destination = row.toAccountId ? await transaction.getFirstAsync<{ id: string; ownerId: string; currency: string; type: string }>('SELECT id, ownerId, currency, type FROM Account WHERE id = ? AND ownerId = ?', [row.toAccountId, profileId]) : null;
+            if (!account) throw new Error('Existing transaction refers to a missing account.');
+            return normalizeTransactionDraft({ id: row.id, ownerId: row.ownerId, amountMinor: row.amountMinor, type: row.type as TransactionType, classificationId: row.classificationId ?? undefined, accountId: row.accountId!, toAccountId: row.toAccountId ?? undefined, date: row.date, note: row.note, sourceName: row.sourceName ?? undefined, paymentMethod: row.paymentMethod ?? undefined, sourceAmountMinor: row.sourceAmountMinor ?? undefined, sourceCurrency: row.sourceCurrency ?? undefined, exchangeRate: row.exchangeRate ?? undefined, referenceNumber: row.referenceNumber ?? undefined, taxStatus: row.taxStatus, taxYear: row.taxYear ?? undefined }, account, destination ?? undefined);
+          },
+          insertTransaction: async (record) => {
+            await transaction.runAsync('INSERT INTO "Transaction" (id, ownerId, amount, amountMinor, type, category, categoryId, classificationId, accountId, toAccountId, date, note, sourceName, paymentMethod, sourceAmountMinor, sourceCurrency, exchangeRate, referenceNumber, taxStatus, taxYear, synced, correctionOfId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)', [record.id, record.ownerId, record.amountMinor / 100, record.amountMinor, record.type, record.categoryLabel, record.categoryLabel, record.classificationId, record.accountId, record.toAccountId, record.date, record.note, record.sourceName, record.paymentMethod, record.sourceAmountMinor, record.sourceCurrency, record.exchangeRate, record.referenceNumber, record.taxStatus, record.taxYear, originalTransactionId]);
+            await budgetingStore.validatePostTransaction(asBudgetingSql(transaction), record.ownerId, record.accountId);
+          },
+        });
+        await transaction.runAsync('UPDATE "Transaction" SET correctionOfId = ? WHERE id = ? AND ownerId = ?', [originalTransactionId, result.id, ownerId]);
+        return result;
+      });
+    },
+  },
 };
+
+function mapTransactionRow(row: ValidatedTransactionRow): LocalTransaction {
+  return {
+    id: row.id, ownerId: row.ownerId, amountMinor: row.amountMinor, type: row.type,
+    category: row.categoryId, classificationId: row.classificationId, accountId: row.accountId,
+    toAccountId: row.toAccountId, date: row.date, note: row.note, sourceName: row.sourceName,
+    paymentMethod: row.paymentMethod, sourceAmountMinor: row.sourceAmountMinor, sourceCurrency: row.sourceCurrency,
+    exchangeRate: row.exchangeRate, referenceNumber: row.referenceNumber, taxStatus: row.taxStatus,
+    taxYear: row.taxYear, synced: row.synced, reversalOfId: row.reversalOfId ?? null,
+    correctionOfId: row.correctionOfId ?? null,
+    accountCurrency: row.accountCurrency && isCurrencyCode(row.accountCurrency) ? row.accountCurrency : null,
+  };
+}

@@ -1,0 +1,298 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { LOCAL_DATABASE_VERSION, migrateLocalDatabase } from '../../src/db/local/migrations.ts';
+
+function migrationAdapter(database) {
+  return {
+    async execAsync(source) { database.exec(source); },
+    async runAsync(source, params = []) { database.prepare(source).run(...params); },
+    async getFirstAsync(source, params = []) { return database.prepare(source).get(...params) ?? null; },
+    async getAllAsync(source, params = []) { return database.prepare(source).all(...params); },
+    async withTransactionAsync(task) {
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        await task();
+        database.exec('COMMIT');
+      } catch (error) {
+        database.exec('ROLLBACK');
+        throw error;
+      }
+    },
+  };
+}
+
+function createReleasedSchema(databasePath = ':memory:') {
+  const database = new DatabaseSync(databasePath);
+  database.exec(`
+    CREATE TABLE Account (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'Bank',
+      balance REAL NOT NULL DEFAULT 0,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      synced BOOLEAN NOT NULL DEFAULT 0
+    );
+    CREATE TABLE "Transaction" (
+      id TEXT PRIMARY KEY NOT NULL,
+      amount REAL NOT NULL,
+      type TEXT NOT NULL DEFAULT 'Expense',
+      category TEXT NOT NULL,
+      accountId TEXT,
+      note TEXT,
+      date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      synced BOOLEAN NOT NULL DEFAULT 0
+    );
+    INSERT INTO Account (id, name, type, balance) VALUES ('acct-1', 'Main bank', 'Bank', 1250.75);
+    INSERT INTO "Transaction" (id, amount, type, category, accountId, note, date)
+      VALUES ('tx-1', 20000, 'Income', 'Family gift / support', 'acct-1', 'From mother', '2026-05-01T12:00:00.000Z');
+    INSERT INTO "Transaction" (id, amount, type, category, accountId, note, date)
+      VALUES ('tx-2', 5000, 'Expense', 'Banking expense', 'acct-1', 'Card fee', '2026-05-02T12:00:00.000Z');
+  `);
+  return database;
+}
+
+function createIntermediateSchema() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE User (id TEXT PRIMARY KEY, fullName TEXT, email TEXT, passwordHash TEXT, createdAt TEXT);
+    CREATE TABLE Account (
+      id TEXT PRIMARY KEY, ownerId TEXT, name TEXT, type TEXT, balance REAL, balanceMinor INTEGER,
+      currency TEXT, createdAt TEXT, synced INTEGER
+    );
+    CREATE TABLE "Transaction" (
+      id TEXT PRIMARY KEY, ownerId TEXT, amount REAL, amountMinor INTEGER, type TEXT,
+      category TEXT, categoryId TEXT, accountId TEXT, toAccountId TEXT, date TEXT,
+      note TEXT, sourceName TEXT, paymentMethod TEXT, sourceAmountMinor INTEGER,
+      sourceCurrency TEXT, exchangeRate TEXT, referenceNumber TEXT, taxStatus TEXT,
+      taxYear INTEGER, synced INTEGER
+    );
+    INSERT INTO User VALUES ('user-1', 'A User', 'a@example.test', 'legacy-hash', '2026-01-01T00:00:00.000Z');
+    INSERT INTO Account VALUES ('acct-1', 'user-1', 'Main bank', 'bank', 100.50, NULL, 'PKR', '2026-01-01T00:00:00.000Z', 1);
+    INSERT INTO "Transaction" VALUES (
+      'tx-1', 'user-1', 125.25, NULL, 'Income', 'Salary', 'Salary', 'acct-1', NULL,
+      '2026-02-01T00:00:00.000Z', 'February pay', 'Employer', 'bank', NULL, NULL, NULL, NULL,
+      'unreviewed', 2026, 1
+    );
+  `);
+  return database;
+}
+
+test('versioned migration preserves released records, maps classifications, and is repeatable', async () => {
+  const database = createReleasedSchema();
+  const adapter = migrationAdapter(database);
+
+  await migrateLocalDatabase(adapter);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, LOCAL_DATABASE_VERSION);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM Account').get().count, 1);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 2);
+
+  const account = database.prepare('SELECT ownerId, balanceMinor, currency FROM Account WHERE id = ?').get('acct-1');
+  assert.equal(account.ownerId, null, 'ownership remains unclaimed until the user flow can safely claim it');
+  assert.equal(account.balanceMinor, 125075);
+  assert.equal(account.currency, 'PKR');
+
+  const gift = database.prepare('SELECT amountMinor, categoryId, classificationId, synced FROM "Transaction" WHERE id = ?').get('tx-1');
+  assert.equal(gift.amountMinor, 2_000_000);
+  assert.equal(gift.categoryId, 'Family gift / support', 'legacy display label stays unchanged');
+  assert.equal(gift.classificationId, 'family_gift');
+  assert.equal(gift.synced, 0);
+  const fee = database.prepare('SELECT categoryId, classificationId FROM "Transaction" WHERE id = ?').get('tx-2');
+  assert.equal(fee.categoryId, 'Banking expense');
+  assert.equal(fee.classificationId, 'bank_fee');
+
+  await migrateLocalDatabase(adapter);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 2);
+  assert.equal(database.prepare('SELECT classificationId FROM "Transaction" WHERE id = ?').get('tx-1').classificationId, 'family_gift');
+  database.close();
+});
+
+test('fresh databases receive the same schema without creating sample financial records', async () => {
+  const database = new DatabaseSync(':memory:');
+  await migrateLocalDatabase(migrationAdapter(database));
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM Account').get().count, 0);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 0);
+  assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(LOCAL_DATABASE_VERSION, 5);
+  assert.ok(database.prepare('PRAGMA table_info(Account)').all().some((column) => column.name === 'archivedAt'));
+  assert.ok(database.prepare('PRAGMA table_info("Transaction")').all().some((column) => column.name === 'reversalOfId'));
+  assert.ok(database.prepare('PRAGMA table_info("Transaction")').all().some((column) => column.name === 'correctionOfId'));
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'Transaction_owner_date_id_idx'").get());
+  for (const table of ['Budget', 'SavingsGoal', 'SavingsGoalEvent', 'EmergencyFundConfig', 'EmergencyFundEvent']) {
+    assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `${table} exists`);
+  }
+  for (const table of ['RecurringSchedule','ScheduleOccurrence','Bill','BillPayment','Debt','DebtEvent','BillPaymentCorrection','DebtEventCorrection','DebtRepaymentSchedule','DebtInterestEvent']) {
+    assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `${table} exists`);
+  }
+  database.close();
+});
+
+test('schema v4 upgrades to v5 transactionally and leaves existing financial rows intact',async()=>{
+  const database=new DatabaseSync(':memory:');database.exec('PRAGMA foreign_keys=ON');
+  const adapter=migrationAdapter(database);
+  await migrateLocalDatabase(adapter);
+  database.prepare('INSERT INTO User VALUES(?,?,?,?,?)').run('u','User','u@example.test','hash','2026-01-01');
+  database.exec(`DROP TRIGGER IF EXISTS DebtEvent_semantics_guard; DROP TRIGGER IF EXISTS Transaction_obligation_adjustment_guard;
+    DROP TRIGGER IF EXISTS BillPayment_profile_guard; DROP TRIGGER IF EXISTS BillPayment_obligation_limit_guard;`);
+  for(const name of ['BillPaymentCorrectionReplacement_profile_guard','BillPaymentCorrectionReplacement_append_only_update','BillPaymentCorrectionReplacement_append_only_delete','DebtEventCorrectionReplacement_profile_guard','DebtEventCorrectionReplacement_append_only_update','DebtEventCorrectionReplacement_append_only_delete','BillPaymentCorrection_profile_guard','BillPaymentCorrection_replacement_guard','BillPaymentCorrection_append_only_update','BillPaymentCorrection_append_only_delete','DebtEventCorrection_profile_guard','DebtEventCorrection_replacement_guard','DebtEventCorrection_append_only_update','DebtEventCorrection_append_only_delete','DebtRepaymentSchedule_profile_guard','DebtRepaymentSchedule_history_update_guard','DebtRepaymentSchedule_delete_guard','DebtInterestEvent_profile_guard','DebtInterestEvent_append_only_update','DebtInterestEvent_append_only_delete']) database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
+  for(const table of ['BillPaymentCorrectionReplacement','DebtEventCorrectionReplacement','BillPaymentCorrection','DebtEventCorrection','DebtRepaymentSchedule','DebtInterestEvent']) database.exec(`DROP TABLE IF EXISTS "${table}"`);
+  database.exec('PRAGMA user_version=4');
+  await migrateLocalDatabase(adapter);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,5);
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM User WHERE id=?').get('u').n,1);
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtEventCorrection'").get());
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtInterestEvent'").get());
+  database.close();
+});
+
+test('budget, goal and emergency-fund migration is repeatable and protects profile history', async () => {
+  const database = createIntermediateSchema();
+  database.exec('PRAGMA foreign_keys = ON');
+  const adapter = migrationAdapter(database);
+  await migrateLocalDatabase(adapter);
+  await migrateLocalDatabase(adapter);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 5);
+
+  database.prepare(`INSERT INTO Budget
+    (id, ownerId, categoryId, amountMinor, currency, periodStart, periodEnd, rolloverPolicy, revision, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    'budget-1', 'user-1', 'food', 10000, 'PKR', '2026-05-01', '2026-06-01', 'reset', 1, '2026-05-01T00:00:00.000Z',
+  );
+  assert.throws(() => database.prepare(`INSERT INTO Budget
+    (id, ownerId, categoryId, amountMinor, currency, periodStart, periodEnd, rolloverPolicy, revision, createdAt)
+    VALUES ('budget-duplicate', 'user-1', 'food', 15000, 'PKR', '2026-05-01', '2026-06-01', 'reset', 1, '2026-05-02T00:00:00.000Z')`).run(), /UNIQUE constraint failed/);
+  assert.throws(() => database.prepare('UPDATE Budget SET amountMinor = 20000 WHERE id = ?').run('budget-1'), /immutable/);
+
+  database.prepare(`INSERT INTO SavingsGoal
+    (id, ownerId, name, targetMinor, currency, status, createdAt, updatedAt)
+    VALUES ('goal-1', 'user-1', 'Laptop', 500000, 'PKR', 'active', '2026-05-01', '2026-05-01')`).run();
+  database.prepare(`INSERT INTO SavingsGoalEvent
+    (id, ownerId, goalId, eventType, amountMinor, currency, idempotencyKey, eventDate, note, createdAt)
+    VALUES ('planned-1', 'user-1', 'goal-1', 'planned', 25000, 'PKR', 'planned-1', '2026-05-01', '', '2026-05-01')`).run();
+  database.prepare(`INSERT INTO SavingsGoalEvent
+    (id, ownerId, goalId, eventType, amountMinor, currency, accountId, idempotencyKey, eventDate, note, createdAt)
+    VALUES ('allocate-1', 'user-1', 'goal-1', 'allocate', 10000, 'PKR', 'acct-1', 'allocate-1', '2026-05-01', '', '2026-05-01')`).run();
+  assert.throws(() => database.prepare('UPDATE SavingsGoalEvent SET amountMinor = 1 WHERE id = ?').run('allocate-1'), /append-only/);
+  assert.throws(() => database.prepare('DELETE FROM SavingsGoalEvent WHERE id = ?').run('allocate-1'), /append-only/);
+  assert.throws(() => database.prepare(`INSERT INTO SavingsGoalEvent
+    (id, ownerId, goalId, eventType, amountMinor, currency, accountId, idempotencyKey, eventDate, note, createdAt)
+    VALUES ('wrong-profile', 'user-2', 'goal-1', 'allocate', 10000, 'PKR', 'acct-1', 'wrong-profile', '2026-05-01', '', '2026-05-01')`).run(), /savings event owner/);
+  database.prepare(`INSERT INTO EmergencyFundConfig (ownerId, currency, coverageMonths, essentialMonthlyMinor, updatedAt)
+    VALUES ('user-1', 'PKR', 3, 50000, '2026-05-01')`).run();
+  database.prepare(`INSERT INTO EmergencyFundEvent
+    (id, ownerId, eventType, amountMinor, currency, accountId, idempotencyKey, eventDate, note, createdAt)
+    VALUES ('emergency-1', 'user-1', 'allocate', 5000, 'PKR', 'acct-1', 'emergency-1', '2026-05-01', '', '2026-05-01')`).run();
+  assert.throws(() => database.prepare('UPDATE EmergencyFundEvent SET amountMinor = 1 WHERE id = ?').run('emergency-1'), /append-only/);
+  assert.throws(() => database.prepare('DELETE FROM EmergencyFundEvent WHERE id = ?').run('emergency-1'), /append-only/);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 1, 'migration retains existing financial history');
+  database.close();
+});
+
+test('financial core migration blocks cross-profile account references and retains linked event foreign keys', async () => {
+  const database = createIntermediateSchema();
+  database.exec('PRAGMA foreign_keys = ON');
+  await migrateLocalDatabase(migrationAdapter(database));
+  database.prepare('INSERT INTO User VALUES (?, ?, ?, ?, ?)').run('user-2', 'B User', 'b@example.test', 'hash', '2026-01-01T00:00:00.000Z');
+  database.prepare('INSERT INTO Account (id, ownerId, name, type, balanceMinor, currency, createdAt, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('acct-2', 'user-2', 'Other', 'bank', 0, 'PKR', '2026-01-01T00:00:00.000Z', 0);
+  assert.throws(() => database.prepare(`INSERT INTO "Transaction" (id, ownerId, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced)
+    VALUES ('bad-tx', 'user-1', 100, 'Expense', 'food', 'missing-account', '2026-01-01T00:00:00.000Z', '', 'unreviewed', 0)`).run(), /unavailable to this profile/);
+  assert.throws(() => database.prepare(`INSERT INTO "Transaction" (id, ownerId, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced)
+    VALUES ('wrong-owner', 'user-1', 100, 'Expense', 'food', 'acct-2', '2026-01-01T00:00:00.000Z', '', 'unreviewed', 0)`).run(), /unavailable to this profile/);
+  const columns = database.prepare('PRAGMA table_info("Transaction")').all().map((column) => column.name);
+  assert.ok(columns.includes('reversalOfId'));
+  assert.ok(columns.includes('correctionOfId'));
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'Transaction_account_insert_guard'").get());
+  database.prepare(`INSERT INTO "Transaction" (id, ownerId, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced, reversalOfId)
+    VALUES ('undo-tx', 'user-1', 12525, 'Reversal', 'correction_reversal', 'acct-1', '2026-03-01T00:00:00.000Z', 'Undo', 'unreviewed', 0, 'tx-1')`).run();
+  assert.throws(() => database.prepare('DELETE FROM "Transaction" WHERE id = ?').run('tx-1'), /FOREIGN KEY constraint failed/);
+  assert.throws(() => database.prepare('DELETE FROM Account WHERE id = ?').run('acct-1'), /cannot be deleted/);
+  database.close();
+});
+
+test('migration upgrades the intermediate unversioned local schema without losing ownership or money', async () => {
+  const database = createIntermediateSchema();
+  await migrateLocalDatabase(migrationAdapter(database));
+  const user = database.prepare('SELECT id FROM User').get();
+  const account = database.prepare('SELECT ownerId, balanceMinor FROM Account WHERE id = ?').get('acct-1');
+  const transaction = database.prepare('SELECT ownerId, amountMinor, classificationId, categoryId, synced FROM "Transaction" WHERE id = ?').get('tx-1');
+  assert.equal(user.id, 'user-1');
+  assert.equal(account.ownerId, 'user-1');
+  assert.equal(account.balanceMinor, 10050);
+  assert.equal(transaction.ownerId, 'user-1');
+  assert.equal(transaction.amountMinor, 12525);
+  assert.equal(transaction.classificationId, 'salary');
+  assert.equal(transaction.categoryId, 'Salary');
+  assert.equal(transaction.synced, 0, 'legacy sync flags are reset because no server acknowledgement exists');
+  database.close();
+});
+
+test('unsafe legacy money aborts and rolls back all schema and data changes', async () => {
+  const database = createReleasedSchema();
+  database.prepare('UPDATE "Transaction" SET amount = ? WHERE id = ?').run(90_071_992_547_409.92, 'tx-1');
+  const adapter = migrationAdapter(database);
+
+  await assert.rejects(migrateLocalDatabase(adapter), /outside the supported range/);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 0);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 2);
+  const columns = database.prepare('PRAGMA table_info("Transaction")').all().map((column) => column.name);
+  assert.equal(columns.includes('classificationId'), false, 'ALTER statements roll back with the data migration');
+  assert.equal(database.prepare('SELECT amount FROM "Transaction" WHERE id = ?').get('tx-1').amount, 90_071_992_547_409.92);
+  database.close();
+});
+
+test('late migration integrity failure rolls back DDL, backfills, and version atomically', async () => {
+  const database = createReleasedSchema();
+  const adapter = migrationAdapter(database);
+  const getFirstAsync = adapter.getFirstAsync.bind(adapter);
+  adapter.getFirstAsync = async (source, params = []) => {
+    if (source === 'PRAGMA integrity_check') return { integrity_check: 'simulated failure' };
+    return getFirstAsync(source, params);
+  };
+
+  await assert.rejects(migrateLocalDatabase(adapter), /integrity check failed/);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 0);
+  assert.equal(database.prepare('SELECT balance FROM Account WHERE id = ?').get('acct-1').balance, 1250.75);
+  assert.equal(database.prepare('SELECT amount FROM "Transaction" WHERE id = ?').get('tx-1').amount, 20_000);
+  assert.equal(database.prepare('PRAGMA table_info(Account)').all().some((column) => column.name === 'archivedAt'), false);
+  assert.equal(database.prepare('PRAGMA table_info("Transaction")').all().some((column) => column.name === 'reversalOfId'), false);
+  database.close();
+});
+
+test('a database created by a newer app is rejected without being modified', async () => {
+  const database = createReleasedSchema();
+  database.exec('PRAGMA user_version = 99');
+  await assert.rejects(migrateLocalDatabase(migrationAdapter(database)), /newer than this app supports/);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 99);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 2);
+  database.close();
+});
+
+test('migrated database reopens with its version, transaction totals, and opening balance intact', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'houselog-migration-reopen-'));
+  const databasePath = join(directory, 'legacy.sqlite');
+  try {
+    const before = createReleasedSchema(databasePath);
+    const original = {
+      accountBalance: before.prepare('SELECT balance FROM Account WHERE id = ?').get('acct-1').balance,
+      transactionAmount: before.prepare('SELECT SUM(amount) AS amount FROM "Transaction"').get().amount,
+      accounts: before.prepare('SELECT COUNT(*) AS count FROM Account').get().count,
+      transactions: before.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count,
+    };
+    await migrateLocalDatabase(migrationAdapter(before));
+    before.close();
+
+    const reopened = new DatabaseSync(databasePath);
+    assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, LOCAL_DATABASE_VERSION);
+    assert.equal(reopened.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+    assert.equal(reopened.prepare('SELECT COUNT(*) AS count FROM Account').get().count, original.accounts);
+    assert.equal(reopened.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, original.transactions);
+    assert.equal(reopened.prepare('SELECT balanceMinor FROM Account WHERE id = ?').get('acct-1').balanceMinor, Math.round(original.accountBalance * 100));
+    assert.equal(reopened.prepare('SELECT SUM(amountMinor) AS amount FROM "Transaction"').get().amount, original.transactionAmount * 100);
+    reopened.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

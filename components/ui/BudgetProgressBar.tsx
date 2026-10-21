@@ -1,11 +1,13 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, Animated } from 'react-native';
+import { formatMinorUnits } from '../../src/finance/ledger';
 
 interface BudgetProgressBarProps {
   categoryName: string;
   icon: any;
   spent: number;
   limit: number;
+  currency?: string;
 }
 
 export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
@@ -13,9 +15,10 @@ export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
   icon: Icon,
   spent,
   limit,
+  currency = 'PKR',
 }) => {
-  const percentage = (spent / limit) * 100;
-  const clampedPercentage = Math.min(percentage, 100);
+  const percentage = limit > 0 ? (spent / limit) * 100 : spent > 0 ? 100 : 0;
+  const clampedPercentage = Math.max(0, Math.min(percentage, 100));
   const isOverBudget = spent > limit;
 
   let barColor = 'bg-[#533AFE]'; // Primary
@@ -26,7 +29,7 @@ export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
   }
 
   // Animation for width
-  const animatedWidth = useRef(new Animated.Value(0)).current;
+  const [animatedWidth] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
     Animated.timing(animatedWidth, {
@@ -34,7 +37,7 @@ export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
       duration: 1000,
       useNativeDriver: false, // width doesn't support native driver
     }).start();
-  }, [clampedPercentage]);
+  }, [animatedWidth, clampedPercentage]);
 
   const widthInterpolation = animatedWidth.interpolate({
     inputRange: [0, 100],
@@ -54,7 +57,7 @@ export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
           </Text>
         </View>
         <Text className={`font-bold text-sm ${isOverBudget ? 'text-red-500' : 'text-gray-600 dark:text-gray-400'}`}>
-          ₨ {spent.toLocaleString()} / ₨ {limit.toLocaleString()}
+          {formatMinorUnits(Math.round(spent * 100), currency)} / {formatMinorUnits(Math.round(limit * 100), currency)}
         </Text>
       </View>
 

@@ -3,10 +3,11 @@ import { View, Text, ScrollView, TouchableOpacity, Switch, Alert } from 'react-n
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { useColorScheme } from 'nativewind';
-import { Building2, Target, Moon, Coins, CloudSync, FileText, LogOut, Trash2, ChevronRight } from 'lucide-react-native';
+import { Building2, Target, PiggyBank, CalendarClock, Moon, Coins, CloudSync, FileText, LogOut, Trash2, ChevronRight } from 'lucide-react-native';
+import type { LucideIcon } from 'lucide-react-native';
 
 interface SettingRowProps {
-  icon: any;
+  icon: LucideIcon;
   title: string;
   isDanger?: boolean;
   onPress?: () => void;
@@ -100,13 +101,25 @@ export default function SettingsScreen() {
               icon={Building2} 
               title="Manage Accounts" 
               showChevron 
-              onPress={() => Alert.alert('Account management unavailable', 'You can add your first account during setup. Account editing is not available yet.')}
+              onPress={() => router.push('/accounts')}
             />
             <SettingRow 
               icon={Target} 
               title="Monthly Budgets" 
               showChevron 
               onPress={() => router.push('/budgets')} 
+            />
+            <SettingRow
+              icon={PiggyBank}
+              title="Savings & Emergency Fund"
+              showChevron
+              onPress={() => router.push('/savings')}
+            />
+            <SettingRow
+              icon={CalendarClock}
+              title="Recurring, Bills & Debt"
+              showChevron
+              onPress={() => router.push('/obligations')}
             />
           </View>
 

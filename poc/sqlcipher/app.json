@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "HouseLog Cipher Lab",
+    "slug": "houselog-sqlcipher-lab",
+    "version": "0.1.0",
+    "android": {
+      "package": "dev.houselog.sqlcipherlab"
+    },
+    "plugins": [
+      ["expo-sqlite", { "useSQLCipher": true }],
+      "expo-secure-store"
+    ]
+  }
+}

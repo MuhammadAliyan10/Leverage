@@ -1,13 +1,17 @@
 import React, { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { View, Text, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { ChevronLeft, ChevronRight, ShoppingCart, Home, Car, Zap, Coffee, CircleDollarSign } from 'lucide-react-native';
 import { PieChart } from 'react-native-gifted-charts';
-import { useTransactions } from '../../hooks/queries/useTransactions';
 import { formatMinorUnits } from '../../src/finance/ledger';
+import type { LucideIcon } from 'lucide-react-native';
+import { localDb } from '../../src/db/local/client';
+import { useAuth } from '../../src/context/AuthContext';
+import { calculateFinancialReport } from '../../src/finance/reporting';
 
-const CATEGORY_STYLES: Record<string, { color: string; icon: any }> = {
+const CATEGORY_STYLES: Record<string, { color: string; icon: LucideIcon }> = {
   Food: { color: '#533AFE', icon: ShoppingCart },
   Groceries: { color: '#533AFE', icon: ShoppingCart },
   'Rent & Utilities': { color: '#7b61ff', icon: Home },
@@ -17,60 +21,48 @@ const CATEGORY_STYLES: Record<string, { color: string; icon: any }> = {
   Income: { color: '#16a34a', icon: CircleDollarSign },
 };
 
-type Transaction = {
-  id: string;
-  amountMinor: number;
-  type: 'Income' | 'Expense' | 'Transfer';
-  category: string;
-  date: string;
-  note: string;
-};
-
-function checkedTotal(values: number[]): number {
-  const total = values.reduce((sum, value) => {
-    if (!Number.isSafeInteger(value) || value < 0) throw new Error('A saved transaction amount is invalid.');
-    return sum + BigInt(value);
-  }, 0n);
-  if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Monthly spending is out of range.');
-  return Number(total);
-}
-
 export default function InsightsScreen() {
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const today = new Date();
     return new Date(today.getFullYear(), today.getMonth(), 1);
   });
-  const { data: sections = [], isLoading, isError } = useTransactions();
-  const allTransactions = sections.flatMap((section: any) => section.data) as Transaction[];
+  const { user } = useAuth();
+  const monthStart = useMemo(() => new Date(selectedMonth.getFullYear(), selectedMonth.getMonth(), 1), [selectedMonth]);
+  const nextMonth = useMemo(() => new Date(selectedMonth.getFullYear(), selectedMonth.getMonth() + 1, 1), [selectedMonth]);
+  const reportQuery = useQuery({
+    queryKey: ['financial-report', user?.id, monthStart.getFullYear(), monthStart.getMonth(), 'PKR'],
+    enabled: !!user,
+    queryFn: async () => {
+      if (!user) throw new Error('Sign in to view financial reports.');
+      return localDb.transaction.findReportRows({
+        ownerId: user.id,
+        startDate: monthStart.toISOString(),
+        endDate: nextMonth.toISOString(),
+      });
+    },
+  });
+  const reportRows = reportQuery.data;
+  const { isLoading, isError } = reportQuery;
 
-  const { categories, largestTransactions, totalSpentMinor, pieData } = useMemo(() => {
-    const monthTransactions = allTransactions.filter((tx) => {
-      const date = new Date(tx.date);
-      if (Number.isNaN(date.getTime())) throw new Error('A transaction has an invalid date.');
-      return date.getFullYear() === selectedMonth.getFullYear()
-        && date.getMonth() === selectedMonth.getMonth();
+  const { categories, largestTransactions, totalSpentMinor, pieData, excludedCurrencies } = useMemo(() => {
+    const report = calculateFinancialReport(reportRows ?? [], 'PKR', {
+      startDate: monthStart.toISOString(), endDate: nextMonth.toISOString(),
     });
-    const expenses = monthTransactions.filter((tx) => tx.type === 'Expense');
-    const categoryTotals = new Map<string, number[]>();
-    for (const tx of expenses) {
-      const values = categoryTotals.get(tx.category) ?? [];
-      values.push(tx.amountMinor);
-      categoryTotals.set(tx.category, values);
-    }
-    const categories = Array.from(categoryTotals, ([name, amounts]) => ({
-      name,
-      amountMinor: checkedTotal(amounts),
-      ...(CATEGORY_STYLES[name] ?? { color: '#9ca3af', icon: ShoppingCart }),
-    })).sort((a, b) => b.amountMinor - a.amountMinor);
-    const totalSpentMinor = checkedTotal(expenses.map((tx) => tx.amountMinor));
+    const categories = report.categoryTotals.map(({ category, amountMinor }) => ({
+      name: category,
+      amountMinor,
+      ...(CATEGORY_STYLES[category] ?? { color: '#9ca3af', icon: ShoppingCart }),
+    }));
+    const hasNegativeCategory = categories.some((category) => category.amountMinor < 0);
     return {
       categories,
-      largestTransactions: [...expenses].sort((a, b) => b.amountMinor - a.amountMinor).slice(0, 5),
-      totalSpentMinor,
-      // Chart geometry uses major currency units; totals and rankings stay in exact minor units.
-      pieData: categories.map((category) => ({ value: category.amountMinor / 100, color: category.color })),
+      largestTransactions: report.largestExpenses,
+      totalSpentMinor: report.expenseMinor,
+      excludedCurrencies: report.excludedCurrencies,
+      // A donut cannot represent signed category values. Keep exact net amounts in the list.
+      pieData: hasNegativeCategory ? [] : categories.map((category) => ({ value: category.amountMinor / 100, color: category.color })),
     };
-  }, [allTransactions, selectedMonth]);
+  }, [reportRows, monthStart, nextMonth]);
 
   const monthLabel = selectedMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 
@@ -96,6 +88,10 @@ export default function InsightsScreen() {
             <ChevronRight size={20} color="#374151" />
           </Pressable>
         </View>
+        <Text className="mb-4 -mt-3 text-center text-xs text-gray-500">
+          PKR only. Excluded: {excludedCurrencies.length ? excludedCurrencies.join(', ') : 'no other currencies recorded'}.
+          {' '}Opening balances are not income or spending.
+        </Text>
 
         {isError ? (
           <View className="mb-6 rounded-3xl bg-white px-6 py-8 shadow-sm shadow-gray-200">
@@ -103,7 +99,7 @@ export default function InsightsScreen() {
             <Text className="mt-2 text-center text-sm text-gray-500">Your saved records have not been changed.</Text>
           </View>
         ) : <View className="mb-6 items-center justify-center rounded-3xl bg-white py-8 shadow-sm shadow-gray-200">
-          {totalSpentMinor > 0 ? (
+          {totalSpentMinor > 0 && pieData.length > 0 ? (
             <PieChart
               donut
               innerRadius={76}
@@ -111,15 +107,18 @@ export default function InsightsScreen() {
               data={pieData}
               centerLabelComponent={() => (
                 <View className="items-center justify-center px-1">
-                  <Text className="mb-1 text-sm font-semibold text-gray-500">Spent this month</Text>
+                  <Text className="mb-1 text-sm font-semibold text-gray-500">Net spent this month</Text>
                   <Text className="text-xl font-bold text-black">{formatMinorUnits(totalSpentMinor)}</Text>
                 </View>
               )}
             />
           ) : (
             <View className="items-center px-8 py-10">
-              <Text className="text-lg font-bold text-gray-900">No spending recorded</Text>
-              <Text className="mt-2 text-center text-sm text-gray-500">Expenses you add for {monthLabel} will appear here.</Text>
+              <Text className="text-lg font-bold text-gray-900">{totalSpentMinor < 0 ? 'Net refunds this month' : 'No net spending recorded'}</Text>
+              <Text className="mt-2 text-center text-sm font-semibold text-gray-700">{formatMinorUnits(totalSpentMinor)}</Text>
+              <Text className="mt-2 text-center text-sm text-gray-500">{pieData.length === 0 && categories.some((category) => category.amountMinor < 0)
+                ? 'Signed category adjustments are shown in the net values below.'
+                : `Expenses recorded for ${monthLabel} will appear here.`}</Text>
             </View>
           )}
         </View>}
@@ -134,7 +133,8 @@ export default function InsightsScreen() {
             <View className="gap-5">
               {categories.map((category) => {
                 const Icon = category.icon;
-                const share = totalSpentMinor === 0 ? 0 : category.amountMinor / totalSpentMinor;
+                const positiveCategoryTotal = categories.reduce((total, item) => total + Math.max(item.amountMinor, 0), 0);
+                const share = positiveCategoryTotal === 0 ? 0 : Math.max(category.amountMinor, 0) / positiveCategoryTotal;
                 return (
                   <View key={category.name}>
                     <View className="mb-2 flex-row items-center justify-between">
@@ -145,12 +145,12 @@ export default function InsightsScreen() {
                         <Text className="ml-3 flex-1 text-base font-semibold text-gray-800" numberOfLines={1}>{category.name}</Text>
                       </View>
                       <View className="items-end">
-                        <Text className="font-bold text-gray-900">{formatMinorUnits(category.amountMinor)}</Text>
-                        <Text className="mt-0.5 text-xs text-gray-500">{(share * 100).toFixed(0)}% of spending</Text>
+                        <Text className={`font-bold ${category.amountMinor < 0 ? 'text-green-700' : 'text-gray-900'}`}>{formatMinorUnits(category.amountMinor)}</Text>
+                        <Text className="mt-0.5 text-xs text-gray-500">{category.amountMinor < 0 ? 'Net refunds' : `${(share * 100).toFixed(0)}% of positive net categories`}</Text>
                       </View>
                     </View>
                     <View className="h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
-                      <View className="h-full rounded-full" style={{ width: `${share * 100}%`, backgroundColor: category.color }} />
+                    <View className="h-full rounded-full" style={{ width: `${category.amountMinor < 0 ? 0 : share * 100}%`, backgroundColor: category.color }} />
                     </View>
                   </View>
                 );
@@ -180,7 +180,7 @@ export default function InsightsScreen() {
                         <Text className="mt-0.5 text-xs text-gray-500">{tx.category} · {new Date(tx.date).toLocaleDateString()}</Text>
                       </View>
                     </View>
-                    <Text className="font-bold text-red-600">− {formatMinorUnits(tx.amountMinor)}</Text>
+                    <Text className="font-bold text-red-600">− {formatMinorUnits(tx.amountMinor, tx.accountCurrency ?? 'PKR')}</Text>
                   </View>
                 );
               })}

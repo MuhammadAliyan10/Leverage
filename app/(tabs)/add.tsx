@@ -1,16 +1,27 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, KeyboardAvoidingView, Platform, Pressable, TextInput, ScrollView } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, KeyboardAvoidingView, Platform, Pressable, TextInput, ScrollView, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { Calendar } from 'lucide-react-native';
 import { Button } from '../../components/ui/Button';
 import { useAddTransaction } from '../../hooks/mutations/useAddTransaction';
 import { convertForeignMinorToPkr, parseExchangeRate, parseMinorUnits } from '../../src/finance/ledger';
 import { useAccounts } from '../../hooks/queries/useAccounts';
+import * as Crypto from 'expo-crypto';
+import { useAuth } from '../../src/context/AuthContext';
+import { useQueryClient } from '@tanstack/react-query';
+import { localDb } from '../../src/db/local/client';
+import {
+  CLASSIFICATIONS,
+  EXPENSE_CLASSIFICATION_IDS,
+  INCOME_CLASSIFICATION_IDS,
+  pakistanTaxYear,
+  type ClassificationId,
+} from '../../src/finance/domain';
 
 // 1. Zod Validation Schema
 const addTransactionSchema = z.object({
@@ -58,29 +69,42 @@ const addTransactionSchema = z.object({
 
 type AddTransactionFormData = z.infer<typeof addTransactionSchema>;
 
-const EXPENSE_CATEGORIES = [
-  { id: 'food', name: 'Food', emoji: '🍔' },
-  { id: 'transport', name: 'Transport', emoji: '🚗' },
-  { id: 'bills', name: 'Bills', emoji: '💡' },
-  { id: 'shopping', name: 'Shopping', emoji: '🛍️' },
-  { id: 'health', name: 'Health', emoji: '💊' },
-  { id: 'bank_fee', name: 'Banking expense', emoji: '🏦' },
-  { id: 'housing', name: 'Housing / hostel', emoji: '🏠' },
-];
-
-const INCOME_SOURCES = [
-  { id: 'salary', name: 'Employment income', emoji: '💼' },
-  { id: 'freelance', name: 'Freelance', emoji: '🧑‍💻' },
-  { id: 'business_revenue', name: 'Business receipts', emoji: '🏪' },
-  { id: 'family_gift', name: 'Family gift / support', emoji: '🎁' },
-  { id: 'foreign_remittance', name: 'Family remittance', emoji: '🌍' },
-  { id: 'investment_return', name: 'Bank profit / deposit income', emoji: '📈' },
-  { id: 'rental_income', name: 'Rent received', emoji: '🏠' },
-  { id: 'other_income', name: 'Other income', emoji: '＋' },
-];
+const CLASSIFICATION_EMOJI: Record<ClassificationId, string> = {
+  salary: '💼',
+  freelance: '🧑‍💻',
+  business_revenue: '🏪',
+  family_gift: '🎁',
+  foreign_remittance: '🌍',
+  investment_return: '📈',
+  rental_income: '🏠',
+  other_income: '＋',
+  food: '🍔',
+  transport: '🚗',
+  bills: '💡',
+  shopping: '🛍️',
+  health: '💊',
+  bank_fee: '🏦',
+  housing: '🏠',
+  other_expense: '＋',
+  expense_refund: '↩️',
+};
+const EXPENSE_CATEGORIES = EXPENSE_CLASSIFICATION_IDS.map((id) => ({
+  id,
+  name: CLASSIFICATIONS[id].label,
+  emoji: CLASSIFICATION_EMOJI[id],
+}));
+const INCOME_SOURCES = INCOME_CLASSIFICATION_IDS.map((id) => ({
+  id,
+  name: CLASSIFICATIONS[id].label,
+  emoji: CLASSIFICATION_EMOJI[id],
+}));
 
 export default function AddTransactionScreen() {
   const router = useRouter();
+  const { correctionOf } = useLocalSearchParams<{ correctionOf?: string }>();
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const operationId = useRef(Crypto.randomUUID());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const addTransaction = useAddTransaction();
   const { data: accounts = [], isLoading: accountsLoading, isError: accountsError } = useAccounts();
@@ -130,6 +154,36 @@ export default function AddTransactionScreen() {
   }, [accounts, selectedAccountId, setValue]);
 
   useEffect(() => {
+    if (!correctionOf || !user) return;
+    let cancelled = false;
+    void localDb.transaction.findMany({ ownerId: user.id }).then((transactions) => {
+      const original = transactions.find((tx) => tx.id === correctionOf);
+      if (cancelled) return;
+      if (!original || original.type === 'Refund' || original.type === 'Reversal') {
+        throw new Error('This transaction cannot be edited.');
+      }
+      setValue('type', original.type);
+      setValue('amount', (original.amountMinor / 100).toFixed(2));
+      setValue('accountId', original.accountId ?? '');
+      setValue('toAccountId', original.toAccountId ?? undefined);
+      setValue('categoryId', original.classificationId ?? EXPENSE_CATEGORIES[0].id);
+      setValue('date', new Date(original.date));
+      setValue('note', original.note);
+      setValue('sourceName', original.sourceName ?? '');
+      setValue('paymentMethod', original.paymentMethod ?? 'Bank transfer');
+      setSelectedPaymentMethod(original.paymentMethod ?? 'Bank transfer');
+      setValue('taxStatus', original.taxStatus);
+      setValue('sourceAmount', original.sourceAmountMinor ? (original.sourceAmountMinor / 100).toFixed(2) : '');
+      setValue('sourceCurrency', original.sourceCurrency ?? 'USD');
+      setValue('exchangeRate', original.exchangeRate ?? '');
+      setValue('referenceNumber', original.referenceNumber ?? '');
+    }).catch((error) => {
+      if (!cancelled) Alert.alert('Correction unavailable', error instanceof Error ? error.message : 'Could not load this transaction.');
+    });
+    return () => { cancelled = true; };
+  }, [correctionOf, user, setValue]);
+
+  useEffect(() => {
     if (!isRemittance) return;
     try {
       const converted = convertForeignMinorToPkr(parseMinorUnits(sourceAmount), parseExchangeRate(exchangeRate));
@@ -145,31 +199,44 @@ export default function AddTransactionScreen() {
     setValue('date', currentDate);
   };
 
-  const onSubmit = (data: AddTransactionFormData) => {
-    addTransaction.mutate(
-      {
+  const onSubmit = async (data: AddTransactionFormData) => {
+    try {
+      const draft = {
+        id: operationId.current,
         amountMinor: parseMinorUnits(data.amount),
         type: data.type,
-        category: data.type === 'Transfer' ? 'Internal transfer' : categories.find((category) => category.id === data.categoryId)?.name ?? 'Other',
-        sourceName: data.sourceName?.trim(),
-        paymentMethod: data.paymentMethod,
+        classificationId: data.type === 'Transfer' ? undefined : data.categoryId,
+        sourceName: data.type === 'Income' ? data.sourceName?.trim() : undefined,
+        paymentMethod: data.type === 'Income' ? data.paymentMethod : undefined,
         accountId: data.accountId,
         toAccountId: data.type === 'Transfer' ? data.toAccountId : undefined,
         sourceAmountMinor: isRemittance ? parseMinorUnits(data.sourceAmount ?? '') : undefined,
         sourceCurrency: isRemittance ? data.sourceCurrency : undefined,
         exchangeRate: isRemittance ? data.exchangeRate?.trim() : undefined,
-        referenceNumber: data.referenceNumber?.trim() || undefined,
+        referenceNumber: isRemittance ? data.referenceNumber?.trim() : undefined,
         taxStatus: data.type === 'Income' ? data.taxStatus ?? 'unreviewed' : undefined,
-        taxYear: data.type === 'Income' ? (data.date.getMonth() >= 6 ? data.date.getFullYear() + 1 : data.date.getFullYear()) : undefined,
+        taxYear: data.type === 'Income' ? pakistanTaxYear(data.date) : undefined,
         note: data.note,
         date: data.date,
-      },
-      {
-        onSuccess: () => {
-          router.replace('/(tabs)');
-        },
+      };
+      if (correctionOf && user) {
+        await localDb.transaction.correct({ ownerId: user.id, originalTransactionId: correctionOf, replacement: { ...draft, ownerId: user.id } });
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+          queryClient.invalidateQueries({ queryKey: ['financial-report', user.id] }),
+          queryClient.invalidateQueries({ queryKey: ['transactions'] }),
+          queryClient.invalidateQueries({ queryKey: ['accounts', user.id] }),
+        ]);
+        operationId.current = Crypto.randomUUID();
+        router.replace('/(tabs)/transactions');
+      } else {
+        await addTransaction.mutateAsync(draft);
+        operationId.current = Crypto.randomUUID();
+        router.replace('/(tabs)');
       }
-    );
+    } catch {
+      // The mutation shows the failure; keep the form open so the user can correct or retry.
+    }
   };
 
   // Helper for dynamic colors based on type
@@ -202,6 +269,7 @@ export default function AddTransactionScreen() {
           
           {/* Header & Toggle */}
           <View className="px-6 pt-10 pb-6 items-center">
+            {correctionOf && <Text className="mb-3 text-center text-sm font-semibold text-amber-700">This saves a correction entry and keeps the original in your history.</Text>}
             <View className="flex-row rounded-full bg-gray-200 p-1 w-full max-w-sm">
               {(['Expense', 'Income', 'Transfer'] as const).map((type) => (
                 <Pressable

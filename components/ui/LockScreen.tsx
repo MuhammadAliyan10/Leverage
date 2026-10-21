@@ -22,7 +22,7 @@ export function LockScreen({ onUnlock }: LockScreenProps) {
         </View>
         <Text className="text-2xl font-bold text-gray-900 dark:text-white mb-2">App Locked</Text>
         <Text className="text-center text-gray-500 dark:text-neutral-400 mb-10">
-          Please authenticate to view your financial data.
+          Confirm your device authentication to view your financial data.
         </Text>
         <Button title="Unlock" onPress={onUnlock} className="w-full px-12" />
       </View>

@@ -2,6 +2,7 @@
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
+import * as Notifications from 'expo-notifications';
 import { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -13,6 +14,7 @@ import { AuthProvider, useAuth } from '../src/context/AuthContext';
 import '../global.css';
 
 SplashScreen.preventAutoHideAsync();
+Notifications.setNotificationHandler({handleNotification:async()=>({shouldPlaySound:false,shouldSetBadge:false,shouldShowBanner:true,shouldShowList:true})});
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -36,6 +38,23 @@ function RootNavigator() {
       SplashScreen.hideAsync();
     }
   }, [loaded, fontError]);
+
+  useEffect(() => {
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const destination = response.notification.request.content.data?.url;
+      if (user && destination === '/obligations') router.push('/obligations');
+    });
+    return () => subscription.remove();
+  }, [router, user]);
+
+  useEffect(() => {
+    if (!user || isLoading) return;
+    const date = new Date();
+    const today = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+    void localDb.obligations.schedules.generateDue(user.id,today).catch((error:unknown)=>{
+      console.error('Recurring schedule catch-up could not complete:',error);
+    });
+  }, [user, isLoading]);
 
   useEffect(() => {
     if (isLoading || (!loaded && !fontError)) return;
@@ -67,7 +86,7 @@ function RootNavigator() {
         }
       })();
     }
-  }, [user, isLoading, segments, loaded, fontError]);
+  }, [user, isLoading, segments, loaded, fontError, router]);
 
   if (!loaded && !fontError) return null;
 
@@ -79,6 +98,9 @@ function RootNavigator() {
         <Stack.Screen name="onboarding" options={{ headerShown: false }} />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="budgets" options={{ headerShown: false, presentation: 'modal' }} />
+        <Stack.Screen name="savings" options={{ headerShown: false, presentation: 'modal' }} />
+        <Stack.Screen name="accounts" options={{ headerShown: false, presentation: 'modal' }} />
+        <Stack.Screen name="obligations" options={{ headerShown: false, presentation: 'modal' }} />
       </Stack>
       <Toast />
     </GestureHandlerRootView>

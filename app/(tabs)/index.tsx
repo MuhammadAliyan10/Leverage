@@ -8,6 +8,7 @@ import { useDashboardMetrics } from '../../hooks/queries/useDashboardMetrics';
 import { formatMinorUnits } from '../../src/finance/ledger';
 
 type FilterType = 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
+const FILTERS: readonly FilterType[] = ['Daily', 'Weekly', 'Monthly', 'Yearly'];
 
 export default function DashboardScreen() {
   const [filter, setFilter] = useState<FilterType>('Weekly');
@@ -54,7 +55,7 @@ export default function DashboardScreen() {
             <View>
               <Text className="text-xs font-medium text-white/75">Money in</Text>
               <Text className="mt-1 text-xl font-bold text-white">{formatMinorUnits(metrics?.incomeMinor ?? 0)}</Text>
-              <Text className="mt-1 text-[10px] text-white/70">Includes gifts and other receipts, not only earnings</Text>
+              <Text className="mt-1 text-[10px] text-white/70">PKR accounts · gifts included · opening balances excluded</Text>
             </View>
             <View className="ml-3">
               <Text className="text-xs font-medium text-white/75">Money out</Text>
@@ -65,16 +66,21 @@ export default function DashboardScreen() {
             <Text className="text-xs font-medium text-white/75">Net change from recorded money in and out</Text>
             <Text className="mt-1 text-lg font-bold text-white">{formatMinorUnits(metrics?.netMinor ?? 0)}</Text>
           </View>
+          <Text className="mt-2 text-[10px] text-white/70">
+            {metrics?.excludedCurrencies?.length
+              ? `Excluded from PKR totals: ${metrics.excludedCurrencies.join(', ')}`
+              : 'PKR only · no other currencies recorded this month'}
+          </Text>
         </View>
 
         {/* Expense Analytics Section */}
         <View className="mt-8 mb-2">
             <Text className="text-xl font-bold text-black mb-1">Spending over time</Text>
-            <Text className="text-sm text-gray-500 mb-4">Expenses only. Moving money between your own accounts is not spending.</Text>
+          <Text className="text-sm text-gray-500 mb-4">PKR accounts only. Moving money between your own accounts is not spending.</Text>
           
           {/* Segmented Control */}
           <View className="flex-row rounded-xl bg-gray-100 p-1 mb-6">
-            {(['Daily', 'Weekly', 'Monthly', 'Yearly'] as FilterType[]).map((tab) => (
+            {FILTERS.map((tab) => (
               <Pressable
                 key={tab}
                 className={`flex-1 items-center rounded-lg py-2 ${filter === tab ? 'bg-white shadow-sm' : ''}`}
@@ -130,10 +136,11 @@ export default function DashboardScreen() {
             {transactions.length === 0 ? (
               <Text className="text-gray-500 text-center py-4">No recent activity.</Text>
             ) : (
-              transactions.map((tx: any) => {
+              transactions.map((tx) => {
                 // Determine icon mapping inside UI for now
-                const isIncome = tx.type === 'Income';
-                const isTransfer = tx.type === 'Transfer';
+                const originalType = tx.reversalOfId ? transactions.find((candidate) => candidate.id === tx.reversalOfId)?.type : undefined;
+                const isIncome = tx.type === 'Income' || tx.type === 'Refund' || (tx.type === 'Reversal' && originalType === 'Expense');
+                const isTransfer = tx.type === 'Transfer' || (tx.type === 'Reversal' && originalType === 'Transfer');
                 const Icon = isIncome ? DollarSign : isTransfer ? ArrowLeftRight : ShoppingCart;
                 
                 return (
@@ -148,7 +155,7 @@ export default function DashboardScreen() {
                       </View>
                     </View>
                     <Text className={`text-base font-bold ${isIncome ? 'text-green-600' : isTransfer ? 'text-blue-600' : 'text-red-600'}`}>
-                      {isIncome ? '+' : isTransfer ? '↔' : '-'} {formatMinorUnits(tx.amountMinor)}
+                      {isIncome ? '+' : isTransfer ? '↔' : '-'} {formatMinorUnits(tx.amountMinor, tx.accountCurrency ?? 'PKR')}
                     </Text>
                   </View>
                 );

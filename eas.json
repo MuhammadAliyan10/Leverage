@@ -1,0 +1,23 @@
+{
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "HOUSELOG_ANDROID_VARIANT": "disposable"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "HOUSELOG_ANDROID_VARIANT": "disposable"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    }
+  }
+}

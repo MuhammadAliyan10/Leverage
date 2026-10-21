@@ -74,6 +74,8 @@ For offline use, the local database can be the write-ahead store. Sync must use 
 
 - Expo Router provides authentication, onboarding, dashboard, add transaction, transaction history, Insights, settings, and a budget screen.
 - The app stores accounts and categorized income/expense/transfer rows in local SQLite. Reads and writes are scoped by the local profile ID.
+- Local SQLite now uses `PRAGMA user_version = 1`; a transactional migration handles the released Prisma-shaped and intermediate local schemas, validates row counts and integrity, preserves existing labels, and rolls back invalid conversions. Legacy sync flags are reset because this client has no server acknowledgement to trust.
+- Account and transaction persistence use shared runtime domain validation. New records require valid owner/account relationships, integer minor-unit amounts, supported classifications/currencies, and stable transaction IDs; repeated identical IDs are idempotent and conflicting reuse is rejected.
 - Transaction entry parses PKR amounts into integer paisa and rejects excess precision or unsafe values. Existing floating-point SQLite values are migrated to a new integer column.
 - Income entry distinguishes salary, freelance, gross business receipts, family gifts, foreign family remittances, investment returns, rent, and other income. Gift records require the sender name/relationship; tax status is a separate user-entered review field.
 - Internal transfers store source and destination accounts, affect derived balances, and stay out of income/expense totals.

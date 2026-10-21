@@ -35,7 +35,7 @@ const ACTIVE_TAB_SHADOW = {
 
 export default function AuthScreen() {
   const [mode, setMode] = useState<Mode>('signin');
-  const { signIn, signUp } = useAuth();
+  const { signIn, signUp, restoreError } = useAuth();
 
   const {
     control: signInControl,
@@ -52,7 +52,12 @@ export default function AuthScreen() {
   } = useForm<SignUpFormData>({ resolver: zodResolver(signUpSchema) });
 
   const onSignIn = async (data: SignInFormData) => {
-    const result = await signIn(data.email, data.password);
+    let result: { success: boolean; error?: string; passwordUpgradePending?: boolean };
+    try {
+      result = await signIn(data.email, data.password);
+    } catch {
+      result = { success: false, error: 'Local sign in could not complete. Your saved data was not changed.' };
+    }
     if (!result.success) {
       if (result.error?.toLowerCase().includes('email') || result.error?.toLowerCase().includes('account')) {
         setSignInError('email', { message: result.error });
@@ -60,12 +65,19 @@ export default function AuthScreen() {
         setSignInError('password', { message: result.error });
       }
       Toast.show({ type: 'error', text1: 'Sign In Failed', text2: result.error });
+    } else if (result.passwordUpgradePending) {
+      Toast.show({ type: 'info', text1: 'Password security update pending', text2: 'Your login was verified; stored password protection could not be upgraded yet.' });
     }
     // On success, _layout.tsx router guard redirects automatically via useAuth
   };
 
   const onSignUp = async (data: SignUpFormData) => {
-    const result = await signUp(data.fullName, data.email, data.password);
+    let result: { success: boolean; error?: string };
+    try {
+      result = await signUp(data.fullName, data.email, data.password);
+    } catch {
+      result = { success: false, error: 'Local account setup could not complete. Your saved data was not changed.' };
+    }
     if (!result.success) {
       if (result.error?.toLowerCase().includes('email')) {
         setSignUpError('email', { message: result.error });
@@ -100,6 +112,12 @@ export default function AuthScreen() {
               Your records stay on this device. Cloud sync is not available yet.
             </Text>
           </View>
+
+          {restoreError && (
+            <Text accessibilityRole="alert" className="mb-4 rounded-xl bg-red-50 p-4 text-center text-sm text-red-700">
+              {restoreError}
+            </Text>
+          )}
 
           {/* Mode Toggle */}
           <View className="mb-6 flex-row rounded-xl bg-gray-100 p-1">
@@ -203,7 +221,7 @@ export default function AuthScreen() {
                 name="password"
                 render={({ field: { onChange, onBlur, value } }) => (
                   <Input
-                    placeholder="Password (min 8 chars, uppercase & number)"
+                    placeholder="Password (min 10 chars, uppercase & number)"
                     secureTextEntry
                     textContentType="newPassword"
                     onBlur={onBlur}
