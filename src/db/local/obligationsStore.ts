@@ -167,6 +167,18 @@ export function createObligationsStore(
         return (await read()).getAllAsync<BillRow>(`SELECT b.*,COALESCE((SELECT SUM(p.amountMinor) FROM BillPayment p WHERE p.billId=b.id AND p.ownerId=b.ownerId
           AND NOT EXISTS (SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id)),0) AS paidMinor FROM Bill b WHERE b.ownerId=? ORDER BY b.dueDate,b.id`,[ownerId]);
       },
+      upcoming: async (ownerId:string, today = localCalendarDate()): Promise<BillRow[]> => {
+        if (!ownerId.trim()) throw new Error('A profile is required to read upcoming bills.');
+        validateCalendarDate(today, 'Current date');
+        return (await read()).getAllAsync<BillRow>(`SELECT b.*,
+          COALESCE((SELECT SUM(p.amountMinor) FROM BillPayment p WHERE p.billId=b.id AND p.ownerId=b.ownerId
+            AND NOT EXISTS (SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id)),0) AS paidMinor,
+          CASE WHEN b.dueDate<? THEN 'overdue' WHEN b.dueDate=? THEN 'due' ELSE 'upcoming' END AS status
+          FROM Bill b WHERE b.ownerId=? AND b.status NOT IN ('cancelled','skipped')
+            AND COALESCE((SELECT SUM(p.amountMinor) FROM BillPayment p WHERE p.billId=b.id AND p.ownerId=b.ownerId
+              AND NOT EXISTS (SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id)),0)<b.amountMinor
+          ORDER BY b.dueDate,b.id LIMIT 20`, [today, today, ownerId]);
+      },
       recordPayment: <T>(input:{id:string;ownerId:string;billId:string;amountMinor:number;transactionId:string;idempotencyKey:string;paidAt:string}, postExpense:(sql:ObligationsSql)=>Promise<T>) => write(async(sql)=>{
         if (!Number.isSafeInteger(input.amountMinor)||input.amountMinor<=0) throw new Error('Bill payment must be positive integer minor units.');
         const existing=await sql.getFirstAsync<{id:string;billId:string;amountMinor:number;transactionId:string;paidAt:string}>('SELECT id,billId,amountMinor,transactionId,paidAt FROM BillPayment WHERE ownerId=? AND idempotencyKey=?',[input.ownerId,input.idempotencyKey]);

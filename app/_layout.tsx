@@ -1,9 +1,11 @@
+import { PRIMARY_COLOR } from '../src/constants/themeColors';
 // app/_layout.tsx
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Notifications from 'expo-notifications';
 import { useEffect } from 'react';
+import { ActivityIndicator, Text, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Toast from 'react-native-toast-message';
@@ -28,10 +30,13 @@ const queryClient = new QueryClient({
 function RootNavigator() {
   const router = useRouter();
   const segments = useSegments();
-  const { user, isLoading } = useAuth();
-  const { isLocked, unlock } = useAppLock(!!user);
+  const { session, status, user, isLoading, lock, unlockWithPassword, unlockAfterBiometric } = useAuth();
+  const { biometricAvailability, authenticateBiometric } = useAppLock(status === 'signedIn', lock);
 
-  const [loaded, fontError] = useFonts({});
+  const [loaded, fontError] = useFonts({
+    Inter: require('../assets/fonts/Inter-Regular.ttf'),
+    Figtree: require('../assets/fonts/Figtree-Regular.otf'),
+  });
 
   useEffect(() => {
     if (loaded || fontError) {
@@ -61,38 +66,43 @@ function RootNavigator() {
 
     const inAuthGroup = segments[0] === '(auth)';
 
-    if (!user && !inAuthGroup) {
+    if (status === 'signedOut' && !inAuthGroup) {
       // Not authenticated — send to auth
       router.replace('/(auth)');
       return;
     }
 
-    if (user && inAuthGroup) {
+    if (status === 'signedIn' && inAuthGroup) {
       // Authenticated — send to tabs
       router.replace('/(tabs)');
       return;
     }
 
-    // Authenticated and in tabs — check onboarding
-    if (user && segments[0] === '(tabs)') {
-      (async () => {
-        try {
-          const accountCount = await localDb.account.count(user.id);
-          if (accountCount === 0) {
-            router.replace('/onboarding');
-          }
-        } catch (e) {
-          console.error('DB Error Check:', e);
-        }
-      })();
+    if (status === 'signedIn' && user && (segments[0] === '(tabs)' || segments[0] === 'onboarding')) {
+      let active = true;
+      void localDb.user.onboardingComplete(user.id).then((complete) => {
+        if (!active) return;
+        if (!complete && segments[0] === '(tabs)') router.replace('/onboarding');
+        else if (complete && segments[0] === 'onboarding') router.replace('/(tabs)');
+      }).catch(() => {
+        // Keep the current screen visible and allow a retry; do not guess completion.
+      });
+      return () => { active = false; };
     }
-  }, [user, isLoading, segments, loaded, fontError, router]);
+  }, [status, user, isLoading, segments, loaded, fontError, router]);
 
   if (!loaded && !fontError) return null;
+  if (isLoading) return <View className="flex-1 items-center justify-center bg-gray-50 dark:bg-neutral-950"><ActivityIndicator color={PRIMARY_COLOR} /><Text className="font-body mt-3 text-sm text-gray-600 dark:text-neutral-300">Checking this device…</Text></View>;
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      {isLocked && <LockScreen onUnlock={unlock} />}
+      {session.status === 'locked' && (
+        <LockScreen
+          onUnlockPassword={unlockWithPassword}
+          onUnlockBiometric={async () => (await authenticateBiometric()) && unlockAfterBiometric()}
+          checkBiometricAvailability={biometricAvailability}
+        />
+      )}
       <Stack>
         <Stack.Screen name="(auth)" options={{ headerShown: false }} />
         <Stack.Screen name="onboarding" options={{ headerShown: false }} />

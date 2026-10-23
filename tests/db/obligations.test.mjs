@@ -18,16 +18,17 @@ function setup() {
   return {db,adapter};
 }
 
-test('v5 preserves v1-v4 migration path and rolls back new schema on late failure',async()=>{
+test('v6 preserves v1-v5 migration paths and rolls back new schema on late failure',async()=>{
   const {db,adapter}=setup();
   const get=adapter.getFirstAsync;
   adapter.getFirstAsync=async(sql,params=[])=>sql==='PRAGMA integrity_check'?{integrity_check:'broken'}:get(sql,params);
   await assert.rejects(migrateLocalDatabase(adapter),/integrity check failed/);
   assert.equal(db.prepare('PRAGMA user_version').get().user_version,0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='RecurringSchedule'").get().n,0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='Asset'").get().n,0);
   adapter.getFirstAsync=get;
   await migrateLocalDatabase(adapter);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version,5);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version,7);
   db.close();
 });
 

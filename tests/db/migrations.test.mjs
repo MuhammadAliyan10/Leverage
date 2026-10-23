@@ -116,7 +116,9 @@ test('fresh databases receive the same schema without creating sample financial 
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM Account').get().count, 0);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 0);
   assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
-  assert.equal(LOCAL_DATABASE_VERSION, 5);
+  assert.equal(LOCAL_DATABASE_VERSION, 7);
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ProfileSetup'").get());
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='AuthLoginAttempt'").get());
   assert.ok(database.prepare('PRAGMA table_info(Account)').all().some((column) => column.name === 'archivedAt'));
   assert.ok(database.prepare('PRAGMA table_info("Transaction")').all().some((column) => column.name === 'reversalOfId'));
   assert.ok(database.prepare('PRAGMA table_info("Transaction")').all().some((column) => column.name === 'correctionOfId'));
@@ -127,10 +129,31 @@ test('fresh databases receive the same schema without creating sample financial 
   for (const table of ['RecurringSchedule','ScheduleOccurrence','Bill','BillPayment','Debt','DebtEvent','BillPaymentCorrection','DebtEventCorrection','DebtRepaymentSchedule','DebtInterestEvent']) {
     assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `${table} exists`);
   }
+  for (const table of ['Asset','AssetValuation','AssetActivity','InvestmentPortfolio','InvestmentHolding','InvestmentEvent','InvestmentPrice']) {
+    assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `${table} exists`);
+  }
   database.close();
 });
 
-test('schema v4 upgrades to v5 transactionally and leaves existing financial rows intact',async()=>{
+test('v6 to v7 migration marks profiles with active or archived accounts as already onboarded', async () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec('PRAGMA foreign_keys=ON');
+  const adapter = migrationAdapter(database);
+  await migrateLocalDatabase(adapter);
+  database.prepare('INSERT INTO User(id,fullName,email,passwordHash,createdAt) VALUES(?,?,?,?,?)').run('active-user','Active User','active@example.test','hash','2026-01-01');
+  database.prepare('INSERT INTO User(id,fullName,email,passwordHash,createdAt) VALUES(?,?,?,?,?)').run('archived-user','Archived User','archived@example.test','hash','2026-01-02');
+  database.prepare('INSERT INTO Account(id,ownerId,name,type,balanceMinor,currency,createdAt,synced) VALUES(?,?,?,?,?,?,?,0)').run('active-account','active-user','Wallet','cash',500,'PKR','2026-01-03');
+  database.prepare('INSERT INTO Account(id,ownerId,name,type,balanceMinor,currency,createdAt,archivedAt,synced) VALUES(?,?,?,?,?,?,?,?,0)').run('archived-account','archived-user','Old wallet','cash',0,'PKR','2026-01-04','2026-02-01');
+  database.exec('DROP TABLE ProfileSetup; DROP TABLE AuthLoginAttempt; PRAGMA user_version=6');
+  await migrateLocalDatabase(adapter);
+  assert.equal(database.prepare('SELECT firstAccountId FROM ProfileSetup WHERE ownerId=?').get('active-user').firstAccountId, 'active-account');
+  assert.equal(database.prepare('SELECT firstAccountId FROM ProfileSetup WHERE ownerId=?').get('archived-user').firstAccountId, 'archived-account');
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM Account').get().n, 2);
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM User').get().n, 2);
+  database.close();
+});
+
+test('schema v4 upgrades through v5 to v6 transactionally and leaves existing financial rows intact',async()=>{
   const database=new DatabaseSync(':memory:');database.exec('PRAGMA foreign_keys=ON');
   const adapter=migrationAdapter(database);
   await migrateLocalDatabase(adapter);
@@ -141,10 +164,27 @@ test('schema v4 upgrades to v5 transactionally and leaves existing financial row
   for(const table of ['BillPaymentCorrectionReplacement','DebtEventCorrectionReplacement','BillPaymentCorrection','DebtEventCorrection','DebtRepaymentSchedule','DebtInterestEvent']) database.exec(`DROP TABLE IF EXISTS "${table}"`);
   database.exec('PRAGMA user_version=4');
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version,5);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,7);
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM User WHERE id=?').get('u').n,1);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtEventCorrection'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtInterestEvent'").get());
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='AssetValuation'").get());
+  database.close();
+});
+
+test('a schema v5 database receives v6 asset and investment tables without changing ledger rows',async()=>{
+  const database=new DatabaseSync(':memory:');database.exec('PRAGMA foreign_keys=ON');const adapter=migrationAdapter(database);
+  await migrateLocalDatabase(adapter);
+  database.prepare('INSERT INTO User VALUES(?,?,?,?,?)').run('u','User','u@example.test','hash','2026-01-01');
+  database.prepare('INSERT INTO Account(id,ownerId,name,type,balanceMinor,currency,createdAt,synced) VALUES(?,?,?,?,?,?,?,0)').run('a','u','Bank','bank',10000,'PKR','2026-01-01');
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,taxStatus,synced) VALUES(?,?,?,?,?,?,?,?,?,?,0)').run('t','u',10,1000,'Income','salary','salary','a','2026-01-02','unreviewed');
+  for(const name of ['Asset_profile_guard','Asset_purchase_immutable','AssetValuation_profile_guard','AssetValuation_append_only_update','AssetValuation_append_only_delete','AssetActivity_profile_guard','AssetActivity_append_only_update','AssetActivity_append_only_delete','Portfolio_profile_guard','Portfolio_update_guard','Holding_profile_guard','Holding_immutable','InvestmentEvent_profile_guard','InvestmentEvent_append_only_update','InvestmentEvent_append_only_delete','InvestmentPrice_profile_guard','InvestmentPrice_append_only_update','InvestmentPrice_append_only_delete','Transaction_asset_investment_adjustment_guard'])database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
+  for(const name of ['InvestmentPrice','InvestmentEvent','InvestmentHolding','InvestmentPortfolio','AssetActivity','AssetValuation','Asset'])database.exec(`DROP TABLE "${name}"`);
+  database.exec('PRAGMA user_version=5');
+  await migrateLocalDatabase(adapter);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,7);
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM "Transaction" WHERE id=\'t\'').get().n,1);
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='InvestmentEvent'").get());
   database.close();
 });
 
@@ -154,7 +194,7 @@ test('budget, goal and emergency-fund migration is repeatable and protects profi
   const adapter = migrationAdapter(database);
   await migrateLocalDatabase(adapter);
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 5);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 7);
 
   database.prepare(`INSERT INTO Budget
     (id, ownerId, categoryId, amountMinor, currency, periodStart, periodEnd, rolloverPolicy, revision, createdAt)

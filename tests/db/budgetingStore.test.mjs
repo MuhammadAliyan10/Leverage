@@ -131,6 +131,9 @@ test('savings plans do not count as saved money; earmarks and transfers are dist
   assert.equal(goal.plannedMinor, 5000);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction" WHERE type = ?').get('Transfer').count, 1);
   assert.equal((await store.savings.history('u1', 'goal')).length, 3);
+  assert.deepEqual((await store.savings.reservationsByAccount('u1')).map((row) => ({ ...row })).sort((a, b) => a.accountId.localeCompare(b.accountId)), [
+    { accountId: 'save', amountMinor: 10000 }, { accountId: 'spend', amountMinor: 20000 },
+  ]);
 
   await store.savings.addEvent({ id: 'withdrawal', ownerId: 'u1', goalId: 'goal', eventType: 'transfer_out', amountMinor: 5000,
     sourceAccountId: 'save', destinationAccountId: 'spend', eventDate: '2026-05-04T00:00:00.000Z' });

@@ -6,10 +6,11 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        primary: "#533AFE",
+        primary: "rgb(var(--color-primary-rgb) / <alpha-value>)",
       },
       fontFamily: {
-        fargie: ["Fargie", "Inter", "sans-serif"],
+        heading: ["Inter"],
+        body: ["Figtree"],
       },
     },
   },

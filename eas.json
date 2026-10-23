@@ -12,6 +12,7 @@
     },
     "preview": {
       "distribution": "internal",
+      "developmentClient": false,
       "env": {
         "HOUSELOG_ANDROID_VARIANT": "disposable"
       },

@@ -38,6 +38,14 @@ export function calculateAccountBalances(
   }
 
   const eventsById = new Map(transactions.filter((transaction) => transaction.id).map((transaction) => [transaction.id!, transaction]));
+  const refundsByOriginalId = new Map<string, bigint>();
+  const refundedOriginalIds = new Set<string>();
+  for (const transaction of transactions) {
+    if (transaction.type !== 'Refund' || !transaction.reversalOfId) continue;
+    const originalId = transaction.reversalOfId;
+    refundedOriginalIds.add(originalId);
+    refundsByOriginalId.set(originalId, (refundsByOriginalId.get(originalId) ?? 0n) + BigInt(transaction.amountMinor));
+  }
   for (const transaction of transactions) {
     if (!Number.isSafeInteger(transaction.amountMinor) || transaction.amountMinor <= 0) {
       throw new Error('A saved transaction has an invalid amount.');
@@ -54,10 +62,10 @@ export function calculateAccountBalances(
     const amount = BigInt(transaction.amountMinor);
     if (transaction.type === 'Reversal') {
       const original = transaction.reversalOfId ? eventsById.get(transaction.reversalOfId) : undefined;
-      if (!original || original.ownerId !== transaction.ownerId || original.accountId !== transaction.accountId || original.toAccountId !== transaction.toAccountId) {
+      if (!original || !original.id || original.ownerId !== transaction.ownerId || original.accountId !== transaction.accountId || original.toAccountId !== transaction.toAccountId) {
         throw new Error('A saved correction refers to an unavailable original transaction.');
       }
-      if (amount !== BigInt(original.amountMinor) || transactions.some((event) => event.type === 'Refund' && event.reversalOfId === original.id)) {
+      if (amount !== BigInt(original.amountMinor) || refundedOriginalIds.has(original.id)) {
         throw new Error('A saved correction has an invalid amount or conflicts with a refund.');
       }
       if (original.type === 'Income') balances.set(source.id, (balances.get(source.id) ?? 0n) - amount);
@@ -72,15 +80,14 @@ export function calculateAccountBalances(
       if (transaction.toAccountId !== null) throw new Error('An income or refund has an unexpected destination account.');
       if (transaction.type === 'Refund') {
         const original = transaction.reversalOfId ? eventsById.get(transaction.reversalOfId) : undefined;
-        if (!original || original.type !== 'Expense' || original.ownerId !== transaction.ownerId || !original.accountId) {
+        if (!original || !original.id || original.type !== 'Expense' || original.ownerId !== transaction.ownerId || !original.accountId) {
           throw new Error('A saved refund refers to an unavailable expense.');
         }
         const sourceForOriginal = byId.get(original.accountId);
         if (!sourceForOriginal || sourceForOriginal.ownerId !== transaction.ownerId || sourceForOriginal.currency !== source.currency) {
           throw new Error('A saved refund uses an incompatible account.');
         }
-        const refundedMinor = transactions.filter((event) => event.type === 'Refund' && event.reversalOfId === original.id)
-          .reduce((total, event) => total + BigInt(event.amountMinor), 0n);
+        const refundedMinor = refundsByOriginalId.get(original.id) ?? 0n;
         if (refundedMinor > BigInt(original.amountMinor)) throw new Error('Saved refunds exceed the original expense.');
       }
       balances.set(source.id, (balances.get(source.id) ?? 0n) + amount);

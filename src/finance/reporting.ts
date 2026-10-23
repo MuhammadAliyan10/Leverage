@@ -32,6 +32,23 @@ export interface FinancialReport {
   excludedCurrencies: string[];
 }
 
+export interface FinancialBucket {
+  id: string;
+  group: string;
+  startDate: string;
+  endDate: string;
+}
+
+const NON_OPERATING_CASH_CATEGORIES = new Set([
+  'debt_borrowing', 'debt_lending', 'debt_principal_repayment', 'debt_receivable_payment', 'debt_settlement',
+  'asset_purchase', 'asset_sale_proceeds', 'investment_purchase', 'investment_sale_proceeds',
+]);
+
+function isNonOperatingMovement(row: FinancialReportRow): boolean {
+  const category = row.type === 'Refund' || row.type === 'Reversal' ? row.linkedCategory : row.category;
+  return category !== null && category !== undefined && NON_OPERATING_CASH_CATEGORIES.has(category);
+}
+
 /**
  * Complete, profile-scoped report slice. The owner/date index serves this range query;
  * joins deliberately retain archived accounts and resolve reversal provenance.
@@ -177,8 +194,8 @@ export function calculateFinancialReport(
 
     const amount = BigInt(row.amountMinor);
     // Explicit principal/receivable movements change cash and debt balances, not earned
-    // income or ordinary spending. Interest remains a normal expense.
-    if (['debt_borrowing','debt_lending','debt_principal_repayment','debt_receivable_payment','debt_settlement'].includes(row.category)) continue;
+    // income or ordinary spending. Linked reversals follow the original classification.
+    if (isNonOperatingMovement(row)) continue;
     if (type === 'Income') income += amount;
     else if (type === 'Expense') {
       expense += amount;
@@ -225,4 +242,81 @@ export function calculateFinancialReport(
     largestExpenses: largestExpenses.slice(0, 5),
     excludedCurrencies: Array.from(excluded).sort(),
   };
+}
+
+/**
+ * Builds many non-overlapping chart buckets in one pass over complete report rows.
+ * Buckets are grouped by scale (for example daily/weekly/monthly/yearly); each row
+ * contributes to at most one bucket in each group.
+ */
+export function calculateExpenseBucketTotals(
+  rows: readonly FinancialReportRow[],
+  currency: string,
+  buckets: readonly FinancialBucket[],
+): Readonly<Record<string, number>> {
+  if (!currency.trim()) throw new Error('A report currency is required.');
+  const byGroup = new Map<string, (FinancialBucket & { startMs: number; endMs: number })[]>();
+  const seenIds = new Set<string>();
+  for (const bucket of buckets) {
+    const startMs = new Date(bucket.startDate).getTime();
+    const endMs = new Date(bucket.endDate).getTime();
+    if (!bucket.id.trim() || !bucket.group.trim() || seenIds.has(bucket.id) || !Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) {
+      throw new Error('Financial chart bucket is invalid.');
+    }
+    seenIds.add(bucket.id);
+    const group = byGroup.get(bucket.group) ?? [];
+    group.push({ ...bucket, startMs, endMs });
+    byGroup.set(bucket.group, group);
+  }
+  for (const group of byGroup.values()) {
+    group.sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id));
+    for (let index = 1; index < group.length; index += 1) {
+      if (group[index - 1].endMs > group[index].startMs) throw new Error('Financial chart buckets in one group must not overlap.');
+    }
+  }
+
+  const totals = new Map<string, bigint>(buckets.map((bucket) => [bucket.id, 0n]));
+  const findBucket = (group: (FinancialBucket & { startMs: number; endMs: number })[], timestamp: number) => {
+    let low = 0;
+    let high = group.length - 1;
+    while (low <= high) {
+      const middle = (low + high) >>> 1;
+      const bucket = group[middle];
+      if (timestamp < bucket.startMs) high = middle - 1;
+      else if (timestamp >= bucket.endMs) low = middle + 1;
+      else return bucket;
+    }
+    return undefined;
+  };
+
+  for (const row of rows) {
+    const timestamp = new Date(row.date).getTime();
+    if (!Number.isFinite(timestamp)) throw new Error(`Transaction ${row.id} has an invalid date.`);
+    if (!row.id || !row.ownerId || !Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0) throw new Error('A financial report row is invalid.');
+    if (!['Income', 'Expense', 'Transfer', 'Refund', 'Reversal'].includes(row.type)) throw new Error(`Transaction ${row.id} has an unsupported type.`);
+    if (row.type === 'Refund' && (row.linkedOriginalType !== 'Expense' || !row.reversalOfId || !row.linkedCategory)) {
+      throw new Error(`Refund ${row.id} does not refer to a recorded expense.`);
+    }
+    if (row.type === 'Reversal' && (!row.reversalOfId || !row.linkedOriginalType || !row.linkedCategory)) {
+      throw new Error(`Reversal ${row.id} does not refer to a recorded transaction.`);
+    }
+    if ((row.type === 'Refund' || row.type === 'Reversal') && row.accountCurrency !== row.linkedCurrency) {
+      throw new Error(`Transaction ${row.id} uses a different currency from its linked record.`);
+    }
+    if (row.accountCurrency !== currency || isNonOperatingMovement(row)) continue;
+
+    let expenseDelta = 0n;
+    if (row.type === 'Expense') expenseDelta = BigInt(row.amountMinor);
+    else if (row.type === 'Refund') expenseDelta = -BigInt(row.amountMinor);
+    else if (row.type === 'Reversal' && row.linkedOriginalType === 'Expense') expenseDelta = -BigInt(row.amountMinor);
+    else if (row.type === 'Reversal' && row.linkedOriginalType === 'Refund') expenseDelta = BigInt(row.amountMinor);
+    if (expenseDelta === 0n) continue;
+
+    for (const group of byGroup.values()) {
+      const bucket = findBucket(group, timestamp);
+      if (bucket) totals.set(bucket.id, (totals.get(bucket.id) ?? 0n) + expenseDelta);
+    }
+  }
+
+  return Object.fromEntries([...totals].map(([id, total]) => [id, safeNumber(total, `Chart bucket ${id}`)]));
 }

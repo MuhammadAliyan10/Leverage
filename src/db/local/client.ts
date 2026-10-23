@@ -27,13 +27,18 @@ import { buildFinancialReportQuery, type FinancialReportRow } from '../../financ
 import { buildTransactionPagePredicate } from './queryBuilders';
 import { createBudgetingStore, type BudgetingSql } from './budgetingStore';
 import { createObligationsStore, type ObligationsSql } from './obligationsStore';
+import { createAssetsInvestmentsStore, type AssetSql } from './assetsInvestmentsStore';
 import { derivePasswordHash, verifyAndUpgradePassword } from '../../security/passwordHash';
+import { createLoginRateLimit } from '../../security/loginRateLimit';
+import { projectTransactionActivity, type TransactionActivity } from '../../finance/transactionDisplay';
+import { createProfileSetupStore } from './profileSetupStore';
 
 type SqlExecutor = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getFirstAsync' | 'getAllAsync'>;
 
 let expoDb: SQLite.SQLiteDatabase | null = null;
 let openingDatabase: Promise<SQLite.SQLiteDatabase> | null = null;
 const runSerializedWrite = createLocalWriteQueue();
+const loginRateLimit = createLoginRateLimit();
 
 async function hashLegacyPassword(password: string): Promise<string> {
   return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, password);
@@ -54,6 +59,32 @@ function asMigrationDatabase(database: SQLite.SQLiteDatabase): MigrationDatabase
       database.getAllAsync<T>(source, [...params]),
     withTransactionAsync: (task) => database.withTransactionAsync(task),
   };
+}
+
+interface AuthAttemptRow { failures: number; blockedUntil: number }
+
+async function authAttemptKey(email: string): Promise<string> {
+  return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, email.trim().toLowerCase());
+}
+
+async function recordAuthFailure(database: SQLite.SQLiteDatabase, key: string): Promise<number> {
+  return withLocalWrite(database, async (transaction) => {
+    const prior = await transaction.getFirstAsync<AuthAttemptRow>('SELECT failures,blockedUntil FROM AuthLoginAttempt WHERE attemptKey=?',[key]);
+    const next = loginRateLimit.next(prior?.failures ?? 0);
+    await transaction.runAsync('INSERT INTO AuthLoginAttempt(attemptKey,failures,blockedUntil) VALUES(?,?,?) ON CONFLICT(attemptKey) DO UPDATE SET failures=excluded.failures,blockedUntil=excluded.blockedUntil',[key,next.failures,next.blockedUntil]);
+    return next.delayMs;
+  });
+}
+
+async function currentAuthDelay(database: SQLite.SQLiteDatabase, key: string): Promise<number> {
+  const attempt = await database.getFirstAsync<AuthAttemptRow>('SELECT failures,blockedUntil FROM AuthLoginAttempt WHERE attemptKey=?',[key]);
+  return attempt ? loginRateLimit.delayFor(attempt.failures,attempt.blockedUntil) : 0;
+}
+
+async function clearAuthFailures(database: SQLite.SQLiteDatabase, key: string): Promise<void> {
+  await withLocalWrite(database, async (transaction) => {
+    await transaction.runAsync('DELETE FROM AuthLoginAttempt WHERE attemptKey=?',[key]);
+  });
 }
 
 async function openAndMigrateDatabase(): Promise<SQLite.SQLiteDatabase> {
@@ -116,6 +147,14 @@ function asObligationsSql(database: SqlExecutor): ObligationsSql {
   };
 }
 
+function asAssetSql(database: SqlExecutor): AssetSql {
+  return {
+    getFirstAsync: <T>(sql: string, params: readonly (string | number | null)[] = []) => database.getFirstAsync<T>(sql, [...params]),
+    getAllAsync: <T>(sql: string, params: readonly (string | number | null)[] = []) => database.getAllAsync<T>(sql, [...params]),
+    runAsync: (sql, params = []) => database.runAsync(sql, [...params]),
+  };
+}
+
 async function insertObligationCashTransaction(
   sql: ObligationsSql,
   input: { id: string; ownerId: string; amountMinor: number; type: 'Income'|'Expense'; categoryId: string; accountId: string; date: string; note: string; taxStatus?: TaxStatus },
@@ -159,6 +198,22 @@ const obligationsStore = createObligationsStore(
   },
 );
 
+const assetsInvestmentsStore = createAssetsInvestmentsStore(
+  async () => asAssetSql(await getDb()),
+  async (task) => {
+    const database = await getDb();
+    return withLocalWrite(database, (transaction) => task(asAssetSql(transaction)));
+  },
+);
+
+const profileSetupStore = createProfileSetupStore(
+  async () => asBudgetingSql(await getDb()),
+  async (task) => {
+    const database = await getDb();
+    return withLocalWrite(database, (transaction) => task(asBudgetingSql(transaction)));
+  },
+);
+
 export interface DbUser {
   id: string;
   fullName: string;
@@ -169,7 +224,7 @@ export interface DbUser {
 
 export type AuthResult =
   | { success: true; user: Omit<DbUser, 'passwordHash'>; passwordUpgradePending?: boolean }
-  | { success: false; error: string };
+  | { success: false; error: string; retryAfterSeconds?: number };
 
 interface ExistingUserRow { id: string }
 interface AccountRow {
@@ -287,6 +342,10 @@ function accountMatchesDraft(row: AccountRow, data: ReturnType<typeof normalizeA
 }
 
 export const localDb = {
+  assets: assetsInvestmentsStore.asset,
+  portfolios: assetsInvestmentsStore.portfolio,
+  holdings: assetsInvestmentsStore.holding,
+  netWorth: { historyData: assetsInvestmentsStore.historyData },
   budget: budgetingStore.budget,
   savings: budgetingStore.savings,
   emergencyFund: budgetingStore.emergency,
@@ -360,9 +419,11 @@ export const localDb = {
     register: async (fullName: string, email: string, password: string): Promise<AuthResult> => {
       const normalizedName = fullName.trim();
       const normalizedEmail = email.trim().toLocaleLowerCase('en-US');
-      if (normalizedName.length < 2 || normalizedName.length > 100) return { success: false, error: 'Enter a valid full name.' };
+      if (normalizedName.length < 2 || normalizedName.length > 60) return { success: false, error: 'Enter a valid full name.' };
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return { success: false, error: 'Enter a valid email address.' };
-      if (password.length < 10) return { success: false, error: 'Password must contain at least 10 characters.' };
+      if (password.length < 10 || password.length > 1024 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
+        return { success: false, error: 'Password does not meet the HouseLog password requirements.' };
+      }
       const id = Crypto.randomUUID();
       const createdAt = new Date().toISOString();
 
@@ -371,7 +432,7 @@ export const localDb = {
         const database = await getDb();
         await withLocalWrite(database, async (transaction) => {
           const existing = await transaction.getFirstAsync<ExistingUserRow>(
-            'SELECT id FROM User WHERE email = ?', [normalizedEmail],
+            'SELECT id FROM User WHERE email = ? COLLATE NOCASE', [normalizedEmail],
           );
           if (existing) throw new Error('An account with this email already exists.');
           await transaction.runAsync(
@@ -381,19 +442,30 @@ export const localDb = {
           return undefined;
         });
       } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : 'Account could not be created.' };
+        const message = error instanceof Error ? error.message : '';
+        if (/unique constraint failed:\s*user\.email/i.test(message) || message === 'An account with this email already exists.') {
+          return { success: false, error: 'An account with this email already exists.' };
+        }
+        return { success: false, error: 'Your local profile could not be created. Check device storage and try again.' };
       }
       return { success: true, user: { id, fullName: normalizedName, email: normalizedEmail, createdAt } };
     },
 
     signIn: async (email: string, password: string): Promise<AuthResult> => {
       try {
+        const attemptKey = await authAttemptKey(email);
         const database = await getDb();
+        const persistedDelay = await currentAuthDelay(database, attemptKey);
+        if (persistedDelay > 0) return { success: false, error: `Invalid email or password. Try again in ${Math.ceil(persistedDelay / 1000)} seconds.`, retryAfterSeconds: Math.ceil(persistedDelay / 1000) };
         const user = await database.getFirstAsync<DbUser>(
-          'SELECT id, fullName, email, passwordHash, createdAt FROM User WHERE email = ?',
+          'SELECT id, fullName, email, passwordHash, createdAt FROM User WHERE email = ? COLLATE NOCASE',
           [email.trim().toLocaleLowerCase('en-US')],
         );
-        if (!user) return { success: false, error: 'No account found with this email.' };
+        if (!user) {
+          if (password.length > 0 && password.length <= 1024) await derivePasswordHash(password, new Uint8Array(16));
+          const delay = await recordAuthFailure(database, attemptKey);
+          return { success: false, error: delay > 0 ? `Invalid email or password. Try again in ${Math.ceil(delay / 1000)} seconds.` : 'Invalid email or password.', ...(delay > 0 ? { retryAfterSeconds: Math.ceil(delay / 1000) } : {}) };
+        }
         const verification = await verifyAndUpgradePassword(password, user.passwordHash, {
           verifyLegacy: async (candidate, legacyHash) => (await hashLegacyPassword(candidate)) === legacyHash,
           createCurrentHash: hashPassword,
@@ -405,7 +477,11 @@ export const localDb = {
             });
           },
         });
-        if (!verification.valid) return { success: false, error: 'Incorrect password.' };
+        if (!verification.valid) {
+          const delay = await recordAuthFailure(database, attemptKey);
+          return { success: false, error: delay > 0 ? `Invalid email or password. Try again in ${Math.ceil(delay / 1000)} seconds.` : 'Invalid email or password.', ...(delay > 0 ? { retryAfterSeconds: Math.ceil(delay / 1000) } : {}) };
+        }
+        await clearAuthFailures(database, attemptKey);
         return {
           success: true,
           user: { id: user.id, fullName: user.fullName, email: user.email, createdAt: user.createdAt },
@@ -415,6 +491,86 @@ export const localDb = {
         return { success: false, error: 'Local sign in could not complete. Check device storage and try again.' };
       }
     },
+
+    verifyPassword: async (ownerId: string, password: string): Promise<boolean> => {
+      if (!ownerId.trim()) return false;
+      try {
+        const database = await getDb();
+        const user = await database.getFirstAsync<DbUser>('SELECT id,fullName,email,passwordHash,createdAt FROM User WHERE id=?',[ownerId]);
+        if (!user) return false;
+        const result = await verifyAndUpgradePassword(password, user.passwordHash, {
+          verifyLegacy: async (candidate, legacyHash) => (await hashLegacyPassword(candidate)) === legacyHash,
+          createCurrentHash: hashPassword,
+          replaceStoredHash: async (legacyHash, currentHash) => {
+            await withLocalWrite(database, async (transaction) => {
+              await transaction.runAsync('UPDATE User SET passwordHash=? WHERE id=? AND passwordHash=?',[currentHash,ownerId,legacyHash]);
+            });
+          },
+        });
+        return result.valid;
+      } catch {
+        return false;
+      }
+    },
+
+    changePassword: async (ownerId: string, currentPassword: string, newPassword: string): Promise<void> => {
+      if (!ownerId.trim()) throw new Error('Your local profile is unavailable. Sign in again.');
+      if (newPassword.length < 10 || newPassword.length > 1024 || !/[A-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+        throw new Error('The new password does not meet the HouseLog password requirements.');
+      }
+      try {
+        const database = await getDb();
+        const user = await database.getFirstAsync<DbUser>('SELECT id,fullName,email,passwordHash,createdAt FROM User WHERE id=?',[ownerId]);
+        if (!user) throw new Error('Your local profile is unavailable. Sign in again.');
+        const verified = await verifyAndUpgradePassword(currentPassword, user.passwordHash, {
+          verifyLegacy: async (candidate, legacyHash) => (await hashLegacyPassword(candidate)) === legacyHash,
+          createCurrentHash: hashPassword,
+          replaceStoredHash: async (legacyHash, currentHash) => {
+            await withLocalWrite(database, async (transaction) => {
+              await transaction.runAsync('UPDATE User SET passwordHash=? WHERE id=? AND passwordHash=?',[currentHash,ownerId,legacyHash]);
+            });
+          },
+        });
+        if (!verified.valid) throw new Error('Current password is incorrect.');
+        if (currentPassword === newPassword) throw new Error('Choose a password different from your current one.');
+        const current = await database.getFirstAsync<{passwordHash:string}>('SELECT passwordHash FROM User WHERE id=?',[ownerId]);
+        if (!current) throw new Error('Your local profile is unavailable. Sign in again.');
+        const replacement = await hashPassword(newPassword);
+        await withLocalWrite(database, async (transaction) => {
+          await transaction.runAsync('UPDATE User SET passwordHash=? WHERE id=? AND passwordHash=?',[replacement,ownerId,current.passwordHash]);
+          const saved = await transaction.getFirstAsync<{passwordHash:string}>('SELECT passwordHash FROM User WHERE id=?',[ownerId]);
+          if (saved?.passwordHash !== replacement) throw new Error('Password was not changed. Please try again.');
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (message === 'Current password is incorrect.' || message.startsWith('Choose a password') || message.startsWith('The new password') || message.startsWith('Your local profile') || message.startsWith('Password was not changed.')) throw error;
+        throw new Error('Password could not be changed. Check device storage and try again.');
+      }
+    },
+
+    findMany: async (): Promise<Omit<DbUser, 'passwordHash'>[]> => {
+      const database = await getDb();
+      return database.getAllAsync<Omit<DbUser, 'passwordHash'>>('SELECT id,fullName,email,createdAt FROM User ORDER BY createdAt ASC,id ASC');
+    },
+
+    updateProfileName: async (ownerId: string, fullName: string): Promise<void> => {
+      const normalizedName = fullName.trim();
+      if (normalizedName.length < 2 || normalizedName.length > 60) throw new Error('Name must be between 2 and 60 characters.');
+      try {
+        const database = await getDb();
+        await withLocalWrite(database, async (transaction) => {
+          await transaction.runAsync('UPDATE User SET fullName=? WHERE id=?',[normalizedName,ownerId]);
+          const updated = await transaction.getFirstAsync<{id:string}>('SELECT id FROM User WHERE id=?',[ownerId]);
+          if (!updated) throw new Error('Your local profile is unavailable. Sign in again.');
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'Your local profile is unavailable. Sign in again.') throw error;
+        throw new Error('Your display name could not be saved. Check device storage and try again.');
+      }
+    },
+
+    onboardingComplete: profileSetupStore.isComplete,
+    completeOnboarding: profileSetupStore.complete,
 
     findById: async (id: string): Promise<Omit<DbUser, 'passwordHash'> | null> => {
       if (!id.trim()) return null;
@@ -432,6 +588,10 @@ export const localDb = {
         if (userCount?.count !== 1) return;
         await transaction.runAsync('UPDATE Account SET ownerId = ? WHERE ownerId IS NULL', [ownerId]);
         await transaction.runAsync('UPDATE "Transaction" SET ownerId = ? WHERE ownerId IS NULL', [ownerId]);
+        await transaction.runAsync(`INSERT OR IGNORE INTO ProfileSetup(ownerId,completedAt,firstAccountId)
+          SELECT ?,COALESCE(MIN(createdAt),?),(
+            SELECT id FROM Account WHERE ownerId=? ORDER BY createdAt ASC,id ASC LIMIT 1
+          ) FROM Account WHERE ownerId=? HAVING COUNT(*)>0`, [ownerId,new Date().toISOString(),ownerId,ownerId]);
       });
     },
   },
@@ -514,6 +674,64 @@ export const localDb = {
       const query = buildFinancialReportQuery(ownerId, startDate, endDate);
       const rows = await database.getAllAsync<FinancialReportRow>(query.sql, query.params);
       return rows;
+    },
+
+    findBalanceRows: async (ownerId: string): Promise<Pick<LocalTransaction, 'id' | 'ownerId' | 'amountMinor' | 'type' | 'accountId' | 'toAccountId' | 'reversalOfId'>[]> => {
+      if (!ownerId.trim()) throw new Error('A profile is required to calculate account balances.');
+      const database = await getDb();
+      const rows = await database.getAllAsync<TransactionRow>(`SELECT id,ownerId,amountMinor,type,categoryId,classificationId,accountId,toAccountId,date,note,sourceName,paymentMethod,sourceAmountMinor,sourceCurrency,exchangeRate,referenceNumber,taxStatus,taxYear,synced,reversalOfId,correctionOfId
+        FROM "Transaction" WHERE ownerId=? ORDER BY date ASC,id ASC`, [ownerId]);
+      return rows.map(validateTransactionRow).map((row) => ({
+        id: row.id, ownerId: row.ownerId, amountMinor: row.amountMinor, type: row.type,
+        accountId: row.accountId, toAccountId: row.toAccountId, reversalOfId: row.reversalOfId ?? null,
+      }));
+    },
+
+    findRecentActivity: async (ownerId: string, limit = 5): Promise<TransactionActivity[]> => {
+      if (!ownerId.trim()) throw new Error('A profile is required to read recent activity.');
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error('Recent activity limit must be between 1 and 10.');
+      const database = await getDb();
+      const rows = await database.getAllAsync<{
+        id: string; ownerId: string; amountMinor: number; type: string; categoryId: string; accountId: string | null;
+        toAccountId: string | null; date: string; note: string; sourceName: string | null; taxStatus: string; synced: number;
+        reversalOfId: string | null; accountCurrency: string | null; destinationCurrency: string | null;
+        linkedOriginalType: string | null; linkedOriginalCategoryId: string | null; linkedCurrency: string | null;
+        linkedDestinationCurrency: string | null; linkedRootType: string | null; linkedRootCategoryId: string | null;
+        linkedRootCurrency: string | null;
+      }>(`SELECT t.id,t.ownerId,t.amountMinor,t.type,t.categoryId,t.accountId,t.toAccountId,t.date,COALESCE(t.note,'') AS note,
+          t.sourceName,t.taxStatus,t.synced,t.reversalOfId,a.currency AS accountCurrency,destination.currency AS destinationCurrency,
+          original.type AS linkedOriginalType,original.categoryId AS linkedOriginalCategoryId,originalAccount.currency AS linkedCurrency,
+          originalDestination.currency AS linkedDestinationCurrency,rootOriginal.type AS linkedRootType,rootOriginal.categoryId AS linkedRootCategoryId,
+          rootAccount.currency AS linkedRootCurrency
+        FROM "Transaction" t
+        LEFT JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId
+        LEFT JOIN Account destination ON destination.id=t.toAccountId AND destination.ownerId=t.ownerId
+        LEFT JOIN "Transaction" original ON original.id=t.reversalOfId AND original.ownerId=t.ownerId
+        LEFT JOIN Account originalAccount ON originalAccount.id=original.accountId AND originalAccount.ownerId=original.ownerId
+        LEFT JOIN Account originalDestination ON originalDestination.id=original.toAccountId AND originalDestination.ownerId=original.ownerId
+        LEFT JOIN "Transaction" rootOriginal ON rootOriginal.id=original.reversalOfId AND rootOriginal.ownerId=original.ownerId
+        LEFT JOIN Account rootAccount ON rootAccount.id=rootOriginal.accountId AND rootAccount.ownerId=rootOriginal.ownerId
+        WHERE t.ownerId=? ORDER BY t.date DESC,t.id DESC LIMIT ?`, [ownerId, limit]);
+      return rows.map((row) => {
+        if (!Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0 || !isTransactionType(row.type) ||
+          !isTaxStatus(row.taxStatus) || (row.synced !== 0 && row.synced !== 1)) {
+          throw new Error(`Transaction ${row.id} is invalid and cannot be displayed.`);
+        }
+        const linkedOriginalType = row.linkedOriginalType !== null && isTransactionType(row.linkedOriginalType) ? row.linkedOriginalType : null;
+        const linkedCategoryId = linkedOriginalType === 'Refund' ? row.linkedRootCategoryId : row.linkedOriginalCategoryId;
+        const sourceCurrency = row.type === 'Reversal' && linkedOriginalType === 'Refund' ? row.linkedRootCurrency : row.linkedCurrency;
+        if ((row.type === 'Refund' || row.type === 'Reversal') &&
+          (linkedOriginalType === null || row.accountCurrency !== sourceCurrency ||
+            (linkedOriginalType === 'Transfer' && row.destinationCurrency !== row.linkedDestinationCurrency))) {
+          throw new Error(`Transaction ${row.id} has inconsistent linked currency data.`);
+        }
+        return projectTransactionActivity({
+          id: row.id, type: row.type, categoryId: row.categoryId, amountMinor: row.amountMinor,
+          accountCurrency: row.accountCurrency, destinationCurrency: row.destinationCurrency,
+          sourceName: row.sourceName, note: row.note, date: row.date,
+          linkedOriginalType, linkedCategoryId,
+        });
+      });
     },
 
     findPage: async ({ ownerId, limit = 50, cursor, where }: {

@@ -1,3 +1,20 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  /* HouseLog primary brand color: #635BFF */
+  --color-primary-rgb: 99 91 255;
+}
+
+@layer utilities {
+  .houselog-button {
+    @apply rounded-none bg-primary;
+  }
+}
+
+input:focus,
+textarea:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}

@@ -1,65 +1,61 @@
-import { useEffect, useState, useRef } from 'react';
-import { AppState, AppStateStatus } from 'react-native';
+import { useCallback, useEffect, useRef } from 'react';
+import { AppState, AppStateStatus, Platform } from 'react-native';
 import * as LocalAuthentication from 'expo-local-authentication';
 
-export function useAppLock(enabled: boolean = true) {
-  const [isLocked, setIsLocked] = useState(enabled);
-  const [appState, setAppState] = useState(AppState.currentState);
-  const backgroundTimeRef = useRef<number | null>(null);
+const BACKGROUND_LOCK_AFTER_MS = 15 * 60_000;
+
+export function useAppLock(enabled: boolean, onLock: () => void) {
+  const onLockRef = useRef(onLock);
+  const backgroundAtRef = useRef<number | null>(null);
+  const previousStateRef = useRef<AppStateStatus>(AppState.currentState);
+  onLockRef.current = onLock;
 
   useEffect(() => {
     if (!enabled) {
-      setIsLocked(false);
+      backgroundAtRef.current = null;
+      previousStateRef.current = AppState.currentState;
       return;
     }
-
-    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
-      if (
-        appState.match(/inactive|background/) &&
-        nextAppState === 'active'
-      ) {
-        // App has come to the foreground
-        if (backgroundTimeRef.current) {
-          const timeInBackground = Date.now() - backgroundTimeRef.current;
-          // 60 seconds (60000 ms) timeout before re-authentication is required
-          if (timeInBackground > 60000) {
-            setIsLocked(true);
-          }
-        }
-      } else if (nextAppState.match(/inactive|background/)) {
-        // App goes to background
-        backgroundTimeRef.current = Date.now();
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const previous = previousStateRef.current;
+      if (previous.match(/inactive|background/) && nextState === 'active') {
+        const backgroundAt = backgroundAtRef.current;
+        if (backgroundAt !== null && Date.now() - backgroundAt >= BACKGROUND_LOCK_AFTER_MS) onLockRef.current();
+        backgroundAtRef.current = null;
+      } else if (nextState.match(/inactive|background/)) {
+        backgroundAtRef.current ??= Date.now();
       }
-      setAppState(nextAppState);
+      previousStateRef.current = nextState;
     });
+    return () => subscription.remove();
+  }, [enabled]);
 
-    return () => {
-      subscription.remove();
-    };
-  }, [appState, enabled]);
-
-  const unlock = async () => {
+  const biometricAvailability = useCallback(async (): Promise<boolean> => {
+    if (Platform.OS === 'web') return false;
     try {
-      const securityLevel = await LocalAuthentication.getEnrolledLevelAsync();
-      if (securityLevel === LocalAuthentication.SecurityLevel.NONE) return false;
-
-      const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: 'Unlock Finance App',
-        fallbackLabel: 'Use device passcode',
-        cancelLabel: 'Cancel',
-        disableDeviceFallback: false,
-      });
-
-      if (result.success) {
-        setIsLocked(false);
-        backgroundTimeRef.current = Date.now();
-        return true;
-      }
+      const [hasHardware, enrolled] = await Promise.all([
+        LocalAuthentication.hasHardwareAsync(),
+        LocalAuthentication.isEnrolledAsync(),
+      ]);
+      return hasHardware && enrolled;
     } catch {
-      // An unavailable or cancelled authentication never unlocks financial data.
+      return false;
     }
-    return false;
-  };
+  }, []);
 
-  return { isLocked, unlock };
+  const authenticateBiometric = useCallback(async (): Promise<boolean> => {
+    if (!(await biometricAvailability())) return false;
+    try {
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Unlock HouseLog',
+        cancelLabel: 'Use password',
+        disableDeviceFallback: true,
+      });
+      return result.success;
+    } catch {
+      return false;
+    }
+  }, [biometricAvailability]);
+
+  return { biometricAvailability, authenticateBiometric };
 }

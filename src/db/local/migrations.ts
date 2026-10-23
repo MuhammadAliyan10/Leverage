@@ -1,6 +1,6 @@
 import { resolveClassification } from '../../finance/domain.ts';
 
-export const LOCAL_DATABASE_VERSION = 5;
+export const LOCAL_DATABASE_VERSION = 7;
 
 export interface MigrationDatabase {
   execAsync(source: string): Promise<void>;
@@ -102,6 +102,33 @@ async function ensureBaseTables(database: MigrationDatabase): Promise<void> {
       taxYear INTEGER,
       synced INTEGER NOT NULL DEFAULT 0
     );
+  `);
+}
+
+async function migrateOnboardingStateV7(database: MigrationDatabase): Promise<void> {
+  await database.execAsync(`
+    CREATE TABLE IF NOT EXISTS ProfileSetup (
+      ownerId TEXT PRIMARY KEY NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      completedAt TEXT NOT NULL,
+      firstAccountId TEXT
+    );
+    CREATE TABLE IF NOT EXISTS AuthLoginAttempt (
+      attemptKey TEXT PRIMARY KEY NOT NULL,
+      failures INTEGER NOT NULL CHECK(failures >= 0),
+      blockedUntil INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  // Any existing account, including an archived one, proves the profile completed
+  // initial setup. Preserve all rows and avoid sending established users through setup.
+  await database.execAsync(`
+    INSERT OR IGNORE INTO ProfileSetup(ownerId,completedAt,firstAccountId)
+    SELECT u.id,u.createdAt,(
+      SELECT a.id FROM Account a WHERE a.ownerId=u.id ORDER BY a.createdAt ASC,a.id ASC LIMIT 1
+    )
+    FROM User u
+    WHERE EXISTS (SELECT 1 FROM Account WHERE Account.ownerId = u.id);
+    CREATE INDEX IF NOT EXISTS ProfileSetup_completed_idx ON ProfileSetup(completedAt);
+    CREATE INDEX IF NOT EXISTS AuthLoginAttempt_blocked_idx ON AuthLoginAttempt(blockedUntil);
   `);
 }
 
@@ -731,6 +758,163 @@ async function migrateObligationAccountingV5(database: MigrationDatabase): Promi
   `);
 }
 
+/** Phase 3 append-only asset and investment records with profile/currency guards. */
+async function migrateAssetsInvestmentsV6(database: MigrationDatabase): Promise<void> {
+  await database.execAsync(`
+    CREATE TABLE IF NOT EXISTS Asset (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+      category TEXT NOT NULL CHECK(category IN ('property','vehicle','precious_metal','valuable','business_equity','other')),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      purchaseValueMinor INTEGER NOT NULL CHECK(purchaseValueMinor > 0),
+      purchaseDate TEXT NOT NULL,
+      ownershipBps INTEGER NOT NULL CHECK(ownershipBps BETWEEN 1 AND 10000),
+      notes TEXT NOT NULL DEFAULT '',
+      createdAt TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS Asset_owner_category_idx ON Asset(ownerId,category,id);
+    CREATE TABLE IF NOT EXISTS AssetValuation (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      assetId TEXT NOT NULL REFERENCES Asset(id) ON DELETE RESTRICT,
+      valueMinor INTEGER NOT NULL CHECK(valueMinor >= 0),
+      valuationDate TEXT NOT NULL,
+      source TEXT NOT NULL CHECK(length(trim(source)) BETWEEN 1 AND 120),
+      idempotencyKey TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      UNIQUE(ownerId,idempotencyKey)
+    );
+    CREATE INDEX IF NOT EXISTS AssetValuation_owner_asset_date_idx ON AssetValuation(ownerId,assetId,valuationDate DESC,id DESC);
+    CREATE TABLE IF NOT EXISTS AssetActivity (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      assetId TEXT NOT NULL REFERENCES Asset(id) ON DELETE RESTRICT,
+      eventType TEXT NOT NULL CHECK(eventType IN ('acquisition','disposal')),
+      ownershipBps INTEGER NOT NULL CHECK(ownershipBps BETWEEN 1 AND 10000),
+      costBasisMinor INTEGER NOT NULL CHECK(costBasisMinor >= 0),
+      proceedsMinor INTEGER NOT NULL CHECK(proceedsMinor >= 0),
+      accountId TEXT REFERENCES Account(id) ON DELETE RESTRICT,
+      transactionId TEXT UNIQUE REFERENCES "Transaction"(id) ON DELETE RESTRICT,
+      eventDate TEXT NOT NULL,
+      idempotencyKey TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      UNIQUE(ownerId,idempotencyKey),
+      CHECK((eventType='acquisition' AND ownershipBps>0 AND proceedsMinor=0) OR (eventType='disposal' AND ownershipBps>0)),
+      CHECK(accountId IS NULL OR transactionId IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS AssetActivity_owner_asset_date_idx ON AssetActivity(ownerId,assetId,eventDate,id);
+    CREATE TABLE IF NOT EXISTS InvestmentPortfolio (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      cashAccountId TEXT NOT NULL REFERENCES Account(id) ON DELETE RESTRICT,
+      createdAt TEXT NOT NULL,
+      UNIQUE(ownerId,name,currency)
+    );
+    CREATE INDEX IF NOT EXISTS InvestmentPortfolio_owner_idx ON InvestmentPortfolio(ownerId,currency,id);
+    CREATE TABLE IF NOT EXISTS InvestmentHolding (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      portfolioId TEXT NOT NULL REFERENCES InvestmentPortfolio(id) ON DELETE RESTRICT,
+      symbol TEXT NOT NULL CHECK(length(trim(symbol)) BETWEEN 1 AND 24),
+      name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+      category TEXT NOT NULL CHECK(category IN ('stock','etf','mutual_fund','bond','sukuk','gold','crypto','other')),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      createdAt TEXT NOT NULL,
+      UNIQUE(ownerId,portfolioId,symbol)
+    );
+    CREATE INDEX IF NOT EXISTS InvestmentHolding_owner_portfolio_idx ON InvestmentHolding(ownerId,portfolioId,id);
+    CREATE TABLE IF NOT EXISTS InvestmentEvent (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      holdingId TEXT NOT NULL REFERENCES InvestmentHolding(id) ON DELETE RESTRICT,
+      eventType TEXT NOT NULL CHECK(eventType IN ('buy','sell','split','dividend')),
+      quantityMicros INTEGER NOT NULL DEFAULT 0 CHECK(quantityMicros>=0),
+      unitPriceMinor INTEGER NOT NULL DEFAULT 0 CHECK(unitPriceMinor>=0),
+      feeMinor INTEGER NOT NULL DEFAULT 0 CHECK(feeMinor>=0),
+      amountMinor INTEGER NOT NULL DEFAULT 0 CHECK(amountMinor>=0),
+      splitNumerator INTEGER NOT NULL DEFAULT 0 CHECK(splitNumerator>=0),
+      splitDenominator INTEGER NOT NULL DEFAULT 0 CHECK(splitDenominator>=0),
+      transactionId TEXT UNIQUE REFERENCES "Transaction"(id) ON DELETE RESTRICT,
+      eventDate TEXT NOT NULL,
+      idempotencyKey TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      UNIQUE(ownerId,idempotencyKey),
+      CHECK((eventType IN ('buy','sell') AND quantityMicros>0 AND unitPriceMinor>0 AND splitNumerator=0 AND splitDenominator=0 AND transactionId IS NOT NULL) OR
+        (eventType='split' AND quantityMicros=0 AND splitNumerator>0 AND splitDenominator>0 AND transactionId IS NULL) OR
+        (eventType='dividend' AND amountMinor>0 AND quantityMicros=0 AND splitNumerator=0 AND splitDenominator=0 AND transactionId IS NOT NULL))
+    );
+    CREATE INDEX IF NOT EXISTS InvestmentEvent_owner_holding_date_idx ON InvestmentEvent(ownerId,holdingId,eventDate,id);
+    CREATE TABLE IF NOT EXISTS InvestmentPrice (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      holdingId TEXT NOT NULL REFERENCES InvestmentHolding(id) ON DELETE RESTRICT,
+      unitPriceMinor INTEGER NOT NULL CHECK(unitPriceMinor>=0),
+      priceDate TEXT NOT NULL,
+      source TEXT NOT NULL CHECK(length(trim(source)) BETWEEN 1 AND 120),
+      idempotencyKey TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      UNIQUE(ownerId,idempotencyKey)
+    );
+    CREATE INDEX IF NOT EXISTS InvestmentPrice_owner_holding_date_idx ON InvestmentPrice(ownerId,holdingId,priceDate DESC,id DESC);
+    CREATE TRIGGER IF NOT EXISTS Asset_profile_guard BEFORE INSERT ON Asset
+    WHEN NOT EXISTS(SELECT 1 FROM User WHERE id=NEW.ownerId)
+    BEGIN SELECT RAISE(ABORT,'asset owner does not exist'); END;
+    CREATE TRIGGER IF NOT EXISTS Asset_purchase_immutable BEFORE UPDATE ON Asset
+    WHEN NEW.ownerId!=OLD.ownerId OR NEW.currency!=OLD.currency OR NEW.purchaseValueMinor!=OLD.purchaseValueMinor OR NEW.purchaseDate!=OLD.purchaseDate OR NEW.ownershipBps!=OLD.ownershipBps OR NEW.id!=OLD.id OR NEW.createdAt!=OLD.createdAt
+    BEGIN SELECT RAISE(ABORT,'asset purchase history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS AssetValuation_profile_guard BEFORE INSERT ON AssetValuation
+    WHEN NOT EXISTS(SELECT 1 FROM Asset a WHERE a.id=NEW.assetId AND a.ownerId=NEW.ownerId)
+    BEGIN SELECT RAISE(ABORT,'asset valuation profile mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS AssetValuation_append_only_update BEFORE UPDATE ON AssetValuation BEGIN SELECT RAISE(ABORT,'asset valuations are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS AssetValuation_append_only_delete BEFORE DELETE ON AssetValuation BEGIN SELECT RAISE(ABORT,'asset valuations are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS AssetActivity_profile_guard BEFORE INSERT ON AssetActivity
+    WHEN NOT EXISTS(SELECT 1 FROM Asset a WHERE a.id=NEW.assetId AND a.ownerId=NEW.ownerId)
+      OR NEW.eventDate < (SELECT a.purchaseDate FROM Asset a WHERE a.id=NEW.assetId AND a.ownerId=NEW.ownerId)
+      OR (NEW.accountId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM Account a JOIN Asset x ON x.id=NEW.assetId WHERE a.id=NEW.accountId AND a.ownerId=NEW.ownerId AND a.currency=x.currency))
+      OR (NEW.transactionId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM "Transaction" t JOIN Asset x ON x.id=NEW.assetId WHERE t.id=NEW.transactionId AND t.ownerId=NEW.ownerId AND t.accountId=NEW.accountId AND t.amountMinor=CASE WHEN NEW.eventType='acquisition' THEN NEW.costBasisMinor ELSE NEW.proceedsMinor END AND t.type=CASE WHEN NEW.eventType='acquisition' THEN 'Expense' ELSE 'Income' END AND t.categoryId=CASE WHEN NEW.eventType='acquisition' THEN 'asset_purchase' ELSE 'asset_sale_proceeds' END AND EXISTS(SELECT 1 FROM Account a WHERE a.id=t.accountId AND a.currency=x.currency)))
+    BEGIN SELECT RAISE(ABORT,'asset activity profile, currency or cash entry mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS AssetActivity_disposal_limit_guard BEFORE INSERT ON AssetActivity
+    WHEN (NEW.eventType='acquisition' AND EXISTS(SELECT 1 FROM AssetActivity a WHERE a.assetId=NEW.assetId AND a.ownerId=NEW.ownerId AND a.eventType='acquisition'))
+      OR (NEW.eventType='disposal' AND NOT EXISTS(SELECT 1 FROM Asset a WHERE a.id=NEW.assetId AND a.ownerId=NEW.ownerId AND NEW.ownershipBps<=a.ownershipBps-COALESCE((SELECT SUM(x.ownershipBps) FROM AssetActivity x WHERE x.assetId=a.id AND x.ownerId=a.ownerId AND x.eventType='disposal'),0)))
+    BEGIN SELECT RAISE(ABORT,'asset acquisition is duplicated or disposal exceeds ownership'); END;
+    CREATE TRIGGER IF NOT EXISTS AssetActivity_append_only_update BEFORE UPDATE ON AssetActivity BEGIN SELECT RAISE(ABORT,'asset history is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS AssetActivity_append_only_delete BEFORE DELETE ON AssetActivity BEGIN SELECT RAISE(ABORT,'asset history is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS Portfolio_profile_guard BEFORE INSERT ON InvestmentPortfolio
+    WHEN NOT EXISTS(SELECT 1 FROM Account a WHERE a.id=NEW.cashAccountId AND a.ownerId=NEW.ownerId AND a.currency=NEW.currency AND a.archivedAt IS NULL)
+    BEGIN SELECT RAISE(ABORT,'portfolio cash account profile or currency mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS Portfolio_update_guard BEFORE UPDATE ON InvestmentPortfolio
+    WHEN NEW.ownerId!=OLD.ownerId OR NEW.currency!=OLD.currency OR NEW.cashAccountId!=OLD.cashAccountId OR NEW.id!=OLD.id OR NEW.createdAt!=OLD.createdAt
+    BEGIN SELECT RAISE(ABORT,'portfolio funding account and currency are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS Holding_profile_guard BEFORE INSERT ON InvestmentHolding
+    WHEN NOT EXISTS(SELECT 1 FROM InvestmentPortfolio p WHERE p.id=NEW.portfolioId AND p.ownerId=NEW.ownerId AND p.currency=NEW.currency)
+    BEGIN SELECT RAISE(ABORT,'holding profile or currency mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS Holding_immutable BEFORE UPDATE ON InvestmentHolding
+    WHEN NEW.ownerId!=OLD.ownerId OR NEW.portfolioId!=OLD.portfolioId OR NEW.currency!=OLD.currency OR NEW.id!=OLD.id OR NEW.createdAt!=OLD.createdAt
+    BEGIN SELECT RAISE(ABORT,'holding identity and currency are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS InvestmentEvent_profile_guard BEFORE INSERT ON InvestmentEvent
+    WHEN NOT EXISTS(SELECT 1 FROM InvestmentHolding h WHERE h.id=NEW.holdingId AND h.ownerId=NEW.ownerId)
+      OR (NEW.transactionId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM "Transaction" t JOIN InvestmentHolding h ON h.id=NEW.holdingId JOIN InvestmentPortfolio p ON p.id=h.portfolioId WHERE t.id=NEW.transactionId AND t.ownerId=NEW.ownerId AND t.accountId=p.cashAccountId AND ((NEW.eventType='buy' AND t.type='Expense' AND t.categoryId='investment_purchase' AND t.amountMinor=NEW.amountMinor+NEW.feeMinor) OR (NEW.eventType='sell' AND t.type='Income' AND t.categoryId='investment_sale_proceeds' AND t.amountMinor=NEW.amountMinor-NEW.feeMinor) OR (NEW.eventType='dividend' AND t.type='Income' AND t.categoryId='investment_dividend' AND t.amountMinor=NEW.amountMinor))) )
+    BEGIN SELECT RAISE(ABORT,'investment event cash entry mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS InvestmentEvent_append_only_update BEFORE UPDATE ON InvestmentEvent BEGIN SELECT RAISE(ABORT,'investment history is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS InvestmentEvent_append_only_delete BEFORE DELETE ON InvestmentEvent BEGIN SELECT RAISE(ABORT,'investment history is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS InvestmentPrice_profile_guard BEFORE INSERT ON InvestmentPrice
+    WHEN NOT EXISTS(SELECT 1 FROM InvestmentHolding h WHERE h.id=NEW.holdingId AND h.ownerId=NEW.ownerId)
+    BEGIN SELECT RAISE(ABORT,'investment price profile mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS InvestmentPrice_append_only_update BEFORE UPDATE ON InvestmentPrice BEGIN SELECT RAISE(ABORT,'investment prices are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS InvestmentPrice_append_only_delete BEFORE DELETE ON InvestmentPrice BEGIN SELECT RAISE(ABORT,'investment prices are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS Transaction_asset_investment_adjustment_guard
+    BEFORE INSERT ON "Transaction"
+    WHEN NEW.type IN ('Refund','Reversal') AND EXISTS(
+      SELECT 1 FROM AssetActivity a WHERE a.ownerId=NEW.ownerId AND a.transactionId=NEW.reversalOfId
+      UNION ALL SELECT 1 FROM InvestmentEvent e WHERE e.ownerId=NEW.ownerId AND e.transactionId=NEW.reversalOfId
+    )
+    BEGIN SELECT RAISE(ABORT,'asset and investment cash entries require asset-specific corrections'); END;
+  `);
+}
+
 /**
  * Applies the one compatibility migration from the released legacy Prisma schema and the
  * intermediate unversioned local schema. DDL, backfills, validation and user_version commit
@@ -756,6 +940,8 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
     if (currentVersion < 3) await migrateBudgetingV3(database);
     if (currentVersion < 4) await migrateRecurringFinanceV4(database);
     if (currentVersion < 5) await migrateObligationAccountingV5(database);
+    if (currentVersion < 6) await migrateAssetsInvestmentsV6(database);
+    if (currentVersion < 7) await migrateOnboardingStateV7(database);
     // No server acknowledgement can be verified for the legacy sync flags.
     await database.execAsync('UPDATE Account SET synced = 0');
     await database.execAsync('UPDATE "Transaction" SET synced = 0');

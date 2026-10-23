@@ -21,7 +21,7 @@ export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
   const clampedPercentage = Math.max(0, Math.min(percentage, 100));
   const isOverBudget = spent > limit;
 
-  let barColor = 'bg-[#533AFE]'; // Primary
+  let barColor = 'bg-primary';
   if (percentage >= 75 && percentage <= 90) {
     barColor = 'bg-amber-500';
   } else if (percentage > 90) {
@@ -52,11 +52,11 @@ export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
           <View className={`h-8 w-8 items-center justify-center rounded-full bg-gray-100 dark:bg-neutral-800`}>
             <Icon size={16} color="#9ca3af" />
           </View>
-          <Text className="ml-3 font-semibold text-gray-900 dark:text-white text-base">
+          <Text className="font-body ml-3 font-semibold text-gray-900 dark:text-white text-base">
             {categoryName}
           </Text>
         </View>
-        <Text className={`font-bold text-sm ${isOverBudget ? 'text-red-500' : 'text-gray-600 dark:text-gray-400'}`}>
+        <Text className={["font-body", (`font-bold text-sm ${isOverBudget ? 'text-red-500' : 'text-gray-600 dark:text-gray-400'}`)].filter(Boolean).join(' ')}>
           {formatMinorUnits(Math.round(spent * 100), currency)} / {formatMinorUnits(Math.round(limit * 100), currency)}
         </Text>
       </View>

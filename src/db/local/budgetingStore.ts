@@ -508,6 +508,23 @@ export function createBudgetingStore(
     },
 
     savings: {
+      reservationsByAccount: async (ownerId: string): Promise<{ accountId: string; amountMinor: number }[]> => {
+        assertProfile(ownerId);
+        const db = await getDatabase();
+        const rows = await db.getAllAsync<{ accountId: string; amountMinor: number }>(`
+          SELECT accountId, SUM(amount) AS amountMinor FROM (
+            SELECT accountId, CASE WHEN eventType IN ('allocate', 'transfer_in') THEN amountMinor ELSE -amountMinor END AS amount
+              FROM SavingsGoalEvent WHERE ownerId = ? AND accountId IS NOT NULL
+            UNION ALL
+            SELECT accountId, CASE WHEN eventType IN ('allocate', 'transfer_in') THEN amountMinor ELSE -amountMinor END AS amount
+              FROM EmergencyFundEvent WHERE ownerId = ? AND accountId IS NOT NULL
+          ) GROUP BY accountId
+        `, [ownerId, ownerId]);
+        return rows.map((row) => {
+          if (!row.accountId || !Number.isSafeInteger(row.amountMinor)) throw new Error('A savings reservation is invalid.');
+          return row;
+        });
+      },
       goals: async (ownerId: string): Promise<GoalRecord[]> => {
         assertProfile(ownerId);
         const db = await getDatabase();
