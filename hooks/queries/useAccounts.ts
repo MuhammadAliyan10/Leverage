@@ -1,20 +1,16 @@
 import { useQuery } from '@tanstack/react-query';
 import { localDb } from '../../src/db/local/client';
 import { useAuth } from '../../src/context/AuthContext';
-import { calculateAccountBalances } from '../../src/finance/balances';
 
-export function useAccounts() {
+export function useAccounts(options: { includeArchived?: boolean } = {}) {
   const { user } = useAuth();
+  const includeArchived = options.includeArchived === true;
   return useQuery({
-    queryKey: ['accounts', user?.id],
+    queryKey: ['accounts', user?.id, includeArchived],
     enabled: !!user,
     queryFn: async () => {
       if (!user) throw new Error('Sign in to read accounts.');
-      const [accounts, transactions] = await Promise.all([
-        localDb.account.findMany(user.id),
-        localDb.transaction.findMany({ ownerId: user.id, orderBy: { date: 'asc' } }),
-      ]);
-      return calculateAccountBalances(accounts, transactions);
+      return localDb.account.findManyWithBalances(user.id, { includeArchived });
     },
   });
 }

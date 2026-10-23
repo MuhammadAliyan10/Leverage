@@ -167,6 +167,11 @@ export function createObligationsStore(
         return (await read()).getAllAsync<BillRow>(`SELECT b.*,COALESCE((SELECT SUM(p.amountMinor) FROM BillPayment p WHERE p.billId=b.id AND p.ownerId=b.ownerId
           AND NOT EXISTS (SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id)),0) AS paidMinor FROM Bill b WHERE b.ownerId=? ORDER BY b.dueDate,b.id`,[ownerId]);
       },
+      reminderRows: async (ownerId:string): Promise<BillRow[]> => {
+        if (!ownerId.trim()) throw new Error('A profile is required to read bill reminders.');
+        return (await read()).getAllAsync<BillRow>(`SELECT b.*,COALESCE((SELECT SUM(p.amountMinor) FROM BillPayment p WHERE p.billId=b.id AND p.ownerId=b.ownerId
+          AND NOT EXISTS (SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id)),0) AS paidMinor FROM Bill b WHERE b.ownerId=? AND b.reminderId IS NOT NULL ORDER BY b.dueDate,b.id`,[ownerId]);
+      },
       upcoming: async (ownerId:string, today = localCalendarDate()): Promise<BillRow[]> => {
         if (!ownerId.trim()) throw new Error('A profile is required to read upcoming bills.');
         validateCalendarDate(today, 'Current date');

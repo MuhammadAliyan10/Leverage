@@ -16,9 +16,10 @@ interface LockScreenProps {
   onUnlockPassword: (password: string) => Promise<{ success: boolean; error?: string }>;
   onUnlockBiometric: () => Promise<boolean>;
   checkBiometricAvailability: () => Promise<boolean>;
+  biometricEnabled: boolean;
 }
 
-export function LockScreen({ onUnlockPassword, onUnlockBiometric, checkBiometricAvailability }: LockScreenProps) {
+export function LockScreen({ onUnlockPassword, onUnlockBiometric, checkBiometricAvailability, biometricEnabled }: LockScreenProps) {
   const [biometricAvailable, setBiometricAvailable] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [biometricBusy, setBiometricBusy] = useState(false);
@@ -28,9 +29,9 @@ export function LockScreen({ onUnlockPassword, onUnlockBiometric, checkBiometric
 
   useEffect(() => {
     let active = true;
-    void checkBiometricAvailability().then((available) => { if (active) setBiometricAvailable(available); });
+    void checkBiometricAvailability().then((available) => { if (active) setBiometricAvailable(available && biometricEnabled); });
     return () => { active = false; };
-  }, [checkBiometricAvailability]);
+  }, [checkBiometricAvailability, biometricEnabled]);
 
   const submitPassword = async (data: FormData) => {
     const result = await onUnlockPassword(data.password);

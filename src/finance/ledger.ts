@@ -100,6 +100,21 @@ export function formatMinorUnits(
   }).format(amountMinor / 10 ** fractionDigits);
 }
 
+/** Produces editable decimal text directly from integer minor units, without a float round trip. */
+export function formatMinorUnitsForInput(amountMinor: number, fractionDigits = 2): string {
+  if (!Number.isSafeInteger(amountMinor)) throw new Error('Amount is outside the supported range.');
+  if (!Number.isInteger(fractionDigits) || fractionDigits < 0 || fractionDigits > 6) {
+    throw new Error('fractionDigits must be an integer between 0 and 6.');
+  }
+  const negative = amountMinor < 0;
+  const absolute = BigInt(negative ? -amountMinor : amountMinor);
+  const scale = 10n ** BigInt(fractionDigits);
+  const whole = absolute / scale;
+  if (fractionDigits === 0) return `${negative ? '-' : ''}${whole}`;
+  const fraction = (absolute % scale).toString().padStart(fractionDigits, '0').replace(/0+$/, '');
+  return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
+}
+
 /** Enforces the balancing and line rules before a journal entry can be saved. */
 export function assertBalancedEntry(entry: JournalEntry): void {
   if (!entry.id.trim()) throw new Error('Journal entry ID is required.');

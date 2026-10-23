@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { buildFinancialReportQuery, calculateFinancialReport } from '../../src/finance/reporting.ts';
+import { buildFinancialReportQuery, calculateFinancialBucketTotals, calculateFinancialReport } from '../../src/finance/reporting.ts';
 import { buildTransactionPagePredicate } from '../../src/db/local/queryBuilders.ts';
 
 function setupReportDatabase() {
@@ -60,6 +60,8 @@ test('complete indexed report totals ignore pagination, retain archived history,
   assert.equal(full.incomeMinor, 5000);
   assert.equal(full.expenseMinor, 250825);
   assert.equal(full.netMinor, -245825);
+  assert.equal(full.expenseCount, 2502, 'frequency counts positive net expense records after partial refunds and full reversals');
+  assert.deepEqual(full.incomeSourceTotals, [{ source: 'Salary', amountMinor: 5000 }]);
   assert.deepEqual(full.excludedCurrencies, ['USD']);
   assert.deepEqual(full.categoryTotals, [
     { category: 'Food', amountMinor: 250425 },
@@ -119,5 +121,45 @@ test('borrowing and principal repayments affect cash but not income or expenses;
   assert.equal(report.expenseMinor,250825+500);
   assert.equal(report.categoryTotals.find((item)=>item.category==='debt_interest')?.amountMinor,500);
   assert.equal(report.categoryTotals.some((item)=>item.category==='debt_principal_repayment'),false);
+  database.close();
+});
+
+test('chart buckets aggregate complete large record sets with signed refunds and stable ordering', () => {
+  const range = { startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-06-01T00:00:00.000Z' };
+  const rows = [];
+  for (let index = 0; index < 1000; index += 1) {
+    rows.push({ id: `e-${index}`, ownerId: 'u', date: '2026-05-15T12:00:00.000Z', amountMinor: 100, type: 'Expense', category: 'food', note: '', accountId: 'a', toAccountId: null, accountCurrency: 'PKR', destinationCurrency: null, reversalOfId: null, linkedOriginalAccountId: null, linkedOriginalToAccountId: null, linkedOriginalType: null, linkedCategory: null, linkedCurrency: null, linkedDestinationCurrency: null, linkedRootType: null, linkedRootId: null, linkedRootCurrency: null });
+  }
+  rows.push({ ...rows[0], id: 'refund', amountMinor: 25, type: 'Refund', category: 'expense_refund', reversalOfId: 'e-0', linkedOriginalType: 'Expense', linkedCategory: 'food', linkedCurrency: 'PKR' });
+  rows.push({ ...rows[0], id: 'income', amountMinor: 500, type: 'Income', category: 'salary' });
+  rows.push({ ...rows[0], id: 'transfer', amountMinor: 900, type: 'Transfer', category: 'internal_transfer', toAccountId: 'b', destinationCurrency: 'PKR' });
+  rows.push({ ...rows[0], id: 'usd', amountMinor: 100_000, accountCurrency: 'USD' });
+  const buckets = [{ id: 'may', group: 'month', startDate: range.startDate, endDate: range.endDate }];
+  const totals = calculateFinancialBucketTotals(rows, 'PKR', buckets);
+  assert.deepEqual(totals.may, { incomeMinor: 500, expenseMinor: 99_975 });
+  assert.deepEqual(calculateFinancialBucketTotals([...rows].reverse(), 'PKR', buckets), totals);
+  for (const pageSize of [1, 23, 100, 257]) {
+    const pages = [];
+    for (let offset = 0; offset < rows.length; offset += pageSize) pages.push(rows.slice(offset, offset + pageSize));
+    // A chart consumes the complete set; summing page-level bucket results is equivalent.
+    const paged = pages.reduce((sum, page) => {
+      const result = calculateFinancialBucketTotals(page, 'PKR', buckets).may;
+      return { incomeMinor: sum.incomeMinor + result.incomeMinor, expenseMinor: sum.expenseMinor + result.expenseMinor };
+    }, { incomeMinor: 0, expenseMinor: 0 });
+    assert.deepEqual(paged, totals.may);
+  }
+});
+
+test('a refund in a later reporting period remains a signed adjustment instead of a fake positive category', () => {
+  const database = setupReportDatabase();
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,date,amountMinor,type,categoryId,accountId) VALUES(?,?,?,?,?,?,?)')
+    .run('prior-month-expense', 'user-1', '2026-04-15T12:00:00.000Z', 200, 'Expense', 'food', 'pkr');
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,date,amountMinor,type,categoryId,accountId,reversalOfId) VALUES(?,?,?,?,?,?,?,?)')
+    .run('current-month-refund', 'user-1', '2026-05-15T12:00:00.000Z', 200, 'Refund', 'expense_refund', 'pkr', 'prior-month-expense');
+  const built = buildFinancialReportQuery('user-1', '2026-05-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z');
+  const rows = database.prepare(built.sql).all(...built.params).map((row) => ({ ...row }));
+  const report = calculateFinancialReport(rows, 'PKR', { startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-06-01T00:00:00.000Z' });
+  assert.equal(report.expenseMinor, 250_625);
+  assert.equal(report.categoryTotals.find((category) => category.category === 'food')?.amountMinor, -200);
   database.close();
 });

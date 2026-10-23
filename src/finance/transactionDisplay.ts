@@ -12,6 +12,8 @@ export interface TransactionActivityInput {
   date: string;
   linkedOriginalType: TransactionType | null;
   linkedCategoryId: string | null;
+  accountName?: string | null;
+  destinationName?: string | null;
 }
 
 export interface TransactionActivity {
@@ -23,12 +25,43 @@ export interface TransactionActivity {
   currency: CurrencyCode | null;
   direction: 'in' | 'out' | 'transfer';
   date: string;
+  accountContext: string | null;
+  statusLabel: string | null;
+}
+
+export function groupTransactionsByDate<T extends { date: string }>(items: readonly T[], now = new Date()): { title: string; data: T[] }[] {
+  const dayKey = (date: Date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+  const todayKey = dayKey(now);
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayKey = dayKey(yesterday);
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const date = new Date(item.date);
+    const key = dayKey(date);
+    const rows = groups.get(key) ?? [];
+    rows.push(item);
+    groups.set(key, rows);
+  }
+  return [...groups.entries()].map(([key, data]) => ({
+    title: key === todayKey ? 'Today' : key === yesterdayKey ? 'Yesterday' : new Date(data[0].date).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }),
+    data,
+  }));
 }
 
 function labelFor(categoryId: string | null, fallback: string): string {
   if (!categoryId) return fallback;
   const classification = resolveClassification(categoryId);
-  return classification ? CLASSIFICATIONS[classification].label : fallback;
+  if (classification) return CLASSIFICATIONS[classification].label;
+  const linkedLabels: Readonly<Record<string, string>> = {
+    debt_borrowing: 'Borrowed principal received', debt_lending: 'Money lent',
+    debt_principal_repayment: 'Debt principal repayment', debt_receivable_payment: 'Principal repaid to you',
+    debt_interest: 'Debt interest', debt_settlement: 'Debt settlement',
+    asset_purchase: 'Asset purchase', asset_sale_proceeds: 'Asset sale proceeds',
+    investment_purchase: 'Investment purchase', investment_sale_proceeds: 'Investment sale proceeds',
+    investment_dividend: 'Investment dividend', scheduled_transfer: 'Scheduled account transfer',
+  };
+  return linkedLabels[categoryId] ?? fallback;
 }
 
 /** Pure, shared presentation projection; the source transaction amounts stay integer minor units. */
@@ -69,7 +102,12 @@ export function projectTransactionActivity(input: TransactionActivityInput): Tra
     ? input.accountCurrency && input.accountCurrency === input.destinationCurrency ? input.accountCurrency : null
     : input.accountCurrency;
   const currency = transactionCurrency && isCurrencyCode(transactionCurrency) ? transactionCurrency : null;
-  const title = input.sourceName?.trim() || input.note.trim() || categoryLabel;
+  const rawTitle = input.sourceName?.trim() || input.note.trim() || categoryLabel;
+  const title = input.type === 'Refund' ? categoryLabel : input.type === 'Reversal' ? categoryLabel : rawTitle;
+  const accountContext = input.type === 'Transfer' || (input.type === 'Reversal' && input.linkedOriginalType === 'Transfer')
+    ? `${input.accountName?.trim() || 'Account unavailable'} → ${input.destinationName?.trim() || 'Account unavailable'}`
+    : input.accountName?.trim() || null;
+  const statusLabel = input.type === 'Refund' ? 'Refund' : input.type === 'Reversal' ? 'Correction reversal' : null;
   if (!input.id.trim()) throw new Error('Transaction activity needs an identity.');
-  return { id: input.id, type: input.type, title, categoryLabel, amountMinor: input.amountMinor, currency, direction, date: input.date };
+  return { id: input.id, type: input.type, title, categoryLabel, amountMinor: input.amountMinor, currency, direction, date: input.date, accountContext, statusLabel };
 }

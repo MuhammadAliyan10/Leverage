@@ -55,9 +55,12 @@ export function useBudgetingWrites() {
     await Promise.all([
       client.invalidateQueries({ queryKey: ['budgets', user?.id] }),
       client.invalidateQueries({ queryKey: ['savings', user?.id] }),
+      client.invalidateQueries({ queryKey: ['savings-history', user?.id] }),
       client.invalidateQueries({ queryKey: ['accounts', user?.id] }),
+      client.invalidateQueries({ queryKey: ['transactions', user?.id] }),
       client.invalidateQueries({ queryKey: ['dashboard'] }),
       client.invalidateQueries({ queryKey: ['financial-report', user?.id] }),
+      client.invalidateQueries({ queryKey: ['insights', user?.id] }),
     ]);
   };
   return {

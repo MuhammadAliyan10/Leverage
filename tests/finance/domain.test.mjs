@@ -5,6 +5,7 @@ import {
   calculateCashFlow,
   calculateIncomeExpense,
   convertForeignMinorToPkr,
+  formatMinorUnitsForInput,
   parseExchangeRate,
   parseMinorUnits,
 } from '../../src/finance/ledger.ts';
@@ -26,6 +27,17 @@ test('minor-unit parsing rejects precision loss, signs, and unsafe values', () =
   assert.throws(() => parseMinorUnits('1.001'), /digits after the decimal point/);
   assert.throws(() => parseMinorUnits('-1'), /positive amount/);
   assert.throws(() => parseMinorUnits('90071992547409.92'), /supported range/);
+});
+
+test('editable amount formatting avoids floating-point round trips', () => {
+  assert.equal(formatMinorUnitsForInput(2_000_000), '20000');
+  assert.equal(formatMinorUnitsForInput(5), '0.05');
+  assert.equal(formatMinorUnitsForInput(1_234), '12.34');
+  assert.equal(formatMinorUnitsForInput(12_340), '123.4');
+  assert.equal(formatMinorUnitsForInput(123, 0), '123');
+  assert.equal(formatMinorUnitsForInput(-5), '-0.05');
+  assert.throws(() => formatMinorUnitsForInput(Number.MAX_SAFE_INTEGER + 1), /supported range/);
+  assert.throws(() => formatMinorUnitsForInput(10, 7), /fractionDigits/);
 });
 
 test('foreign remittance conversion uses exact scaled rate and half-up rounding', () => {

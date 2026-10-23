@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -7,7 +7,7 @@ import { useAuth } from '../src/context/AuthContext';
 import { useAccounts } from '../hooks/queries/useAccounts';
 import { useBudgetingWrites, useSavingsOverview } from '../hooks/queries/useBudgeting';
 import { localDb } from '../src/db/local/client';
-import { formatMinorUnits, parseMinorUnits } from '../src/finance/ledger';
+import { formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
 import { CURRENCIES, type CurrencyCode } from '../src/finance/domain';
 import { Button } from '../components/ui/Button';
 
@@ -17,24 +17,37 @@ type EventMode = 'planned' | 'allocate' | 'release' | 'transfer_in' | 'transfer_
 export default function SavingsScreen() {
   const router = useRouter();
   const { user } = useAuth();
-  const { data, isLoading, error } = useSavingsOverview();
+  const { data, isLoading, error, refetch } = useSavingsOverview();
   const accountsQuery = useAccounts();
   const accounts = accountsQuery.data ?? [];
   const writes = useBudgetingWrites();
   const [name, setName] = useState('');
   const [target, setTarget] = useState('');
   const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
-  const [amount, setAmount] = useState('');
-  const [essential, setEssential] = useState('');
-  const [months, setMonths] = useState('3');
-  const [mode, setMode] = useState<EventMode>('planned');
+  const [goalAmount, setGoalAmount] = useState('');
+  const [emergencyAmount, setEmergencyAmount] = useState('');
+  const [essentialValue, setEssentialValue] = useState<string | null>(null);
+  const [monthsValue, setMonthsValue] = useState<string | null>(null);
+  const [goalMode, setGoalMode] = useState<EventMode>('planned');
+  const [emergencyMode, setEmergencyMode] = useState<EventMode>('allocate');
   const [selectedGoal, setSelectedGoal] = useState<string | null>(null);
-  const [accountId, setAccountId] = useState('');
-  const [sourceId, setSourceId] = useState('');
-  const [destinationId, setDestinationId] = useState('');
-  const [currency, setCurrency] = useState<CurrencyCode>('PKR');
+  const [goalAccountId, setGoalAccountId] = useState('');
+  const [goalSourceId, setGoalSourceId] = useState('');
+  const [goalDestinationId, setGoalDestinationId] = useState('');
+  const [emergencyAccountId, setEmergencyAccountId] = useState('');
+  const [emergencySourceId, setEmergencySourceId] = useState('');
+  const [emergencyDestinationId, setEmergencyDestinationId] = useState('');
+  const [goalCurrency, setGoalCurrency] = useState<CurrencyCode>('PKR');
+  const [emergencyCurrencyValue, setEmergencyCurrencyValue] = useState<CurrencyCode | null>(null);
   const [busy, setBusy] = useState(false);
-  const accountOptions = accounts.filter((account) => account.currency === currency);
+  const [feedback, setFeedback] = useState('');
+  const [feedbackIsError, setFeedbackIsError] = useState(true);
+  const emergencyCurrency = emergencyCurrencyValue ?? (data?.emergency?.currency as CurrencyCode | undefined) ?? 'PKR';
+  const essential = essentialValue ?? (data?.emergency ? formatMinorUnitsForInput(data.emergency.essentialMonthlyMinor) : '');
+  const months = monthsValue ?? String(data?.emergency?.coverageMonths ?? 3);
+  const selectedGoalCurrency = data?.goals.find((goal) => goal.id === selectedGoal)?.currency ?? goalCurrency;
+  const goalAccountOptions = accounts.filter((account) => account.currency === selectedGoalCurrency);
+  const emergencyAccountOptions = accounts.filter((account) => account.currency === emergencyCurrency);
   const historyQuery = useQuery({
     queryKey: ['savings-history', user?.id, selectedGoal],
     enabled: !!user && !!selectedGoal,
@@ -46,43 +59,62 @@ export default function SavingsScreen() {
 
   const run = async (task: () => Promise<unknown>, success?: () => void) => {
     setBusy(true);
+    setFeedback('');
+    setFeedbackIsError(true);
     try { await task(); success?.(); }
-    catch (e) { Alert.alert('Could not save', e instanceof Error ? e.message : 'Please try again.'); }
+    catch (e) { setFeedback(e instanceof Error ? e.message : 'Could not save. Please try again.'); }
     finally { setBusy(false); }
   };
   const saveGoal = () => {
     if (!user) return;
-    void run(async () => writes.saveGoal.mutateAsync({ id: editingGoalId ?? requestId(), ownerId: user.id, name, targetMinor: parseMinorUnits(target), currency, targetDate: null }), () => { setName(''); setTarget(''); setEditingGoalId(null); });
+    void run(async () => writes.saveGoal.mutateAsync({ id: editingGoalId ?? requestId(), ownerId: user.id, name, targetMinor: parseMinorUnits(target), currency: goalCurrency, targetDate: null }), () => { setName(''); setTarget(''); setEditingGoalId(null); setFeedback('Savings goal saved.'); setFeedbackIsError(false); });
   };
   const recordGoalEvent = () => {
-    if (!user || !selectedGoal) return Alert.alert('Choose a goal', 'Select a goal before recording a contribution.');
-    const amountMinor = parseMinorUnits(amount);
-    const account = mode === 'allocate' || mode === 'release' ? accountId : undefined;
-    const transfer = mode === 'transfer_in' || mode === 'transfer_out';
-    void run(() => writes.goalEvent.mutateAsync({ id: requestId(), ownerId: user.id, goalId: selectedGoal, eventType: mode, amountMinor,
-      eventDate: new Date().toISOString(), accountId: account, sourceAccountId: transfer ? sourceId : undefined, destinationAccountId: transfer ? destinationId : undefined }), () => setAmount(''));
+    if (!user || !selectedGoal) { setFeedback('Select a savings goal before recording a contribution.'); setFeedbackIsError(true); return; }
+    void run(() => writes.goalEvent.mutateAsync({ id: requestId(), ownerId: user.id, goalId: selectedGoal, eventType: goalMode, amountMinor: parseMinorUnits(goalAmount),
+      eventDate: new Date().toISOString(), accountId: goalMode === 'allocate' || goalMode === 'release' ? goalAccountId : undefined,
+      sourceAccountId: goalMode === 'transfer_in' || goalMode === 'transfer_out' ? goalSourceId : undefined,
+      destinationAccountId: goalMode === 'transfer_in' || goalMode === 'transfer_out' ? goalDestinationId : undefined }), () => { setGoalAmount(''); setFeedback('Goal activity recorded.'); setFeedbackIsError(false); });
   };
   const saveEmergency = () => {
     if (!user) return;
-    void run(() => writes.saveEmergencyConfig.mutateAsync({ ownerId: user.id, currency, essentialMonthlyMinor: essential.trim() ? parseMinorUnits(essential) : 0, coverageMonths: Number(months) }));
+    void run(() => writes.saveEmergencyConfig.mutateAsync({ ownerId: user.id, currency: emergencyCurrency, essentialMonthlyMinor: essential.trim() ? parseMinorUnits(essential) : 0, coverageMonths: Number(months) }), () => { setEssentialValue(null); setMonthsValue(null); setEmergencyCurrencyValue(null); setFeedback('Emergency-fund target saved.'); setFeedbackIsError(false); });
   };
   const recordEmergency = () => {
     if (!user) return;
-    const transfer = mode === 'transfer_in' || mode === 'transfer_out';
-    if (transfer ? (!sourceId || !destinationId) : !accountId) return Alert.alert('Choose an account', 'Select the account or both transfer accounts first.');
+    const transfer = emergencyMode === 'transfer_in' || emergencyMode === 'transfer_out';
+    if (transfer ? (!emergencySourceId || !emergencyDestinationId) : !emergencyAccountId) { setFeedback('Select the account or both transfer accounts first.'); setFeedbackIsError(true); return; }
     void run(() => writes.emergencyEvent.mutateAsync({ id: requestId(), ownerId: user.id,
-      eventType: mode === 'release' || mode === 'transfer_out' ? mode : mode === 'transfer_in' ? 'transfer_in' : 'allocate',
-      amountMinor: parseMinorUnits(amount), eventDate: new Date().toISOString(), accountId: transfer ? undefined : accountId,
-      sourceAccountId: transfer ? sourceId : undefined, destinationAccountId: transfer ? destinationId : undefined }), () => setAmount(''));
+      eventType: emergencyMode === 'release' || emergencyMode === 'transfer_out' ? emergencyMode : emergencyMode === 'transfer_in' ? 'transfer_in' : 'allocate',
+      amountMinor: parseMinorUnits(emergencyAmount), eventDate: new Date().toISOString(), accountId: transfer ? undefined : emergencyAccountId,
+      sourceAccountId: transfer ? emergencySourceId : undefined, destinationAccountId: transfer ? emergencyDestinationId : undefined }), () => { setEmergencyAmount(''); setFeedback('Emergency-fund activity recorded.'); setFeedbackIsError(false); });
+  };
+  const confirmArchiveGoal = (goalId: string) => {
+    const archive = () => writes.goalStatus.mutate({ goalId, status: 'archived' }, {
+      onSuccess: () => { setFeedback('Savings goal archived; its history is preserved.'); setFeedbackIsError(false); },
+      onError: (e) => { setFeedback(`Could not archive goal: ${e.message}`); setFeedbackIsError(true); },
+    });
+    if (Platform.OS === 'web') {
+      if (typeof globalThis.confirm === 'function' && globalThis.confirm('Archive this goal? Its contribution history will remain saved.')) archive();
+      return;
+    }
+    Alert.alert('Archive this goal?', 'Its contribution history will remain saved.', [
+      { text: 'Cancel', style: 'cancel' }, { text: 'Archive', style: 'destructive', onPress: archive },
+    ]);
+  };
+  const closeSavings = () => {
+    if (router.canGoBack()) router.back();
+    else router.replace('/(tabs)');
   };
 
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <View className="flex-row items-center px-5 py-4 border-b border-gray-200 dark:border-neutral-800">
-      <Pressable onPress={() => router.back()}><Text className="font-body font-bold text-primary">Done</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="Done and return to the previous screen" onPress={closeSavings}><Text className="font-body font-bold text-primary">Done</Text></Pressable>
       <Text className="font-heading flex-1 text-center font-bold text-lg dark:text-white">Savings & Safety Net</Text><View className="w-10" />
     </View>
     <ScrollView className="flex-1 px-5 pt-5" contentContainerStyle={{ paddingBottom: 32 }}>
-      {!!error && <Text className="font-body mb-3 text-red-600">{error.message}</Text>}
+      {!!error && <View className="mb-3 rounded-xl bg-red-50 dark:bg-red-950 p-3"><Text className="font-body text-sm text-red-700 dark:text-red-200">Savings could not be loaded: {error.message}</Text><Pressable accessibilityRole="button" onPress={() => void refetch()} className="mt-2 self-start"><Text className="font-body font-semibold text-primary">Try again</Text></Pressable></View>}
+      {!!feedback && <Text accessibilityRole={feedbackIsError ? 'alert' : 'text'} accessibilityLiveRegion="polite" className={`font-body mb-3 text-sm ${feedbackIsError ? 'text-red-600' : 'text-emerald-700 dark:text-emerald-300'}`}>{feedback}</Text>}
       {isLoading ? <Text className="font-body py-4 text-gray-500">Loading savings…</Text> : null}
       <Text className="font-heading mb-3 text-lg font-bold text-gray-900 dark:text-white">Savings goals</Text>
       {data?.goals.map((goal) => <View key={goal.id} className="mb-3 rounded-2xl bg-white dark:bg-neutral-900 p-4">
@@ -90,46 +122,47 @@ export default function SavingsScreen() {
         <Text className="font-body mt-2 text-gray-700 dark:text-neutral-200">{formatMinorUnits(goal.actualMinor, goal.currency)} of {formatMinorUnits(goal.targetMinor, goal.currency)} · {goal.progress.percentComplete.toFixed(1)}%</Text>
         <Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">Planned {formatMinorUnits(goal.plannedMinor, goal.currency)} · plans do not change account balances</Text>
         <View className="mt-2 flex-row flex-wrap">
-          <Pressable onPress={() => { setEditingGoalId(goal.id); setName(goal.name); setTarget((goal.targetMinor / 100).toFixed(2)); setCurrency(goal.currency as CurrencyCode); }} className="mr-2 mt-2 rounded-full bg-gray-100 dark:bg-neutral-800 px-3 py-2"><Text className="font-body text-xs text-gray-700 dark:text-neutral-200">Edit</Text></Pressable>
+          <Pressable onPress={() => { setEditingGoalId(goal.id); setName(goal.name); setTarget(formatMinorUnitsForInput(goal.targetMinor)); setGoalCurrency(goal.currency as CurrencyCode); }} className="mr-2 mt-2 rounded-full bg-gray-100 dark:bg-neutral-800 px-3 py-2"><Text className="font-body text-xs text-gray-700 dark:text-neutral-200">Edit</Text></Pressable>
           <Pressable onPress={() => setSelectedGoal(selectedGoal === goal.id ? null : goal.id)} className="mr-2 mt-2 rounded-full bg-gray-100 dark:bg-neutral-800 px-3 py-2"><Text className="font-body text-xs text-gray-700 dark:text-neutral-200">{selectedGoal === goal.id ? 'Hide history' : 'History'}</Text></Pressable>
-          <Pressable onPress={() => Alert.alert('Archive this goal?', 'Its contribution history will remain saved.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Archive', style: 'destructive', onPress: () => writes.goalStatus.mutate({ goalId: goal.id, status: 'archived' }, { onError: (e) => Alert.alert('Could not archive', e.message) }) }])} className="mr-2 mt-2 rounded-full bg-gray-100 dark:bg-neutral-800 px-3 py-2"><Text className="font-body text-xs text-red-600">Archive</Text></Pressable>
+          <Pressable onPress={() => confirmArchiveGoal(goal.id)} className="mr-2 mt-2 rounded-full bg-gray-100 dark:bg-neutral-800 px-3 py-2"><Text className="font-body text-xs text-red-600">Archive</Text></Pressable>
           {goal.actualMinor >= goal.targetMinor ? <Pressable onPress={() => writes.goalStatus.mutate({ goalId: goal.id, status: 'completed' }, { onError: (e) => Alert.alert('Could not complete', e.message) })} className="houselog-button mt-2 px-3 py-2"><Text className="font-body text-xs text-white">Complete</Text></Pressable> : null}
         </View>
-        {selectedGoal === goal.id ? <View className="mt-2 border-t border-gray-100 dark:border-neutral-800 pt-2">{historyQuery.data?.map((event) => <Text key={event.id} className="font-body py-1 text-xs text-gray-600 dark:text-neutral-300">{new Date(event.eventDate).toLocaleDateString()} · {event.eventType.replace('_', ' ')} · {formatMinorUnits(event.amountMinor, event.currency)}{event.note ? ` · ${event.note}` : ''}</Text>)}</View> : null}
-        {goal.status === 'active' ? <View className="flex-row flex-wrap mt-2">{(['planned', 'allocate', 'release', 'transfer_in', 'transfer_out'] as EventMode[]).map((item) => <Pressable key={item} onPress={() => { setSelectedGoal(goal.id); setMode(item); setCurrency(goal.currency as CurrencyCode); }} className={`mr-2 mt-2 rounded-full px-3 py-2 ${selectedGoal === goal.id && mode === item ? 'bg-primary' : 'bg-gray-100 dark:bg-neutral-800'}`}><Text className={["font-body", (selectedGoal === goal.id && mode === item ? 'text-white text-xs font-bold' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{item.replace('_', ' ')}</Text></Pressable>)}</View> : null}
+        {selectedGoal === goal.id ? <View className="mt-2 border-t border-gray-100 dark:border-neutral-800 pt-2">{historyQuery.isLoading ? <Text className="font-body text-xs text-gray-500">Loading history…</Text> : null}{historyQuery.error ? <Text className="font-body text-xs text-red-600">History could not be loaded: {historyQuery.error.message}</Text> : null}{historyQuery.data?.map((event) => <Text key={event.id} className="font-body py-1 text-xs text-gray-600 dark:text-neutral-300">{new Date(event.eventDate).toLocaleDateString()} · {event.eventType.replace('_', ' ')} · {formatMinorUnits(event.amountMinor, event.currency)}{event.note ? ` · ${event.note}` : ''}</Text>)}</View> : null}
+        {goal.status === 'active' ? <View className="flex-row flex-wrap mt-2">{(['planned', 'allocate', 'release', 'transfer_in', 'transfer_out'] as EventMode[]).map((item) => <Pressable key={item} accessibilityRole="radio" accessibilityState={{ checked: selectedGoal === goal.id && goalMode === item }} onPress={() => { setSelectedGoal(goal.id); setGoalMode(item); }} className={`mr-2 mt-2 rounded-full px-3 py-2 ${selectedGoal === goal.id && goalMode === item ? 'bg-primary' : 'bg-gray-100 dark:bg-neutral-800'}`}><Text className={["font-body", (selectedGoal === goal.id && goalMode === item ? 'text-white text-xs font-bold' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{item.replace('_', ' ')}</Text></Pressable>)}</View> : null}
       </View>)}
       <View className="mb-6 rounded-2xl bg-white dark:bg-neutral-900 p-4">
         <Text className="font-body font-bold text-gray-900 dark:text-white">{editingGoalId ? 'Edit savings goal' : 'Create a goal'}</Text>
-        <View className="mt-2 flex-row flex-wrap">{(Object.keys(CURRENCIES) as CurrencyCode[]).map((code) => <Pressable key={code} onPress={() => setCurrency(code)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${currency === code ? 'bg-primary' : 'bg-gray-100 dark:bg-neutral-800'}`}><Text className={["font-body", (currency === code ? 'text-white text-xs font-bold' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{code}</Text></Pressable>)}</View>
-        <TextInput value={name} onChangeText={setName} placeholder="Goal name" className="font-body mt-3 rounded-xl bg-gray-100 dark:bg-neutral-800 px-3 py-3 text-gray-900 dark:text-white" />
-        <TextInput value={target} onChangeText={setTarget} placeholder="Target amount (PKR)" keyboardType="decimal-pad" className="font-body mt-2 rounded-xl bg-gray-100 dark:bg-neutral-800 px-3 py-3 text-gray-900 dark:text-white" />
-        <Button title={editingGoalId ? 'Save goal changes' : 'Create savings goal'} onPress={saveGoal} isLoading={busy} />
+        <View className="mt-2 flex-row flex-wrap">{(Object.keys(CURRENCIES) as CurrencyCode[]).map((code) => <Pressable key={code} accessibilityRole="radio" accessibilityState={{ checked: goalCurrency === code }} onPress={() => setGoalCurrency(code)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${goalCurrency === code ? 'bg-primary' : 'bg-gray-100 dark:bg-neutral-800'}`}><Text className={["font-body", (goalCurrency === code ? 'text-white text-xs font-bold' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{code}</Text></Pressable>)}</View>
+        <TextInput accessibilityLabel="Savings goal name" value={name} onChangeText={setName} placeholder="Goal name" className="font-body mt-3 rounded-xl bg-gray-100 dark:bg-neutral-800 px-3 py-3 text-gray-900 dark:text-white" />
+        <TextInput accessibilityLabel={`Savings goal target amount in ${goalCurrency}`} value={target} onChangeText={setTarget} placeholder={`Target amount (${goalCurrency})`} keyboardType="decimal-pad" className="font-body mt-2 rounded-xl bg-gray-100 dark:bg-neutral-800 px-3 py-3 text-gray-900 dark:text-white" />
+        <View className="mt-3"><Button title={editingGoalId ? 'Save goal changes' : 'Create savings goal'} onPress={saveGoal} isLoading={busy} /></View>
         {editingGoalId ? <Pressable onPress={() => { setEditingGoalId(null); setName(''); setTarget(''); }} className="mt-3 self-center"><Text className="font-body text-primary">Cancel editing</Text></Pressable> : null}
       </View>
       <View className="mb-6 rounded-2xl bg-white dark:bg-neutral-900 p-4">
         <Text className="font-body font-bold text-gray-900 dark:text-white">Record goal contribution</Text>
         <Text className="font-body mt-1 text-xs text-gray-500">Select a contribution type above. Transfers are ledger transactions; earmarks only reserve existing cash.</Text>
-        <TextInput value={amount} onChangeText={setAmount} placeholder="Amount" keyboardType="decimal-pad" className="font-body mt-3 rounded-xl bg-gray-100 dark:bg-neutral-800 px-3 py-3 text-gray-900 dark:text-white" />
-        {(mode === 'allocate' || mode === 'release') && <View className="flex-row flex-wrap">{accountOptions.map((account) => <Pressable key={account.id} onPress={() => setAccountId(account.id)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${accountId === account.id ? 'bg-primary' : 'bg-gray-100 dark:bg-neutral-800'}`}><Text className={["font-body", (accountId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{account.name}</Text></Pressable>)}</View>}
-        {(mode === 'transfer_in' || mode === 'transfer_out') && <View className="flex-row flex-wrap">{accountOptions.map((account) => <View key={account.id} className="mr-2 mt-2 flex-row rounded-full bg-gray-100 dark:bg-neutral-800"><Pressable onPress={() => setSourceId(account.id)} className={`rounded-full px-2 py-2 ${sourceId === account.id ? 'bg-primary' : ''}`}><Text className={["font-body", (sourceId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>From {account.name}</Text></Pressable><Pressable onPress={() => setDestinationId(account.id)} className={`rounded-full px-2 py-2 ${destinationId === account.id ? 'bg-primary' : ''}`}><Text className={["font-body", (destinationId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>To {account.name}</Text></Pressable></View>)}</View>}
-        <Button title={`Record ${mode.replace('_', ' ')}`} onPress={recordGoalEvent} isLoading={busy} />
+        <TextInput accessibilityLabel={`Goal contribution amount in ${selectedGoalCurrency}`} value={goalAmount} onChangeText={setGoalAmount} placeholder={`Amount (${selectedGoalCurrency})`} keyboardType="decimal-pad" className="font-body mt-3 rounded-xl bg-gray-100 dark:bg-neutral-800 px-3 py-3 text-gray-900 dark:text-white" />
+        {(goalMode === 'allocate' || goalMode === 'release') && <View className="flex-row flex-wrap">{goalAccountOptions.map((account) => <Pressable key={account.id} accessibilityRole="radio" accessibilityState={{ checked: goalAccountId === account.id }} onPress={() => setGoalAccountId(account.id)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${goalAccountId === account.id ? 'bg-primary' : 'bg-gray-100 dark:bg-neutral-800'}`}><Text className={["font-body", (goalAccountId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{account.name}</Text></Pressable>)}</View>}
+        {(goalMode === 'transfer_in' || goalMode === 'transfer_out') && <View className="flex-row flex-wrap">{goalAccountOptions.map((account) => <View key={account.id} className="mr-2 mt-2 flex-row rounded-full bg-gray-100 dark:bg-neutral-800"><Pressable onPress={() => setGoalSourceId(account.id)} className={`rounded-full px-2 py-2 ${goalSourceId === account.id ? 'bg-primary' : ''}`}><Text className={["font-body", (goalSourceId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>From {account.name}</Text></Pressable><Pressable onPress={() => setGoalDestinationId(account.id)} className={`rounded-full px-2 py-2 ${goalDestinationId === account.id ? 'bg-primary' : ''}`}><Text className={["font-body", (goalDestinationId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>To {account.name}</Text></Pressable></View>)}</View>}
+        <View className="mt-3"><Button title={`Record ${goalMode.replace('_', ' ')}`} onPress={recordGoalEvent} isLoading={busy} /></View>
       </View>
       <View className="rounded-2xl bg-primary/10 p-4">
         <Text className="font-body font-bold text-primary">Emergency fund</Text>
         <Text className="font-body mt-1 text-xs text-gray-600 dark:text-neutral-300">Enter essential monthly costs, then choose a coverage target. Goal and emergency earmarks share the same account reservations.</Text>
-        <View className="mt-2 flex-row flex-wrap">{(Object.keys(CURRENCIES) as CurrencyCode[]).map((code) => <Pressable key={code} onPress={() => setCurrency(code)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${currency === code ? 'bg-primary' : 'bg-white dark:bg-neutral-900'}`}><Text className={["font-body", (currency === code ? 'text-white text-xs font-bold' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{code}</Text></Pressable>)}</View>
-        <TextInput value={essential} onChangeText={setEssential} placeholder={`Essential monthly costs · ${CURRENCIES[currency].label}`} keyboardType="decimal-pad" className="font-body mt-3 rounded-xl bg-white dark:bg-neutral-900 px-3 py-3 text-gray-900 dark:text-white" />
-        <TextInput value={months} onChangeText={setMonths} placeholder="Coverage months (for example 3 or 6)" keyboardType="number-pad" className="font-body mt-2 rounded-xl bg-white dark:bg-neutral-900 px-3 py-3 text-gray-900 dark:text-white" />
-        <Button title="Save emergency target" onPress={saveEmergency} isLoading={busy} />
+        <View className="mt-2 flex-row flex-wrap">{(Object.keys(CURRENCIES) as CurrencyCode[]).map((code) => <Pressable key={code} accessibilityRole="radio" accessibilityState={{ checked: emergencyCurrency === code }} onPress={() => setEmergencyCurrencyValue(code)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${emergencyCurrency === code ? 'bg-primary' : 'bg-white dark:bg-neutral-900'}`}><Text className={["font-body", (emergencyCurrency === code ? 'text-white text-xs font-bold' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{code}</Text></Pressable>)}</View>
+        <TextInput accessibilityLabel={`Essential monthly costs in ${emergencyCurrency}`} value={essential} onChangeText={setEssentialValue} placeholder={`Essential monthly costs · ${CURRENCIES[emergencyCurrency].label}`} keyboardType="decimal-pad" className="font-body mt-3 rounded-xl bg-white dark:bg-neutral-900 px-3 py-3 text-gray-900 dark:text-white" />
+        <TextInput accessibilityLabel="Emergency fund coverage months" value={months} onChangeText={setMonthsValue} placeholder="Coverage months (for example 3 or 6)" keyboardType="number-pad" className="font-body mt-2 rounded-xl bg-white dark:bg-neutral-900 px-3 py-3 text-gray-900 dark:text-white" />
+        <View className="mt-3"><Button title="Save emergency target" onPress={saveEmergency} isLoading={busy} /></View>
         {data?.emergency ? <Text className="font-body mt-3 text-gray-800 dark:text-white">Target {formatMinorUnits(data.emergency.requiredMinor, data.emergency.currency)} · earmarked {formatMinorUnits(data.emergency.allocatedMinor, data.emergency.currency)} · {data.emergency.coverageMonthsActual.toFixed(1)} months covered</Text> : <Text className="font-body mt-3 text-gray-600 dark:text-neutral-300">No emergency-fund target saved yet.</Text>}
-        <TextInput value={amount} onChangeText={setAmount} placeholder="Amount to earmark or release" keyboardType="decimal-pad" className="font-body mt-3 rounded-xl bg-white dark:bg-neutral-900 px-3 py-3 text-gray-900 dark:text-white" />
-        {(mode === 'transfer_in' || mode === 'transfer_out') ? <View className="flex-row flex-wrap">{accountOptions.map((account) => <View key={account.id} className="mr-2 mt-2 flex-row rounded-full bg-white dark:bg-neutral-900"><Pressable onPress={() => setSourceId(account.id)} className={`rounded-full px-2 py-2 ${sourceId === account.id ? 'bg-primary' : ''}`}><Text className={["font-body", (sourceId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>From {account.name}</Text></Pressable><Pressable onPress={() => setDestinationId(account.id)} className={`rounded-full px-2 py-2 ${destinationId === account.id ? 'bg-primary' : ''}`}><Text className={["font-body", (destinationId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>To {account.name}</Text></Pressable></View>)}</View>
-          : <View className="flex-row flex-wrap">{accountOptions.map((account) => <Pressable key={account.id} onPress={() => setAccountId(account.id)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${accountId === account.id ? 'bg-primary' : 'bg-white dark:bg-neutral-900'}`}><Text className={["font-body", (accountId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{account.name}</Text></Pressable>)}</View>}
-        <View className="mt-3 flex-row flex-wrap">{(['allocate', 'release', 'transfer_in', 'transfer_out'] as EventMode[]).map((item) => <Pressable key={item} onPress={() => setMode(item)} className={`mr-2 mt-2 rounded-xl px-3 py-2 ${mode === item ? 'bg-primary' : 'bg-gray-200 dark:bg-neutral-800'}`}><Text className={["font-body", (mode === item ? 'text-white' : 'text-gray-700 dark:text-neutral-200')].filter(Boolean).join(' ')}>{item.replace('_', ' ')}</Text></Pressable>)}</View>
-        <Button title={`${mode.replace('_', ' ')} emergency funds`} onPress={recordEmergency} isLoading={busy} />
+        <TextInput accessibilityLabel={`Emergency fund amount in ${emergencyCurrency}`} value={emergencyAmount} onChangeText={setEmergencyAmount} placeholder={`Amount to earmark or release (${emergencyCurrency})`} keyboardType="decimal-pad" className="font-body mt-3 rounded-xl bg-white dark:bg-neutral-900 px-3 py-3 text-gray-900 dark:text-white" />
+        {(emergencyMode === 'transfer_in' || emergencyMode === 'transfer_out') ? <View className="flex-row flex-wrap">{emergencyAccountOptions.map((account) => <View key={account.id} className="mr-2 mt-2 flex-row rounded-full bg-white dark:bg-neutral-900"><Pressable accessibilityState={{ selected: emergencySourceId === account.id }} onPress={() => setEmergencySourceId(account.id)} className={`rounded-full px-2 py-2 ${emergencySourceId === account.id ? 'bg-primary' : ''}`}><Text className={["font-body", (emergencySourceId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>From {account.name}</Text></Pressable><Pressable accessibilityState={{ selected: emergencyDestinationId === account.id }} onPress={() => setEmergencyDestinationId(account.id)} className={`rounded-full px-2 py-2 ${emergencyDestinationId === account.id ? 'bg-primary' : ''}`}><Text className={["font-body", (emergencyDestinationId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>To {account.name}</Text></Pressable></View>)}</View>
+          : <View className="flex-row flex-wrap">{emergencyAccountOptions.map((account) => <Pressable key={account.id} accessibilityRole="radio" accessibilityState={{ checked: emergencyAccountId === account.id }} onPress={() => setEmergencyAccountId(account.id)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${emergencyAccountId === account.id ? 'bg-primary' : 'bg-white dark:bg-neutral-900'}`}><Text className={["font-body", (emergencyAccountId === account.id ? 'text-white text-xs' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{account.name}</Text></Pressable>)}</View>}
+        <View className="mt-3 flex-row flex-wrap">{(['allocate', 'release', 'transfer_in', 'transfer_out'] as EventMode[]).map((item) => <Pressable key={item} accessibilityRole="radio" accessibilityState={{ checked: emergencyMode === item }} onPress={() => setEmergencyMode(item)} className={`mr-2 mt-2 rounded-xl px-3 py-2 ${emergencyMode === item ? 'bg-primary' : 'bg-gray-200 dark:bg-neutral-800'}`}><Text className={["font-body", (emergencyMode === item ? 'text-white' : 'text-gray-700 dark:text-neutral-200')].filter(Boolean).join(' ')}>{item.replace('_', ' ')}</Text></Pressable>)}</View>
+        <View className="mt-3"><Button title={`${emergencyMode.replace('_', ' ')} emergency funds`} onPress={recordEmergency} isLoading={busy} /></View>
       </View>
+      {!!accountsQuery.error && <View className="mt-4 rounded-xl bg-red-50 dark:bg-red-950 p-3"><Text className="font-body text-sm text-red-700 dark:text-red-200">Accounts could not be loaded: {accountsQuery.error.message}</Text><Pressable accessibilityRole="button" onPress={() => void accountsQuery.refetch()} className="mt-2 self-start"><Text className="font-body font-semibold text-primary">Try again</Text></Pressable></View>}
       {accountsQuery.isLoading ? <Text className="font-body mt-4 text-gray-500">Loading accounts…</Text> : null}
-      {accounts.length === 0 && <Text className="font-body mt-4 text-amber-700">Create an account before earmarking or transferring savings.</Text>}
+      {accounts.length === 0 && !accountsQuery.isLoading && !accountsQuery.error && <Pressable accessibilityRole="link" onPress={() => router.push('/accounts')} className="mt-4 rounded-xl bg-amber-50 dark:bg-amber-950 p-3"><Text className="font-body text-sm text-amber-800 dark:text-amber-200">Create an account before earmarking or transferring savings. Open accounts →</Text></Pressable>}
     </ScrollView>
   </SafeAreaView>;
 }

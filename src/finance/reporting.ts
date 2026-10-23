@@ -26,8 +26,10 @@ export interface FinancialReport {
   currency: string;
   incomeMinor: number;
   expenseMinor: number;
+  expenseCount: number;
   netMinor: number;
   categoryTotals: { category: string; amountMinor: number }[];
+  incomeSourceTotals: { source: string; amountMinor: number }[];
   largestExpenses: FinancialReportRow[];
   excludedCurrencies: string[];
 }
@@ -39,10 +41,24 @@ export interface FinancialBucket {
   endDate: string;
 }
 
+export interface FinancialBucketTotals { incomeMinor: number; expenseMinor: number }
+
 const NON_OPERATING_CASH_CATEGORIES = new Set([
   'debt_borrowing', 'debt_lending', 'debt_principal_repayment', 'debt_receivable_payment', 'debt_settlement',
   'asset_purchase', 'asset_sale_proceeds', 'investment_purchase', 'investment_sale_proceeds',
 ]);
+
+/** Date-only legacy values are civil dates, kept at local noon without inventing an offset. */
+export function transactionDateTimestamp(value: string): number {
+  const civilDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (civilDate) {
+    const year = Number(civilDate[1]); const month = Number(civilDate[2]) - 1; const day = Number(civilDate[3]);
+    const date = new Date(year, month, day, 12);
+    if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day) return Number.NaN;
+    return date.getTime();
+  }
+  return new Date(value).getTime();
+}
 
 function isNonOperatingMovement(row: FinancialReportRow): boolean {
   const category = row.type === 'Refund' || row.type === 'Reversal' ? row.linkedCategory : row.category;
@@ -126,6 +142,7 @@ export function calculateFinancialReport(
   let income = 0n;
   let expense = 0n;
   const categoryTotals = new Map<string, bigint>();
+  const incomeSourceTotals = new Map<string, bigint>();
   const excluded = new Set<string>();
   const expenseRows = new Map<string, FinancialReportRow>();
   const expenseAdjustmentById = new Map<string, bigint>();
@@ -136,7 +153,7 @@ export function calculateFinancialReport(
   const startMs = new Date(range.startDate).getTime();
   const endMs = new Date(range.endDate).getTime();
   const periodRows = rows.filter((row) => {
-    const timestamp = new Date(row.date).getTime();
+    const timestamp = transactionDateTimestamp(row.date);
     if (!Number.isFinite(timestamp)) throw new Error(`Transaction ${row.id} has an invalid date.`);
     return timestamp >= startMs && timestamp < endMs;
   });
@@ -144,7 +161,7 @@ export function calculateFinancialReport(
     if (!row.id || !row.ownerId || !Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0) {
       throw new Error('A financial report row is invalid.');
     }
-    if (!Number.isFinite(new Date(row.date).getTime())) throw new Error(`Transaction ${row.id} has an invalid date.`);
+    if (!Number.isFinite(transactionDateTimestamp(row.date))) throw new Error(`Transaction ${row.id} has an invalid date.`);
 
     const type = row.type;
     if (!['Income', 'Expense', 'Transfer', 'Refund', 'Reversal'].includes(type)) {
@@ -196,7 +213,10 @@ export function calculateFinancialReport(
     // Explicit principal/receivable movements change cash and debt balances, not earned
     // income or ordinary spending. Linked reversals follow the original classification.
     if (isNonOperatingMovement(row)) continue;
-    if (type === 'Income') income += amount;
+    if (type === 'Income') {
+      income += amount;
+      incomeSourceTotals.set(row.category, (incomeSourceTotals.get(row.category) ?? 0n) + amount);
+    }
     else if (type === 'Expense') {
       expense += amount;
       expenseRows.set(row.id, row);
@@ -206,7 +226,10 @@ export function calculateFinancialReport(
       addExpenseAdjustment(row.reversalOfId!, -amount);
       categoryTotals.set(row.linkedCategory!, (categoryTotals.get(row.linkedCategory!) ?? 0n) - amount);
     } else if (type === 'Reversal') {
-      if (row.linkedOriginalType === 'Income') income -= amount;
+      if (row.linkedOriginalType === 'Income') {
+        income -= amount;
+        incomeSourceTotals.set(row.linkedCategory!, (incomeSourceTotals.get(row.linkedCategory!) ?? 0n) - amount);
+      }
       else if (row.linkedOriginalType === 'Expense') {
         expense -= amount;
         addExpenseAdjustment(row.reversalOfId!, -amount);
@@ -226,6 +249,7 @@ export function calculateFinancialReport(
     if (netAmount <= 0n) return null;
     return { ...row, amountMinor: safeNumber(netAmount, `Net expense ${id}`) };
   }).filter((row): row is FinancialReportRow => row !== null);
+  const expenseCount = largestExpenses.length;
   largestExpenses.sort((a, b) => b.amountMinor - a.amountMinor || a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   const expenseMinor = safeNumber(expense, 'Report expense total');
   const incomeMinor = safeNumber(income, 'Report income total');
@@ -234,11 +258,16 @@ export function calculateFinancialReport(
     currency,
     incomeMinor,
     expenseMinor,
+    expenseCount,
     netMinor: safeNumber(net, 'Report net total'),
     categoryTotals: Array.from(categoryTotals).filter(([, amountMinor]) => amountMinor !== 0n).map(([category, amountMinor]) => ({
       category,
       amountMinor: safeNumber(amountMinor, 'Report category total'),
     })).sort((a, b) => Math.abs(b.amountMinor) - Math.abs(a.amountMinor) || a.category.localeCompare(b.category)),
+    incomeSourceTotals: Array.from(incomeSourceTotals).filter(([, amountMinor]) => amountMinor !== 0n).map(([source, amountMinor]) => ({
+      source,
+      amountMinor: safeNumber(amountMinor, 'Report income source total'),
+    })).sort((a, b) => Math.abs(b.amountMinor) - Math.abs(a.amountMinor) || a.source.localeCompare(b.source)),
     largestExpenses: largestExpenses.slice(0, 5),
     excludedCurrencies: Array.from(excluded).sort(),
   };
@@ -290,7 +319,7 @@ export function calculateExpenseBucketTotals(
   };
 
   for (const row of rows) {
-    const timestamp = new Date(row.date).getTime();
+    const timestamp = transactionDateTimestamp(row.date);
     if (!Number.isFinite(timestamp)) throw new Error(`Transaction ${row.id} has an invalid date.`);
     if (!row.id || !row.ownerId || !Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0) throw new Error('A financial report row is invalid.');
     if (!['Income', 'Expense', 'Transfer', 'Refund', 'Reversal'].includes(row.type)) throw new Error(`Transaction ${row.id} has an unsupported type.`);
@@ -319,4 +348,54 @@ export function calculateExpenseBucketTotals(
   }
 
   return Object.fromEntries([...totals].map(([id, total]) => [id, safeNumber(total, `Chart bucket ${id}`)]));
+}
+
+/** Aggregates income and signed ordinary spending into a bounded set of non-overlapping chart buckets in one pass. */
+export function calculateFinancialBucketTotals(
+  rows: readonly FinancialReportRow[],
+  currency: string,
+  buckets: readonly FinancialBucket[],
+): Readonly<Record<string, FinancialBucketTotals>> {
+  if (!currency.trim()) throw new Error('A report currency is required.');
+  const ranges = buckets.map((bucket) => {
+    const start = new Date(bucket.startDate).getTime(); const end = new Date(bucket.endDate).getTime();
+    if (!bucket.id.trim() || !bucket.group.trim() || !Number.isFinite(start) || !Number.isFinite(end) || start >= end) throw new Error('Financial chart bucket is invalid.');
+    return { bucket, start, end };
+  }).sort((a, b) => a.start - b.start || a.bucket.id.localeCompare(b.bucket.id));
+  if (new Set(ranges.map(({ bucket }) => bucket.group)).size > 1) throw new Error('Financial totals require one chart bucket group at a time.');
+  for (let index = 1; index < ranges.length; index += 1) {
+    if (ranges[index - 1].bucket.group === ranges[index].bucket.group && ranges[index - 1].end > ranges[index].start) throw new Error('Financial chart buckets in one group must not overlap.');
+  }
+  const totals = new Map(ranges.map(({ bucket }) => [bucket.id, { income: 0n, expense: 0n }]));
+  for (const row of rows) {
+    const timestamp = transactionDateTimestamp(row.date);
+    if (!Number.isFinite(timestamp)) throw new Error(`Transaction ${row.id} has an invalid date.`);
+    let low = 0; let high = ranges.length - 1; let match: (typeof ranges)[number] | undefined;
+    while (low <= high) {
+      const middle = (low + high) >>> 1; const candidate = ranges[middle];
+      if (timestamp < candidate.start) high = middle - 1;
+      else if (timestamp >= candidate.end) low = middle + 1;
+      else { match = candidate; break; }
+    }
+    if (!match) continue;
+    if (!row.id || !row.ownerId || !Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0) throw new Error('A financial report row is invalid.');
+    if (!['Income', 'Expense', 'Transfer', 'Refund', 'Reversal'].includes(row.type)) throw new Error(`Transaction ${row.id} has an unsupported type.`);
+    if (row.type === 'Refund' && (row.linkedOriginalType !== 'Expense' || !row.reversalOfId || !row.linkedCategory || row.accountCurrency !== row.linkedCurrency)) throw new Error(`Refund ${row.id} does not refer to a compatible recorded expense.`);
+    if (row.type === 'Reversal' && (!row.reversalOfId || !row.linkedOriginalType || !row.linkedCategory || row.accountCurrency !== row.linkedCurrency)) throw new Error(`Reversal ${row.id} does not refer to a compatible recorded transaction.`);
+    if (row.accountCurrency !== currency || isNonOperatingMovement(row)) continue;
+    const total = totals.get(match.bucket.id)!;
+    const amount = BigInt(row.amountMinor);
+    if (row.type === 'Income') total.income += amount;
+    else if (row.type === 'Expense') total.expense += amount;
+    else if (row.type === 'Refund') total.expense -= amount;
+    else if (row.type === 'Reversal') {
+      if (row.linkedOriginalType === 'Income') total.income -= amount;
+      else if (row.linkedOriginalType === 'Expense') total.expense -= amount;
+      else if (row.linkedOriginalType === 'Refund') total.expense += amount;
+    }
+  }
+  return Object.fromEntries([...totals].map(([id, value]) => [id, {
+    incomeMinor: safeNumber(value.income, `Chart income bucket ${id}`),
+    expenseMinor: safeNumber(value.expense, `Chart expense bucket ${id}`),
+  }]));
 }

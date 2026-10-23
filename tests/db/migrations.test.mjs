@@ -116,7 +116,7 @@ test('fresh databases receive the same schema without creating sample financial 
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM Account').get().count, 0);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 0);
   assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
-  assert.equal(LOCAL_DATABASE_VERSION, 7);
+  assert.equal(LOCAL_DATABASE_VERSION, 8);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ProfileSetup'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='AuthLoginAttempt'").get());
   assert.ok(database.prepare('PRAGMA table_info(Account)').all().some((column) => column.name === 'archivedAt'));
@@ -164,7 +164,7 @@ test('schema v4 upgrades through v5 to v6 transactionally and leaves existing fi
   for(const table of ['BillPaymentCorrectionReplacement','DebtEventCorrectionReplacement','BillPaymentCorrection','DebtEventCorrection','DebtRepaymentSchedule','DebtInterestEvent']) database.exec(`DROP TABLE IF EXISTS "${table}"`);
   database.exec('PRAGMA user_version=4');
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version,7);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,8);
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM User WHERE id=?').get('u').n,1);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtEventCorrection'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtInterestEvent'").get());
@@ -177,12 +177,13 @@ test('a schema v5 database receives v6 asset and investment tables without chang
   await migrateLocalDatabase(adapter);
   database.prepare('INSERT INTO User VALUES(?,?,?,?,?)').run('u','User','u@example.test','hash','2026-01-01');
   database.prepare('INSERT INTO Account(id,ownerId,name,type,balanceMinor,currency,createdAt,synced) VALUES(?,?,?,?,?,?,?,0)').run('a','u','Bank','bank',10000,'PKR','2026-01-01');
-  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,taxStatus,synced) VALUES(?,?,?,?,?,?,?,?,?,?,0)').run('t','u',10,1000,'Income','salary','salary','a','2026-01-02','unreviewed');
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,taxStatus,synced) VALUES(?,?,?,?,?,?,?,?,?,?,0)').run('t','u',10,1000,'Income','salary','salary','a','2026-01-02T00:00:00.000Z','unreviewed');
   for(const name of ['Asset_profile_guard','Asset_purchase_immutable','AssetValuation_profile_guard','AssetValuation_append_only_update','AssetValuation_append_only_delete','AssetActivity_profile_guard','AssetActivity_append_only_update','AssetActivity_append_only_delete','Portfolio_profile_guard','Portfolio_update_guard','Holding_profile_guard','Holding_immutable','InvestmentEvent_profile_guard','InvestmentEvent_append_only_update','InvestmentEvent_append_only_delete','InvestmentPrice_profile_guard','InvestmentPrice_append_only_update','InvestmentPrice_append_only_delete','Transaction_asset_investment_adjustment_guard'])database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
+  for(const name of ['Account_insert_integrity_guard','Account_update_integrity_guard','Transaction_insert_integrity_guard','Transaction_append_only_delete','Transaction_financial_update_guard','Transaction_account_update_guard_v8'])database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
   for(const name of ['InvestmentPrice','InvestmentEvent','InvestmentHolding','InvestmentPortfolio','AssetActivity','AssetValuation','Asset'])database.exec(`DROP TABLE "${name}"`);
   database.exec('PRAGMA user_version=5');
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version,7);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,8);
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM "Transaction" WHERE id=\'t\'').get().n,1);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='InvestmentEvent'").get());
   database.close();
@@ -194,7 +195,7 @@ test('budget, goal and emergency-fund migration is repeatable and protects profi
   const adapter = migrationAdapter(database);
   await migrateLocalDatabase(adapter);
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 7);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 8);
 
   database.prepare(`INSERT INTO Budget
     (id, ownerId, categoryId, amountMinor, currency, periodStart, periodEnd, rolloverPolicy, revision, createdAt)
@@ -237,17 +238,17 @@ test('financial core migration blocks cross-profile account references and retai
   await migrateLocalDatabase(migrationAdapter(database));
   database.prepare('INSERT INTO User VALUES (?, ?, ?, ?, ?)').run('user-2', 'B User', 'b@example.test', 'hash', '2026-01-01T00:00:00.000Z');
   database.prepare('INSERT INTO Account (id, ownerId, name, type, balanceMinor, currency, createdAt, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('acct-2', 'user-2', 'Other', 'bank', 0, 'PKR', '2026-01-01T00:00:00.000Z', 0);
-  assert.throws(() => database.prepare(`INSERT INTO "Transaction" (id, ownerId, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced)
-    VALUES ('bad-tx', 'user-1', 100, 'Expense', 'food', 'missing-account', '2026-01-01T00:00:00.000Z', '', 'unreviewed', 0)`).run(), /unavailable to this profile/);
-  assert.throws(() => database.prepare(`INSERT INTO "Transaction" (id, ownerId, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced)
-    VALUES ('wrong-owner', 'user-1', 100, 'Expense', 'food', 'acct-2', '2026-01-01T00:00:00.000Z', '', 'unreviewed', 0)`).run(), /unavailable to this profile/);
+  assert.throws(() => database.prepare(`INSERT INTO "Transaction" (id, ownerId, amount, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced)
+    VALUES ('bad-tx', 'user-1', 1, 100, 'Expense', 'food', 'missing-account', '2026-01-01T00:00:00.000Z', '', 'unreviewed', 0)`).run(), /unavailable to this profile|cash-ledger integrity/);
+  assert.throws(() => database.prepare(`INSERT INTO "Transaction" (id, ownerId, amount, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced)
+    VALUES ('wrong-owner', 'user-1', 1, 100, 'Expense', 'food', 'acct-2', '2026-01-01T00:00:00.000Z', '', 'unreviewed', 0)`).run(), /unavailable to this profile|cash-ledger integrity/);
   const columns = database.prepare('PRAGMA table_info("Transaction")').all().map((column) => column.name);
   assert.ok(columns.includes('reversalOfId'));
   assert.ok(columns.includes('correctionOfId'));
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'Transaction_account_insert_guard'").get());
-  database.prepare(`INSERT INTO "Transaction" (id, ownerId, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced, reversalOfId)
-    VALUES ('undo-tx', 'user-1', 12525, 'Reversal', 'correction_reversal', 'acct-1', '2026-03-01T00:00:00.000Z', 'Undo', 'unreviewed', 0, 'tx-1')`).run();
-  assert.throws(() => database.prepare('DELETE FROM "Transaction" WHERE id = ?').run('tx-1'), /FOREIGN KEY constraint failed/);
+  database.prepare(`INSERT INTO "Transaction" (id, ownerId, amount, amountMinor, type, categoryId, accountId, date, note, taxStatus, synced, reversalOfId)
+    VALUES ('undo-tx', 'user-1', 125.25, 12525, 'Reversal', 'correction_reversal', 'acct-1', '2026-03-01T00:00:00.000Z', 'Undo', 'unreviewed', 0, 'tx-1')`).run();
+  assert.throws(() => database.prepare('DELETE FROM "Transaction" WHERE id = ?').run('tx-1'), /append-only/);
   assert.throws(() => database.prepare('DELETE FROM Account WHERE id = ?').run('acct-1'), /cannot be deleted/);
   database.close();
 });
@@ -335,4 +336,72 @@ test('migrated database reopens with its version, transaction totals, and openin
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('v8 normalizes only interpretable timestamp instants and preserves ambiguous civil dates', async () => {
+  const database = createIntermediateSchema();
+  database.prepare('UPDATE "Transaction" SET date=? WHERE id=?').run('2026-10-01 12:34:56', 'tx-1');
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,note,taxStatus,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,0)')
+    .run('offset', 'user-1', 1, 100, 'Income', 'salary', 'salary', 'acct-1', '2026-03-01T00:30:00+05:30', '', 'unreviewed');
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,note,taxStatus,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,0)')
+    .run('civil', 'user-1', 1, 100, 'Income', 'salary', 'salary', 'acct-1', '2026-10-02', '', 'unreviewed');
+  await migrateLocalDatabase(migrationAdapter(database));
+  assert.equal(database.prepare('SELECT date FROM "Transaction" WHERE id=?').get('tx-1').date, '2026-10-01T12:34:56.000Z');
+  assert.equal(database.prepare('SELECT date FROM "Transaction" WHERE id=?').get('offset').date, '2026-02-28T19:00:00.000Z');
+  assert.equal(database.prepare('SELECT date FROM "Transaction" WHERE id=?').get('civil').date, '2026-10-02');
+  assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
+  database.close();
+});
+
+test('the supported v7 to v8 upgrade preserves posted financial values and installs hardening idempotently', async () => {
+  const database = createIntermediateSchema();
+  const adapter = migrationAdapter(database);
+  await migrateLocalDatabase(adapter);
+  const before = database.prepare('SELECT id,ownerId,amountMinor,type,accountId FROM "Transaction" WHERE id=?').get('tx-1');
+  for (const name of ['Account_insert_integrity_guard','Account_update_integrity_guard','Account_history_currency_guard','Transaction_insert_integrity_guard','Transaction_append_only_delete','Transaction_financial_update_guard','Transaction_account_update_guard_v8']) {
+    database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
+  }
+  database.exec('DROP INDEX IF EXISTS Transaction_owner_correction_idx; PRAGMA user_version=7');
+  database.prepare('UPDATE "Transaction" SET date=? WHERE id=?').run('2026-02-01 12:00:00', 'tx-1');
+  await migrateLocalDatabase(adapter);
+  await migrateLocalDatabase(adapter);
+  const after = database.prepare('SELECT id,ownerId,amountMinor,type,accountId,date FROM "Transaction" WHERE id=?').get('tx-1');
+  assert.deepEqual([after.id,after.ownerId,after.amountMinor,after.type,after.accountId], [before.id,before.ownerId,before.amountMinor,before.type,before.accountId]);
+  assert.equal(after.date, '2026-02-01T12:00:00.000Z');
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
+  database.close();
+});
+
+test('v8 protects posted cash history while permitting valid refunds, reversals, replacements, and sync metadata', async () => {
+  const database = createIntermediateSchema();
+  database.exec('PRAGMA foreign_keys=ON');
+  await migrateLocalDatabase(migrationAdapter(database));
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,note,taxStatus,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,0)')
+    .run('expense', 'user-1', 100, 10_000, 'Expense', 'food', 'food', 'acct-1', '2026-02-02T00:00:00.000Z', 'Purchase', 'unreviewed');
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,note,taxStatus,synced,reversalOfId) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?)')
+    .run('refund-a', 'user-1', 40, 4_000, 'Refund', 'refund', 'refund', 'acct-1', '2026-02-03T00:00:00.000Z', 'Partial refund', 'unreviewed', 'expense');
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,note,taxStatus,synced,reversalOfId) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?)')
+    .run('refund-b', 'user-1', 60, 6_000, 'Refund', 'refund', 'refund', 'acct-1', '2026-02-04T00:00:00.000Z', 'Remaining refund', 'unreviewed', 'expense');
+  assert.throws(() => database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,note,taxStatus,synced,reversalOfId) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?)')
+    .run('refund-over', 'user-1', 0.01, 1, 'Refund', 'refund', 'refund', 'acct-1', '2026-02-05T00:00:00.000Z', '', 'unreviewed', 'expense'), /cash-ledger integrity/);
+
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,note,taxStatus,synced,reversalOfId) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?)')
+    .run('income-reversal', 'user-1', 125.25, 12_525, 'Reversal', 'correction', 'correction_reversal', 'acct-1', '2026-02-06T00:00:00.000Z', '', 'unreviewed', 'tx-1');
+  database.prepare('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,date,note,taxStatus,synced,correctionOfId) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?)')
+    .run('replacement', 'user-1', 120, 12_000, 'Income', 'salary', 'salary', 'acct-1', '2026-02-07T00:00:00.000Z', 'Corrected income', 'unreviewed', 'tx-1');
+
+  assert.throws(() => database.prepare('UPDATE "Transaction" SET amountMinor=1 WHERE id=?').run('expense'), /immutable/);
+  assert.throws(() => database.prepare('UPDATE "Transaction" SET note=? WHERE id=?').run('rewritten', 'expense'), /immutable/);
+  assert.throws(() => database.prepare('DELETE FROM "Transaction" WHERE id=?').run('expense'), /append-only/);
+  assert.throws(() => database.prepare('UPDATE "Transaction" SET correctionOfId=? WHERE id=?').run('tx-1', 'replacement'), /immutable/);
+  assert.throws(() => database.prepare('UPDATE Account SET currency=? WHERE id=?').run('USD', 'acct-1'), /locked after transaction history/);
+  assert.throws(() => database.prepare('UPDATE Account SET balanceMinor=? WHERE id=?').run(1, 'acct-1'), /locked after transaction history/);
+  assert.throws(() => database.prepare('INSERT INTO Account(id,ownerId,name,type,balanceMinor,currency,createdAt,synced) VALUES(?,?,?,?,?,?,?,0)')
+    .run('unsupported-currency', 'user-1', 'Invalid', 'bank', 0, 'XXX', '2026-01-01'), /currency integrity/);
+  database.prepare('UPDATE "Transaction" SET synced=1 WHERE id=?').run('expense');
+  assert.equal(database.prepare('SELECT synced FROM "Transaction" WHERE id=?').get('expense').synced, 1);
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM "Transaction" WHERE type=\'Refund\' AND reversalOfId=\'expense\'').get().n, 2);
+  assert.equal(database.prepare('PRAGMA foreign_key_check').all().length, 0);
+  database.close();
 });

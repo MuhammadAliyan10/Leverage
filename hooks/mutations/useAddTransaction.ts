@@ -51,25 +51,26 @@ export function useAddTransaction() {
         },
       });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-      queryClient.invalidateQueries({ queryKey: ['financial-report', user?.id] });
-      queryClient.invalidateQueries({ queryKey: ['transactions'] });
-      queryClient.invalidateQueries({ queryKey: ['accounts', user?.id] });
-      
+    onSuccess: async () => {
+      if (!user) return;
+      const refreshes = await Promise.allSettled([
+        queryClient.invalidateQueries({ queryKey: ['dashboard', 'metrics', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['financial-report', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['insights', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['transactions', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['accounts', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['account-records', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['transaction-filter-accounts', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['budgets', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['savings', user.id] }),
+      ]);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
       Toast.show({
         type: 'success',
         text1: 'Transaction Saved',
-        text2: 'Your transaction was saved on this device.',
-        position: 'top',
-      });
-    },
-    onError: (error) => {
-      Toast.show({
-        type: 'error',
-        text1: 'Transaction not saved',
-        text2: error instanceof Error ? error.message : 'Please try again.',
+        text2: refreshes.some((result) => result.status === 'rejected')
+          ? 'Saved on this device. Some views may need a refresh.'
+          : 'Your transaction was saved on this device.',
         position: 'top',
       });
     },

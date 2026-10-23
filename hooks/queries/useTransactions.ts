@@ -1,29 +1,28 @@
 import { useInfiniteQuery } from '@tanstack/react-query';
-import { localDb } from '../../src/db/local/client';
+import { useMemo } from 'react';
+import { localDb, type LocalTransaction, type TransactionListFilters } from '../../src/db/local/client';
 import { useAuth } from '../../src/context/AuthContext';
-import type { LocalTransaction } from '../../src/db/local/client';
+import { groupTransactionsByDate } from '../../src/finance/transactionDisplay';
 
-export interface TransactionSection {
-  title: string;
-  data: LocalTransaction[];
-}
+export interface TransactionSection { title: string; data: LocalTransaction[] }
 
-export function useTransactions() {
+export function useTransactions(filters: TransactionListFilters = {}) {
   const { user } = useAuth();
   const query = useInfiniteQuery({
-    queryKey: ['transactions', user?.id],
+    queryKey: ['transactions', user?.id, filters],
     enabled: !!user,
     initialPageParam: null as { date: string; id: string } | null,
-    queryFn: async ({ pageParam }) => {
+    queryFn: async ({ pageParam, signal }) => {
       if (!user) throw new Error('Sign in to read transactions.');
-      return localDb.transaction.findPage({
-        ownerId: user.id,
-        limit: 50,
-        cursor: pageParam ?? undefined,
-      });
+      if (signal.aborted) throw new Error('Transaction query was cancelled.');
+      const page = await localDb.transaction.findPage({ ownerId: user.id, limit: 50, cursor: pageParam ?? undefined, filters });
+      if (signal.aborted) throw new Error('Transaction query was cancelled.');
+      return page;
     },
     getNextPageParam: (page) => page.nextCursor ?? undefined,
+    staleTime: 0,
+    gcTime: 2 * 60 * 1000,
   });
-  const sections: TransactionSection[] = [{ title: 'Recent', data: query.data?.pages.flatMap((page) => page.items) ?? [] }];
+  const sections = useMemo(() => groupTransactionsByDate(query.data?.pages.flatMap((page) => page.items) ?? []), [query.data]);
   return { ...query, data: sections };
 }

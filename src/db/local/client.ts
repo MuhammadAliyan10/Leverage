@@ -24,7 +24,7 @@ import { createLocalWriteQueue } from './writeQueue';
 import { archiveAccount as archiveAccountRecord, editAccount } from '../../finance/accountOperations';
 import { assertCorrectionCanPost, resolveRefundAmount } from '../../finance/transactionOperations';
 import { buildFinancialReportQuery, type FinancialReportRow } from '../../finance/reporting';
-import { buildTransactionPagePredicate } from './queryBuilders';
+import { buildAccountBalanceQuery, buildRecentAccountPreferenceQuery, buildTransactionListQuery, buildTransactionPagePredicate, type TransactionFilters } from './queryBuilders';
 import { createBudgetingStore, type BudgetingSql } from './budgetingStore';
 import { createObligationsStore, type ObligationsSql } from './obligationsStore';
 import { createAssetsInvestmentsStore, type AssetSql } from './assetsInvestmentsStore';
@@ -112,22 +112,37 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
   }
 }
 
-/** Serializes writes on web (which lacks exclusive transactions) and uses exclusive native transactions. */
+/** Serializes writes everywhere and gives native writes an FK-enabled connection before BEGIN. */
 async function withLocalWrite<T>(database: SQLite.SQLiteDatabase, task: (executor: SqlExecutor) => Promise<T>): Promise<T> {
   return runSerializedWrite(async () => {
-    let resolveResult: ((value: T) => void) | null = null;
-    const result = new Promise<T>((resolve) => { resolveResult = resolve; });
-    const persist = async (executor: SqlExecutor): Promise<void> => {
-      const value = await task(executor);
-      if (!resolveResult) throw new Error('The local write result could not be delivered.');
-      resolveResult(value);
-    };
     if (Platform.OS === 'web') {
-      await database.withTransactionAsync(() => persist(database));
-    } else {
-      await database.withExclusiveTransactionAsync(async (transaction) => persist(transaction));
+      let value!: T;
+      await database.withTransactionAsync(async () => { value = await task(database); });
+      return value;
     }
-    return result;
+
+    // Expo's exclusive helper starts BEGIN on a fresh connection before its callback.
+    // PRAGMA foreign_keys is connection-local and cannot be enabled inside that transaction.
+    const writeConnection = await SQLite.openDatabaseAsync('finance.db', { useNewConnection: true });
+    let began = false;
+    try {
+      await writeConnection.execAsync('PRAGMA foreign_keys = ON;');
+      const foreignKeys = await writeConnection.getFirstAsync<{ foreign_keys: number }>('PRAGMA foreign_keys');
+      if (foreignKeys?.foreign_keys !== 1) throw new Error('SQLite foreign-key enforcement could not be enabled for this write.');
+      await writeConnection.execAsync('BEGIN IMMEDIATE;');
+      began = true;
+      const value = await task(writeConnection);
+      await writeConnection.execAsync('COMMIT;');
+      began = false;
+      return value;
+    } catch (error) {
+      if (began) {
+        try { await writeConnection.execAsync('ROLLBACK;'); } catch { /* Preserve the original database failure. */ }
+      }
+      throw error;
+    } finally {
+      await writeConnection.closeAsync();
+    }
   });
 }
 
@@ -287,6 +302,25 @@ export interface LocalTransaction {
   /** Currency of the transaction's account; null means the legacy row has no account. */
   accountCurrency: CurrencyCode | null;
   synced: boolean;
+  accountName?: string | null;
+  destinationName?: string | null;
+  destinationCurrency?: CurrencyCode | null;
+  linkedOriginalType?: TransactionType | null;
+  linkedOriginalCategory?: string | null;
+  linkedOriginalNote?: string | null;
+  linkedOriginalId?: string | null;
+  refundedMinor?: number;
+  specializedContext?: string | null;
+}
+
+export interface TransactionListFilters {
+  search?: string;
+  types?: TransactionType[];
+  startDate?: string;
+  endDate?: string;
+  accountId?: string;
+  categoryId?: string;
+  currency?: CurrencyCode;
 }
 
 function validateAccountRow(row: AccountRow): Omit<AccountRow, 'currency' | 'synced'> & { currency: CurrencyCode; synced: boolean } {
@@ -664,9 +698,27 @@ export const localDb = {
       );
       return rows.map(validateAccountRow);
     },
+
+    findManyWithBalances: async (ownerId: string, options: { includeArchived?: boolean } = {}): Promise<(Omit<AccountRow, 'synced'> & { synced: boolean })[]> => {
+      const database = await getDb();
+      const query = buildAccountBalanceQuery(ownerId, options.includeArchived === true);
+      const rows = await database.getAllAsync<AccountRow & { openingBalanceMinor: number; currentBalanceMinor: number }>(query.sql, query.params);
+      return rows.map((row) => {
+        const account = validateAccountRow({ ...row, balanceMinor: row.openingBalanceMinor });
+        if (!Number.isSafeInteger(row.currentBalanceMinor)) throw new Error(`Account ${row.id} balance is outside the supported range.`);
+        return { ...account, balanceMinor: row.currentBalanceMinor };
+      });
+    },
   },
 
   transaction: {
+    findRecentAccountId: async (ownerId: string, type: 'Expense' | 'Income' | 'Transfer'): Promise<string | null> => {
+      const database = await getDb();
+      const query = buildRecentAccountPreferenceQuery(ownerId, type);
+      const row = await database.getFirstAsync<{ accountId: string | null }>(query.sql, query.params);
+      return row?.accountId ?? null;
+    },
+
     findReportRows: async ({ ownerId, startDate, endDate }: {
       ownerId: string; startDate: string; endDate: string;
     }): Promise<FinancialReportRow[]> => {
@@ -674,17 +726,6 @@ export const localDb = {
       const query = buildFinancialReportQuery(ownerId, startDate, endDate);
       const rows = await database.getAllAsync<FinancialReportRow>(query.sql, query.params);
       return rows;
-    },
-
-    findBalanceRows: async (ownerId: string): Promise<Pick<LocalTransaction, 'id' | 'ownerId' | 'amountMinor' | 'type' | 'accountId' | 'toAccountId' | 'reversalOfId'>[]> => {
-      if (!ownerId.trim()) throw new Error('A profile is required to calculate account balances.');
-      const database = await getDb();
-      const rows = await database.getAllAsync<TransactionRow>(`SELECT id,ownerId,amountMinor,type,categoryId,classificationId,accountId,toAccountId,date,note,sourceName,paymentMethod,sourceAmountMinor,sourceCurrency,exchangeRate,referenceNumber,taxStatus,taxYear,synced,reversalOfId,correctionOfId
-        FROM "Transaction" WHERE ownerId=? ORDER BY date ASC,id ASC`, [ownerId]);
-      return rows.map(validateTransactionRow).map((row) => ({
-        id: row.id, ownerId: row.ownerId, amountMinor: row.amountMinor, type: row.type,
-        accountId: row.accountId, toAccountId: row.toAccountId, reversalOfId: row.reversalOfId ?? null,
-      }));
     },
 
     findRecentActivity: async (ownerId: string, limit = 5): Promise<TransactionActivity[]> => {
@@ -734,15 +775,59 @@ export const localDb = {
       });
     },
 
-    findPage: async ({ ownerId, limit = 50, cursor, where }: {
-      ownerId: string; limit?: number; cursor?: { date: string; id: string }; where?: { synced?: boolean };
+    findPage: async ({ ownerId, limit = 50, cursor, filters }: {
+      ownerId: string; limit?: number; cursor?: { date: string; id: string }; filters?: TransactionFilters;
     }): Promise<{ items: LocalTransaction[]; nextCursor: { date: string; id: string } | null }> => {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Transaction page size must be between 1 and 100.');
-      const rows = await localDb.transaction.findMany({ ownerId, orderBy: { date: 'desc' }, take: limit + 1, cursor, where });
+      const database = await getDb();
+      const query = buildTransactionListQuery({ ownerId, limit, cursor, filters });
+      const rows = await database.getAllAsync<TransactionRow & {
+        accountName: string | null; destinationName: string | null; destinationCurrency: string | null;
+        linkedOriginalType: string | null; linkedOriginalCategory: string | null; linkedOriginalNote: string | null;
+        linkedOriginalId: string | null; refundedMinor: number | null;
+        specializedContext: string | null;
+      }>(query.sql, query.params);
       const hasMore = rows.length > limit;
       const items = hasMore ? rows.slice(0, limit) : rows;
       const last = items.at(-1);
-      return { items, nextCursor: hasMore && last ? { date: last.date, id: last.id } : null };
+      const mapped = items.map((row) => {
+        const valid = validateTransactionRow(row);
+        const accountCurrency: CurrencyCode | null = row.accountCurrency == null ? null : isCurrencyCode(row.accountCurrency) ? row.accountCurrency : null;
+        const linkedOriginalType = row.linkedOriginalType !== null && isTransactionType(row.linkedOriginalType) ? row.linkedOriginalType : null;
+        return {
+          ...mapTransactionRow({ ...valid, accountCurrency: row.accountCurrency }),
+          accountName: row.accountName,
+          destinationName: row.destinationName,
+          destinationCurrency: row.destinationCurrency && isCurrencyCode(row.destinationCurrency) ? row.destinationCurrency : null,
+          accountCurrency,
+          linkedOriginalType,
+          linkedOriginalCategory: row.linkedOriginalCategory,
+          linkedOriginalNote: row.linkedOriginalNote,
+          linkedOriginalId: row.linkedOriginalId,
+          refundedMinor: row.refundedMinor ?? 0,
+          specializedContext: row.specializedContext,
+        };
+      });
+      return { items: mapped, nextCursor: hasMore && last ? { date: last.date, id: last.id } : null };
+    },
+
+    findById: async (ownerId: string, id: string): Promise<LocalTransaction | null> => {
+      if (!ownerId.trim() || !id.trim()) throw new Error('A profile and transaction are required.');
+      const database = await getDb();
+      const row = await database.getFirstAsync<TransactionRow & { accountName: string | null; destinationName: string | null; destinationCurrency: string | null; linkedOriginalId: string | null; linkedOriginalType: string | null; linkedOriginalCategory: string | null; linkedOriginalNote: string | null; refundedMinor: number | null; specializedContext: string | null }>(`SELECT t.*,a.currency AS accountCurrency,a.name AS accountName,destination.currency AS destinationCurrency,destination.name AS destinationName,linked.id AS linkedOriginalId,linked.type AS linkedOriginalType,COALESCE(linkedRoot.categoryId,linked.categoryId) AS linkedOriginalCategory,COALESCE(linkedRoot.note,linked.note) AS linkedOriginalNote,COALESCE('Bill · '||bill.name,'Debt · '||debt.counterparty,'Asset · '||asset.name,'Investment · '||holding.name) AS specializedContext,(SELECT COALESCE(SUM(refund.amountMinor),0) FROM "Transaction" refund WHERE refund.ownerId=t.ownerId AND refund.type='Refund' AND refund.reversalOfId=t.id) AS refundedMinor FROM "Transaction" t LEFT JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId LEFT JOIN Account destination ON destination.id=t.toAccountId AND destination.ownerId=t.ownerId LEFT JOIN "Transaction" linked ON linked.id=COALESCE(t.reversalOfId,t.correctionOfId) AND linked.ownerId=t.ownerId LEFT JOIN "Transaction" linkedRoot ON linkedRoot.id=linked.reversalOfId AND linkedRoot.ownerId=linked.ownerId LEFT JOIN BillPayment billPayment ON billPayment.ownerId=t.ownerId AND billPayment.transactionId=CASE WHEN t.type='Reversal' THEN t.reversalOfId ELSE t.id END LEFT JOIN Bill bill ON bill.id=billPayment.billId AND bill.ownerId=billPayment.ownerId LEFT JOIN DebtEvent debtEvent ON debtEvent.ownerId=t.ownerId AND debtEvent.transactionId=CASE WHEN t.type='Reversal' THEN t.reversalOfId ELSE t.id END LEFT JOIN Debt debt ON debt.id=debtEvent.debtId AND debt.ownerId=debtEvent.ownerId LEFT JOIN AssetActivity assetActivity ON assetActivity.ownerId=t.ownerId AND assetActivity.transactionId=CASE WHEN t.type='Reversal' THEN t.reversalOfId ELSE t.id END LEFT JOIN Asset asset ON asset.id=assetActivity.assetId AND asset.ownerId=assetActivity.ownerId LEFT JOIN InvestmentEvent investmentEvent ON investmentEvent.ownerId=t.ownerId AND investmentEvent.transactionId=CASE WHEN t.type='Reversal' THEN t.reversalOfId ELSE t.id END LEFT JOIN InvestmentHolding holding ON holding.id=investmentEvent.holdingId AND holding.ownerId=investmentEvent.ownerId WHERE t.ownerId=? AND t.id=?`, [ownerId, id]);
+      if (!row) return null;
+      const valid = validateTransactionRow(row);
+      return { ...mapTransactionRow({ ...valid, accountCurrency: row.accountCurrency }), accountName: row.accountName, destinationName: row.destinationName, destinationCurrency: row.destinationCurrency && isCurrencyCode(row.destinationCurrency) ? row.destinationCurrency : null, linkedOriginalType: row.linkedOriginalType !== null && isTransactionType(row.linkedOriginalType) ? row.linkedOriginalType : null, linkedOriginalCategory: row.linkedOriginalCategory, linkedOriginalNote: row.linkedOriginalNote, linkedOriginalId: row.linkedOriginalId, refundedMinor: row.refundedMinor ?? 0, specializedContext: row.specializedContext };
+    },
+
+    findCorrectionLinks: async (ownerId: string, originalId: string): Promise<{ reversalId: string | null; replacementId: string | null }> => {
+      if (!ownerId.trim() || !originalId.trim()) throw new Error('A profile and original transaction are required.');
+      const database = await getDb();
+      const [reversal, replacement] = await Promise.all([
+        database.getFirstAsync<{ id: string }>('SELECT id FROM "Transaction" WHERE ownerId=? AND type=? AND reversalOfId=? LIMIT 1', [ownerId, 'Reversal', originalId]),
+        database.getFirstAsync<{ id: string }>('SELECT id FROM "Transaction" WHERE ownerId=? AND correctionOfId=? LIMIT 1', [ownerId, originalId]),
+      ]);
+      return { reversalId: reversal?.id ?? null, replacementId: replacement?.id ?? null };
     },
 
     findMany: async ({
@@ -883,6 +968,8 @@ export const localDb = {
         if (!original || original.type !== 'Expense' || !original.accountId) throw new Error('Only a recorded expense can be refunded.');
         const obligationLink=await transaction.getFirstAsync<{kind:string}>("SELECT 'bill' AS kind FROM BillPayment WHERE ownerId=? AND transactionId=? UNION ALL SELECT 'debt' AS kind FROM DebtEvent WHERE ownerId=? AND transactionId=? LIMIT 1",[ownerId,originalTransactionId,ownerId,originalTransactionId]);
         if(obligationLink) throw new Error('This bill or debt cash entry must be corrected through its obligation history.');
+        const assetOrInvestmentLink=await transaction.getFirstAsync<{kind:string}>("SELECT 'asset' AS kind FROM AssetActivity WHERE ownerId=? AND transactionId=? UNION ALL SELECT 'investment' AS kind FROM InvestmentEvent WHERE ownerId=? AND transactionId=? LIMIT 1",[ownerId,originalTransactionId,ownerId,originalTransactionId]);
+        if(assetOrInvestmentLink) throw new Error('This asset or investment cash entry must be corrected through its dedicated history.');
         validateTransactionRow(original);
         const alreadyCorrected = await transaction.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM "Transaction" WHERE ownerId = ? AND type = ? AND reversalOfId = ?', [ownerId, 'Reversal', originalTransactionId]);
         if (alreadyCorrected?.count) throw new Error('A corrected expense cannot receive another refund.');
@@ -916,6 +1003,8 @@ export const localDb = {
         if (!original || original.type === 'Refund' || original.type === 'Reversal' || !original.accountId) throw new Error('This transaction cannot be corrected.');
         const obligationLink=await transaction.getFirstAsync<{kind:string}>("SELECT 'bill' AS kind FROM BillPayment WHERE ownerId=? AND transactionId=? UNION ALL SELECT 'debt' AS kind FROM DebtEvent WHERE ownerId=? AND transactionId=? LIMIT 1",[ownerId,originalTransactionId,ownerId,originalTransactionId]);
         if(obligationLink) throw new Error('This bill or debt cash entry must be corrected through its obligation history.');
+        const assetOrInvestmentLink=await transaction.getFirstAsync<{kind:string}>("SELECT 'asset' AS kind FROM AssetActivity WHERE ownerId=? AND transactionId=? UNION ALL SELECT 'investment' AS kind FROM InvestmentEvent WHERE ownerId=? AND transactionId=? LIMIT 1",[ownerId,originalTransactionId,ownerId,originalTransactionId]);
+        if(assetOrInvestmentLink) throw new Error('This asset or investment cash entry must be corrected through its dedicated history.');
         const priorRefund = await transaction.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM "Transaction" WHERE ownerId = ? AND type = ? AND reversalOfId = ?', [ownerId, 'Refund', originalTransactionId]);
         const existingReversal = await transaction.getFirstAsync<{ id: string }>('SELECT id FROM "Transaction" WHERE ownerId = ? AND type = ? AND reversalOfId = ?', [ownerId, 'Reversal', originalTransactionId]);
         const existingReplacement = await transaction.getFirstAsync<TransactionRow>('SELECT * FROM "Transaction" WHERE id = ? AND ownerId = ?', [replacementId, ownerId]);
@@ -947,7 +1036,6 @@ export const localDb = {
             await budgetingStore.validatePostTransaction(asBudgetingSql(transaction), record.ownerId, record.accountId);
           },
         });
-        await transaction.runAsync('UPDATE "Transaction" SET correctionOfId = ? WHERE id = ? AND ownerId = ?', [originalTransactionId, result.id, ownerId]);
         return result;
       });
     },

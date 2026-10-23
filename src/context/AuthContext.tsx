@@ -2,8 +2,13 @@ import React, { createContext, useContext, useEffect, useMemo, useRef, useState,
 import { useQueryClient } from '@tanstack/react-query';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import { useColorScheme } from 'nativewind';
 import { localDb, DbUser } from '../db/local/client';
 import { decideRestoredSession } from '../security/sessionPolicy';
+import { appSettings } from '../security/appSettings';
+import { DEFAULT_PROFILE_SETTINGS, type AppearancePreference, type ProfileSettings } from '../security/settingsPreferences';
+import { cancelProfileReminders } from '../security/localReminders';
+import { resolveProfileSwitchTarget } from '../security/profileSwitchPolicy';
 
 const SESSION_KEY = 'houselog_user_id';
 const SIGNED_OUT_KEY = 'houselog_signed_out';
@@ -22,6 +27,12 @@ interface AuthContextValue {
   isLoading: boolean;
   restoreError: string | null;
   sessionNotice: string | null;
+  appearance: AppearancePreference;
+  profileSettings: ProfileSettings;
+  pendingProfileEmail: string | null;
+  updateAppearance: (appearance: AppearancePreference) => Promise<void>;
+  updateProfileSettings: (patch: Partial<ProfileSettings>) => Promise<void>;
+  switchLocalProfile: (profileId: string) => Promise<void>;
   signIn: (email: string, password: string, rememberMe: boolean) => Promise<{ success: boolean; error?: string; passwordUpgradePending?: boolean }>;
   signUp: (fullName: string, email: string, password: string, rememberMe: boolean) => Promise<{ success: boolean; error?: string; notice?: string }>;
   signOut: () => Promise<void>;
@@ -86,7 +97,12 @@ async function persistSignedOut(): Promise<void> {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
+  const { setColorScheme } = useColorScheme();
+  const setColorSchemeRef = useRef(setColorScheme);
   const [session, setSessionState] = useState<AuthSession>({ status: 'restoring' });
+  const [appearance, setAppearance] = useState<AppearancePreference>('system');
+  const [profileSettings, setProfileSettings] = useState<ProfileSettings>({ ...DEFAULT_PROFILE_SETTINGS });
+  const [pendingProfileEmail, setPendingProfileEmail] = useState<string | null>(null);
   const sessionRef = useRef<AuthSession>(session);
   const operationRef = useRef(false);
   const sequenceRef = useRef(0);
@@ -97,30 +113,71 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    setColorSchemeRef.current = setColorScheme;
+  }, [setColorScheme]);
+
+  useEffect(() => {
     let active = true;
     void (async () => {
+      let appearanceNotice: string | undefined;
+      try {
+        const savedAppearance = await appSettings.getAppearance();
+        if (active) {
+          setAppearance(savedAppearance);
+          setColorSchemeRef.current(savedAppearance);
+        }
+      } catch {
+        appearanceNotice = 'Appearance preference could not be loaded; using the system theme.';
+        if (active) setColorSchemeRef.current('system');
+      }
       try {
         const stored = await readSessionId();
         if (!stored.userId) {
-          if (active) setSession({ status: 'signedOut' });
+          if (active) setSession({ status: 'signedOut', ...(appearanceNotice ? { notice: appearanceNotice } : {}) });
           return;
         }
         const found = await localDb.user.findById(stored.userId);
         if (!active) return;
         const decision = decideRestoredSession({ savedUserId: stored.userId, signedOutMarker: stored.signedOutMarker, profileExists: found !== null });
         if (decision === 'signedOut' || !found) {
+          let notice = 'Your saved profile is unavailable. Sign in again.';
           if (Platform.OS === 'web') {
             window.localStorage.removeItem(SESSION_KEY);
             window.sessionStorage.removeItem(SESSION_KEY);
           } else {
-            await SecureStore.deleteItemAsync(SESSION_KEY).catch(() => undefined);
+            try {
+              await SecureStore.setItemAsync(SIGNED_OUT_KEY, '1');
+              await SecureStore.deleteItemAsync(SESSION_KEY);
+            } catch {
+              notice += ' Secure storage could not clear the stale session; verify sign-in is required before using this device.';
+            }
           }
-          setSession({ status: 'signedOut', notice: 'Your saved profile is unavailable. Sign in again.' });
+          setSession({ status: 'signedOut', notice });
           return;
         }
         // Remember me persists the local session across a browser refresh or app restart.
         // The inactivity lock below still protects a session after an extended absence.
-        setSession({ status: 'signedIn', user: found });
+        let savedProfileSettings = { ...DEFAULT_PROFILE_SETTINGS };
+        let settingsNotice: string | undefined;
+        try { savedProfileSettings = await appSettings.getProfile(found.id); }
+        catch { settingsNotice = 'Security preferences could not be read. HouseLog is locked until you verify this profile password.'; }
+        if (!active) return;
+        setProfileSettings(savedProfileSettings);
+        const notice = settingsNotice ?? appearanceNotice;
+        const restoredStatus = decideRestoredSession({
+          savedUserId: stored.userId,
+          signedOutMarker: stored.signedOutMarker,
+          profileExists: true,
+          appLockEnabled: settingsNotice !== undefined || savedProfileSettings.appLockEnabled,
+          // Web refreshes are navigation, not a fresh native launch. Keep the
+          // remembered browser session open; Android/iOS still cold-start locked.
+          coldStartLockRequired: Platform.OS !== 'web',
+        });
+        if (restoredStatus === 'locked') {
+          setSession({ status: 'locked', user: found, ...(notice ? { notice } : { notice: 'Unlock HouseLog to continue.' }) });
+        } else {
+          setSession({ status: 'signedIn', user: found, ...(notice ? { notice } : {}) });
+        }
       } catch {
         if (active) setSession({ status: 'signedOut', notice: 'Your saved session could not be restored. Sign in again; your records were not changed.' });
       }
@@ -136,12 +193,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const result = await localDb.user.signIn(email, password);
       if (!result.success) return { success: false, error: result.error };
       let notice: string | undefined;
+      let savedProfileSettings = { ...DEFAULT_PROFILE_SETTINGS };
+      try { savedProfileSettings = await appSettings.getProfile(result.user.id); }
+      catch { notice = 'Signed in, but profile preferences could not be loaded. Defaults are active for this session.'; }
       try { await localDb.user.claimLegacyData(result.user.id); }
-      catch { notice = 'Signed in. Older unassigned records could not be linked and were left unchanged.'; }
+      catch { notice ??= 'Signed in. Older unassigned records could not be linked and were left unchanged.'; }
       try { await persistSession(result.user.id, rememberMe); }
       catch { notice = 'Signed in for this session, but the saved sign-in preference could not be updated. You may need to sign in again after closing HouseLog.'; }
       if (sequenceRef.current !== operation) return { success: false, error: 'Sign-in was cancelled. Please try again.' };
       queryClient.clear();
+      setProfileSettings(savedProfileSettings);
+      setPendingProfileEmail(null);
       setSession({ status: 'signedIn', user: result.user, ...(notice ? { notice } : {}) });
       return { success: true, passwordUpgradePending: result.passwordUpgradePending };
     } catch {
@@ -157,11 +219,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const result = await localDb.user.register(fullName, email, password);
       if (!result.success) return { success: false, error: result.error };
       let notice = 'HouseLog stores this profile and its financial records on this device. There is no cloud account recovery.';
-      try { await localDb.user.claimLegacyData(result.user.id); } catch { /* Existing unassigned records remain untouched. */ }
+      const initialSettings = { ...DEFAULT_PROFILE_SETTINGS };
+      try { await appSettings.setProfile(result.user.id, initialSettings); }
+      catch { notice += ' Profile settings could not be saved; secure settings may need review.'; }
+      try { await localDb.user.claimLegacyData(result.user.id); }
+      catch { notice += ' Older unassigned records could not be linked and were left unchanged.'; }
       try { await persistSession(result.user.id, rememberMe); }
       catch { notice += ' This profile was created successfully, but the sign-in preference could not be saved. Continue this session or sign in again later.'; }
       if (sequenceRef.current !== operation) return { success: false, error: 'Sign-up was cancelled. Your profile may already exist; try signing in.' };
       queryClient.clear();
+      setProfileSettings(initialSettings);
+      setPendingProfileEmail(null);
       setSession({ status: 'signedIn', user: result.user, notice });
       return { success: true, notice };
     } catch {
@@ -170,18 +238,53 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [queryClient, setSession]);
 
   const signOut = useCallback(async () => {
+    const current = sessionRef.current;
+    const ownerId = current.status === 'signedIn' || current.status === 'locked' ? current.user.id : null;
     ++sequenceRef.current;
     operationRef.current = false;
     queryClient.clear();
     setSession({ status: 'signedOut' });
-    try {
-      await persistSignedOut();
-    } catch {
-      setSession({ status: 'signedOut', notice: 'You are signed out on this screen, but secure storage could not confirm removal of the saved profile. Reopen HouseLog and verify sign-in is required.' });
-      // Try clearing the saved identifier even when the tombstone write failed.
-      if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(SESSION_KEY).catch(() => undefined);
+    const failures: string[] = [];
+    try { await persistSignedOut(); }
+    catch {
+      failures.push('Secure storage could not confirm removal of the saved profile. Reopen HouseLog and verify sign-in is required.');
+      if (Platform.OS !== 'web') {
+        try { await SecureStore.deleteItemAsync(SESSION_KEY); }
+        catch { failures.push('Secure storage also rejected the session removal attempt; this device may restore the saved session when reopened.'); }
+      }
     }
+    if (ownerId) {
+      try { await cancelProfileReminders(ownerId); }
+      catch (error) { failures.push(error instanceof Error ? error.message : 'Some local reminders could not be removed.'); }
+    }
+    setProfileSettings({ ...DEFAULT_PROFILE_SETTINGS });
+    setSession({ status: 'signedOut', ...(failures.length ? { notice: failures.join(' ') } : {}) });
   }, [queryClient, setSession]);
+
+  const updateAppearance = useCallback(async (next: AppearancePreference) => {
+    await appSettings.setAppearance(next);
+    setColorScheme(next);
+    setAppearance(next);
+  }, [setColorScheme]);
+
+  const updateProfileSettings = useCallback(async (patch: Partial<ProfileSettings>) => {
+    const current = sessionRef.current;
+    if (current.status !== 'signedIn') throw new Error('Unlock this profile before changing its settings.');
+    const next = { ...profileSettings, ...patch };
+    if (!next.appLockEnabled) next.biometricUnlockEnabled = false;
+    await appSettings.setProfile(current.user.id, next);
+    setProfileSettings(next);
+    if (!next.remindersEnabled) await cancelProfileReminders(current.user.id);
+  }, [profileSettings]);
+
+  const switchLocalProfile = useCallback(async (profileId: string) => {
+    const current = sessionRef.current;
+    if (current.status !== 'signedIn') throw new Error('Unlock this profile before switching.');
+    const profiles = await localDb.user.findMany();
+    const selected = resolveProfileSwitchTarget(profiles, current.user.id, profileId);
+    setPendingProfileEmail(selected.email);
+    await signOut();
+  }, [signOut]);
 
   const lock = useCallback(() => {
     const current = sessionRef.current;
@@ -203,7 +306,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (locked.status !== 'locked') return { success: false, error: 'The profile is no longer waiting to be unlocked.' };
     const valid = await localDb.user.verifyPassword(locked.user.id, password);
     if (!valid) return { success: false, error: 'Password could not unlock this local profile.' };
-    if (sessionRef.current !== locked) return { success: false, error: 'The profile changed. Please try again.' };
+    const latest = sessionRef.current;
+    if (latest.status !== 'locked' || latest.user.id !== locked.user.id) {
+      return { success: false, error: 'The active profile changed. Please reopen its unlock screen and try again.' };
+    }
     queryClient.clear();
     setSession({ status: 'signedIn', user: locked.user });
     return { success: true };
@@ -232,9 +338,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const sessionNotice = session.status === 'signedIn' || session.status === 'locked' || session.status === 'signedOut' ? session.notice === restoreError ? null : session.notice ?? null : null;
     return {
       session, status: session.status, user: currentUser, isLoading: session.status === 'restoring', restoreError, sessionNotice,
+      appearance, profileSettings, pendingProfileEmail, updateAppearance, updateProfileSettings, switchLocalProfile,
       signIn, signUp, signOut, lock, unlockWithPassword, unlockAfterBiometric, changePassword, updateProfileName, listProfiles,
     };
-  }, [session, signIn, signUp, signOut, lock, unlockWithPassword, unlockAfterBiometric, changePassword, updateProfileName, listProfiles]);
+  }, [session, signIn, signUp, signOut, lock, unlockWithPassword, unlockAfterBiometric, changePassword, updateProfileName, listProfiles, appearance, profileSettings, pendingProfileEmail, updateAppearance, updateProfileSettings, switchLocalProfile]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

@@ -4,10 +4,10 @@ import { useAuth } from '../../src/context/AuthContext';
 import {
   calculateExpenseBucketTotals,
   calculateFinancialReport,
+  transactionDateTimestamp,
   type FinancialBucket,
   type FinancialReportRow,
 } from '../../src/finance/reporting';
-import { calculateAccountBalances } from '../../src/finance/balances';
 import { calculateDebtPositions } from '../../src/finance/debtPosition';
 import { calculateNetWorthPositions, type NetWorthPosition } from '../../src/finance/assetsInvestments';
 import { calculateBudgetSnapshot, type BudgetSnapshot } from '../../src/finance/budgeting';
@@ -54,7 +54,6 @@ export interface DashboardMetrics {
 }
 
 type Account = Awaited<ReturnType<typeof localDb.account.findMany>>[number];
-type BalanceRow = Awaited<ReturnType<typeof localDb.transaction.findBalanceRows>>[number];
 type AccountReservation = Awaited<ReturnType<typeof localDb.savings.reservationsByAccount>>[number];
 
 function toSafeNumber(value: bigint, label: string): number {
@@ -106,7 +105,7 @@ function chartBuckets(today: Date): { ranges: FinancialBucket[]; labels: Record<
 }
 
 function summarizeNetWorth(
-  accounts: readonly ReturnType<typeof calculateAccountBalances>[number][],
+  accounts: Awaited<ReturnType<typeof localDb.account.findManyWithBalances>>,
   assets: Awaited<ReturnType<typeof localDb.assets.list>>,
   holdings: Awaited<ReturnType<typeof localDb.holdings.list>>,
   debts: Awaited<ReturnType<typeof localDb.obligations.debts.list>>,
@@ -156,7 +155,7 @@ function calculateBudgetSummaries(
   const grouped = new Map<string, typeof budgets>();
   for (const budget of budgets) grouped.set(budget.currency, [...(grouped.get(budget.currency) ?? []), budget]);
   const periodRows = rows.filter((row) => {
-    const timestamp = new Date(row.date).getTime();
+    const timestamp = transactionDateTimestamp(row.date);
     return timestamp >= new Date(startDate).getTime() && timestamp < new Date(endDate).getTime();
   });
   return [...grouped].map(([currency, allocations]) => {
@@ -192,9 +191,8 @@ export function useDashboardMetrics(reportDate: Date) {
       const budgetRangeStart = new Date(`${periodStart}T00:00:00.000Z`);
       const budgetRangeEnd = new Date(`${periodEnd}T00:00:00.000Z`);
       const queryEnd = reportQueryEnd > budgetRangeEnd ? reportQueryEnd : budgetRangeEnd;
-      const [accounts, balanceRows, reportRows, activities, assets, holdings, debts, budgetRows, goals, emergencyFund, bills, reservations] = await Promise.all([
-        localDb.account.findMany(user.id, { includeArchived: true }),
-        localDb.transaction.findBalanceRows(user.id),
+      const [accountBalances, reportRows, activities, assets, holdings, debts, budgetRows, goals, emergencyFund, bills, reservations] = await Promise.all([
+        localDb.account.findManyWithBalances(user.id, { includeArchived: true }),
         localDb.transaction.findReportRows({ ownerId: user.id, startDate: reportQueryStart.toISOString(), endDate: queryEnd.toISOString() }),
         localDb.transaction.findRecentActivity(user.id, 5),
         localDb.assets.list(user.id),
@@ -206,13 +204,8 @@ export function useDashboardMetrics(reportDate: Date) {
         localDb.obligations.bills.upcoming(user.id, dayKey),
         localDb.savings.reservationsByAccount(user.id),
       ]);
-      const balanceInputs: Parameters<typeof calculateAccountBalances>[1] = balanceRows.map((row: BalanceRow) => ({
-        id: row.id, ownerId: row.ownerId, amountMinor: row.amountMinor, type: row.type,
-        accountId: row.accountId, toAccountId: row.toAccountId, reversalOfId: row.reversalOfId,
-      }));
-      const accountBalances = calculateAccountBalances(accounts, balanceInputs);
       const balancesById = new Map(accountBalances.map((balance) => [balance.id, balance]));
-      const liquidityAccounts = accounts.map((account) => {
+      const liquidityAccounts = accountBalances.map((account) => {
         const balance = balancesById.get(account.id);
         if (!balance) throw new Error(`Account ${account.id} has no calculated balance.`);
         return { id: account.id, currency: balance.currency, type: account.type, archivedAt: account.archivedAt, balanceMinor: balance.balanceMinor };
@@ -250,7 +243,7 @@ export function useDashboardMetrics(reportDate: Date) {
           return [{ id: bill.id, name: bill.name, currency,
             remainingMinor: toSafeNumber(remaining, 'Remaining bill amount'), dueDate: bill.dueDate, status }];
         }).slice(0, 3);
-      const hasAnyFinancialRecords = accounts.length > 0 || balanceRows.length > 0 || assets.length > 0 || holdings.length > 0 || debts.length > 0;
+      const hasAnyFinancialRecords = accountBalances.length > 0 || assets.length > 0 || holdings.length > 0 || debts.length > 0;
       return {
         incomeMinor: monthReport.incomeMinor, expenseMinor: monthReport.expenseMinor,
         netMinor: monthReport.netMinor, excludedCurrencies: monthReport.excludedCurrencies,

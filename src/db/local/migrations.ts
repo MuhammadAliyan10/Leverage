@@ -1,6 +1,6 @@
 import { resolveClassification } from '../../finance/domain.ts';
 
-export const LOCAL_DATABASE_VERSION = 7;
+export const LOCAL_DATABASE_VERSION = 8;
 
 export interface MigrationDatabase {
   execAsync(source: string): Promise<void>;
@@ -130,6 +130,150 @@ async function migrateOnboardingStateV7(database: MigrationDatabase): Promise<vo
     CREATE INDEX IF NOT EXISTS ProfileSetup_completed_idx ON ProfileSetup(completedAt);
     CREATE INDEX IF NOT EXISTS AuthLoginAttempt_blocked_idx ON AuthLoginAttempt(blockedUntil);
   `);
+}
+
+/** Hardens legacy cash-ledger rows without rebuilding tables or rewriting ambiguous dates. */
+async function migrateDatabaseHardeningV8(database: MigrationDatabase): Promise<void> {
+  const dates = await database.getAllAsync<{ id: string; date: string }>(
+    'SELECT id,date FROM "Transaction" ORDER BY id',
+  );
+  for (const row of dates) {
+    // SQLite datetime('now') values are UTC by SQLite contract. Normalize only this
+    // recognized legacy representation; retain date-only and timezone-ambiguous values.
+    const match = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d{1,3})?$/.exec(row.date);
+    if (match) {
+      const milliseconds = (match[3] ?? '.000').padEnd(4, '0');
+      const normalized = `${match[1]}T${match[2]}${milliseconds}Z`;
+      if (!Number.isFinite(Date.parse(normalized))) {
+        throw new Error(`Transaction ${row.id} has an invalid legacy timestamp; migration was rolled back.`);
+      }
+      await database.runAsync('UPDATE "Transaction" SET date=? WHERE id=?', [normalized, row.id]);
+      continue;
+    }
+    // Explicit-offset ISO timestamps have an unambiguous represented instant.
+    if (/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(row.date)) {
+      const instant = Date.parse(row.date);
+      if (!Number.isFinite(instant)) throw new Error(`Transaction ${row.id} has an invalid legacy timestamp; migration was rolled back.`);
+      await database.runAsync('UPDATE "Transaction" SET date=? WHERE id=?', [new Date(instant).toISOString(), row.id]);
+    }
+  }
+
+  await database.execAsync(`
+    CREATE INDEX IF NOT EXISTS Transaction_owner_correction_idx ON "Transaction"(ownerId, correctionOfId);
+
+    CREATE TRIGGER IF NOT EXISTS Account_insert_integrity_guard
+    BEFORE INSERT ON Account
+    WHEN NEW.ownerId IS NULL
+      OR NOT EXISTS (SELECT 1 FROM User u WHERE u.id=NEW.ownerId)
+      OR typeof(NEW.balanceMinor)!='integer'
+      OR NEW.balanceMinor < -9007199254740991 OR NEW.balanceMinor > 9007199254740991
+      OR NEW.currency IS NULL OR NEW.currency NOT IN ('PKR','USD','GBP','EUR','AED','SAR')
+    BEGIN SELECT RAISE(ABORT, 'account violates profile, balance, or currency integrity'); END;
+
+    CREATE TRIGGER IF NOT EXISTS Account_update_integrity_guard
+    BEFORE UPDATE OF balanceMinor,currency ON Account
+    WHEN typeof(NEW.balanceMinor)!='integer'
+      OR NEW.balanceMinor < -9007199254740991 OR NEW.balanceMinor > 9007199254740991
+      OR NEW.currency IS NULL OR NEW.currency NOT IN ('PKR','USD','GBP','EUR','AED','SAR')
+    BEGIN SELECT RAISE(ABORT, 'account violates balance or currency integrity'); END;
+
+    CREATE TRIGGER IF NOT EXISTS Account_history_currency_guard
+    BEFORE UPDATE OF balanceMinor,currency ON Account
+    WHEN (NEW.balanceMinor IS NOT OLD.balanceMinor OR NEW.currency IS NOT OLD.currency)
+      AND EXISTS (SELECT 1 FROM "Transaction" t WHERE t.ownerId=OLD.ownerId AND (t.accountId=OLD.id OR t.toAccountId=OLD.id))
+    BEGIN SELECT RAISE(ABORT, 'opening balance and currency are locked after transaction history exists'); END;
+
+    CREATE TRIGGER IF NOT EXISTS Transaction_insert_integrity_guard
+    BEFORE INSERT ON "Transaction"
+    WHEN NEW.ownerId IS NULL
+      OR NOT EXISTS (SELECT 1 FROM User u WHERE u.id=NEW.ownerId)
+      OR NEW.accountId IS NULL
+      OR NEW.type IS NULL OR NEW.type NOT IN ('Income','Expense','Transfer','Refund','Reversal')
+      OR typeof(NEW.amountMinor) != 'integer'
+      OR NEW.amountMinor <= 0
+      OR NEW.amountMinor > 9007199254740991
+      OR NEW.amount IS NULL
+      OR ABS(NEW.amount - (NEW.amountMinor / 100.0)) > 0.000000001
+      OR (NEW.type='Transfer' AND (NEW.toAccountId IS NULL OR NEW.toAccountId=NEW.accountId))
+      OR (NEW.type IN ('Income','Expense','Refund') AND NEW.toAccountId IS NOT NULL)
+      OR (NEW.type IN ('Income','Expense','Transfer') AND NEW.reversalOfId IS NOT NULL)
+      OR (NEW.type='Refund' AND (NEW.reversalOfId IS NULL OR NEW.correctionOfId IS NOT NULL))
+      OR (NEW.type='Reversal' AND (NEW.reversalOfId IS NULL OR NEW.correctionOfId IS NOT NULL))
+      OR (NEW.sourceAmountMinor IS NOT NULL AND (typeof(NEW.sourceAmountMinor)!='integer' OR NEW.sourceAmountMinor<=0 OR NEW.sourceAmountMinor>9007199254740991))
+      OR (NEW.sourceCurrency IS NOT NULL AND NEW.sourceCurrency NOT IN ('PKR','USD','GBP','EUR','AED','SAR'))
+      OR NEW.date IS NULL
+      OR (NEW.date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*Z'
+          AND NEW.date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+      OR NOT EXISTS (SELECT 1 FROM Account a WHERE a.id=NEW.accountId AND a.ownerId=NEW.ownerId)
+      OR (NEW.toAccountId IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM Account a WHERE a.id=NEW.toAccountId AND a.ownerId=NEW.ownerId
+          AND a.currency=(SELECT source.currency FROM Account source WHERE source.id=NEW.accountId AND source.ownerId=NEW.ownerId)
+      ))
+      OR (NEW.reversalOfId IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM "Transaction" original WHERE original.id=NEW.reversalOfId AND original.ownerId=NEW.ownerId
+          AND ((NEW.type='Refund' AND original.type='Expense'
+            AND (SELECT currency FROM Account WHERE id=original.accountId AND ownerId=original.ownerId)
+                = (SELECT currency FROM Account WHERE id=NEW.accountId AND ownerId=NEW.ownerId)
+            AND NEW.amountMinor <= original.amountMinor - COALESCE((
+            SELECT SUM(refund.amountMinor) FROM "Transaction" refund WHERE refund.ownerId=NEW.ownerId AND refund.type='Refund' AND refund.reversalOfId=original.id
+          ),0)) OR (NEW.type='Reversal' AND original.type IN ('Income','Expense','Transfer') AND NEW.amountMinor=original.amountMinor
+            AND NEW.accountId=original.accountId AND NEW.toAccountId IS original.toAccountId
+            AND NOT EXISTS (SELECT 1 FROM "Transaction" prior WHERE prior.ownerId=NEW.ownerId AND prior.type='Reversal' AND prior.reversalOfId=original.id)
+          ))
+      ))
+      OR (NEW.correctionOfId IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM "Transaction" original WHERE original.id=NEW.correctionOfId AND original.ownerId=NEW.ownerId
+          AND NEW.type IN ('Income','Expense','Transfer')
+      ))
+    BEGIN SELECT RAISE(ABORT, 'transaction violates cash-ledger integrity'); END;
+
+    CREATE TRIGGER IF NOT EXISTS Transaction_append_only_delete
+    BEFORE DELETE ON "Transaction"
+    BEGIN SELECT RAISE(ABORT, 'posted transaction history is append-only'); END;
+
+    CREATE TRIGGER IF NOT EXISTS Transaction_financial_update_guard
+    BEFORE UPDATE ON "Transaction"
+    WHEN NOT (
+      (OLD.ownerId IS NULL AND NEW.ownerId IS NOT NULL
+        AND NEW.id IS OLD.id AND NEW.amount IS OLD.amount AND NEW.amountMinor IS OLD.amountMinor
+        AND NEW.type IS OLD.type AND NEW.category IS OLD.category AND NEW.categoryId IS OLD.categoryId
+        AND NEW.classificationId IS OLD.classificationId AND NEW.accountId IS OLD.accountId
+        AND NEW.toAccountId IS OLD.toAccountId AND NEW.date IS OLD.date AND NEW.note IS OLD.note
+        AND NEW.sourceName IS OLD.sourceName AND NEW.paymentMethod IS OLD.paymentMethod
+        AND NEW.sourceAmountMinor IS OLD.sourceAmountMinor AND NEW.sourceCurrency IS OLD.sourceCurrency
+        AND NEW.exchangeRate IS OLD.exchangeRate AND NEW.referenceNumber IS OLD.referenceNumber
+        AND NEW.taxStatus IS OLD.taxStatus AND NEW.taxYear IS OLD.taxYear
+        AND NEW.reversalOfId IS OLD.reversalOfId AND NEW.correctionOfId IS OLD.correctionOfId
+        AND EXISTS (SELECT 1 FROM User u WHERE u.id=NEW.ownerId))
+      OR (NEW.synced IS NOT OLD.synced
+        AND NEW.id IS OLD.id AND NEW.ownerId IS OLD.ownerId AND NEW.amount IS OLD.amount
+        AND NEW.amountMinor IS OLD.amountMinor AND NEW.type IS OLD.type AND NEW.category IS OLD.category
+        AND NEW.categoryId IS OLD.categoryId AND NEW.classificationId IS OLD.classificationId
+        AND NEW.accountId IS OLD.accountId AND NEW.toAccountId IS OLD.toAccountId
+        AND NEW.date IS OLD.date AND NEW.note IS OLD.note AND NEW.sourceName IS OLD.sourceName
+        AND NEW.paymentMethod IS OLD.paymentMethod AND NEW.sourceAmountMinor IS OLD.sourceAmountMinor
+        AND NEW.sourceCurrency IS OLD.sourceCurrency AND NEW.exchangeRate IS OLD.exchangeRate
+        AND NEW.referenceNumber IS OLD.referenceNumber AND NEW.taxStatus IS OLD.taxStatus
+        AND NEW.taxYear IS OLD.taxYear AND NEW.reversalOfId IS OLD.reversalOfId
+        AND NEW.correctionOfId IS OLD.correctionOfId)
+    )
+    BEGIN SELECT RAISE(ABORT, 'posted transaction history is immutable'); END;
+
+    CREATE TRIGGER IF NOT EXISTS Transaction_account_update_guard_v8
+    BEFORE UPDATE OF ownerId,accountId,toAccountId ON "Transaction"
+    WHEN NEW.ownerId IS NOT NULL AND (
+      NOT EXISTS (SELECT 1 FROM User u WHERE u.id=NEW.ownerId)
+      OR NEW.accountId IS NULL
+      OR NOT EXISTS (SELECT 1 FROM Account a WHERE a.id=NEW.accountId AND a.ownerId=NEW.ownerId)
+      OR (NEW.toAccountId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM Account a WHERE a.id=NEW.toAccountId AND a.ownerId=NEW.ownerId))
+    )
+    BEGIN SELECT RAISE(ABORT, 'transaction account is unavailable to this profile'); END;
+  `);
+
+  const invalidLinks = await database.getFirstAsync<CountRow>(`SELECT COUNT(*) AS count FROM "Transaction" t
+    WHERE t.reversalOfId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM "Transaction" o WHERE o.id=t.reversalOfId AND o.ownerId=t.ownerId)
+       OR t.correctionOfId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM "Transaction" o WHERE o.id=t.correctionOfId AND o.ownerId=t.ownerId)`);
+  if ((invalidLinks?.count ?? 0) > 0) throw new Error('Legacy transaction links cross profiles or reference missing records; migration was rolled back.');
 }
 
 async function migrateLegacyColumns(database: MigrationDatabase): Promise<void> {
@@ -942,15 +1086,18 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
     if (currentVersion < 5) await migrateObligationAccountingV5(database);
     if (currentVersion < 6) await migrateAssetsInvestmentsV6(database);
     if (currentVersion < 7) await migrateOnboardingStateV7(database);
+    if (currentVersion < 8) await migrateDatabaseHardeningV8(database);
     // No server acknowledgement can be verified for the legacy sync flags.
-    await database.execAsync('UPDATE Account SET synced = 0');
-    await database.execAsync('UPDATE "Transaction" SET synced = 0');
+    await database.execAsync('UPDATE Account SET synced = 0 WHERE synced != 0');
+    await database.execAsync('UPDATE "Transaction" SET synced = 0 WHERE synced != 0');
     await database.execAsync('CREATE INDEX IF NOT EXISTS Account_owner_idx ON Account(ownerId)');
     await database.execAsync('CREATE INDEX IF NOT EXISTS Transaction_owner_date_idx ON "Transaction"(ownerId, date)');
     await database.execAsync('CREATE INDEX IF NOT EXISTS Transaction_classification_idx ON "Transaction"(ownerId, classificationId, date)');
 
     const integrity = await database.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
     if (integrity?.integrity_check !== 'ok') throw new Error('Local database integrity check failed; migration was rolled back.');
+    const foreignKeyViolations = await database.getAllAsync<{ table: string; rowid: number | null; parent: string; fkid: number }>('PRAGMA foreign_key_check');
+    if (foreignKeyViolations.length > 0) throw new Error('Local database foreign-key integrity check failed; migration was rolled back.');
     const accountCountAfter = await database.getFirstAsync<CountRow>('SELECT COUNT(*) AS count FROM Account');
     const transactionCountAfter = await database.getFirstAsync<CountRow>('SELECT COUNT(*) AS count FROM "Transaction"');
     if (accountCountBefore?.count !== accountCountAfter?.count || transactionCountBefore?.count !== transactionCountAfter?.count) {
