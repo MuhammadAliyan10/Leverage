@@ -1,30 +1,30 @@
 {
   "expo": {
-    "name": "HouseLog",
+    "name": "Mizan",
     "slug": "HouseLog",
+    "description": "Understand and manage your money with Mizan.",
+    "primaryColor": "#635BFF",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/mizan-icon.png",
     "scheme": "houselog",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon",
       "bundleIdentifier": "com.anonymous.HouseLog"
     },
     "android": {
-      "versionCode": 1,
+      "versionCode": 2,
+      "allowBackup": false,
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "backgroundColor": "#635BFF",
+        "foregroundImage": "./assets/images/mizan-icon.png"
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.houselog.finance"
     },
     "web": {
       "output": "single",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/mizan-icon.png"
     },
     "plugins": [
       [
@@ -39,16 +39,34 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
-          "image": "./assets/images/splash-icon.png",
+          "backgroundColor": "#635BFF",
+          "image": "./assets/images/mizan-icon.png",
           "imageWidth": 76
         }
       ],
       "expo-secure-store",
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "expo-sqlite",
+        {
+          "useSQLCipher": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {
+        "headers": {
+          "Cross-Origin-Embedder-Policy": "credentialless",
+          "Cross-Origin-Opener-Policy": "same-origin"
+        }
+      },
+      "eas": {
+        "projectId": "61392a1b-d326-4b6a-805a-7ddcc1416e79"
+      }
+    },
+    "owner": "muhammadaliyan10"
   }
 }

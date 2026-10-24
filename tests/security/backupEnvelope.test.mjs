@@ -9,6 +9,9 @@ import {
   createBackupEnvelope,
   createRecoveryKey,
   openBackupEnvelope,
+  createPassphraseBackupEnvelope,
+  openPassphraseBackupEnvelope,
+  assertBackupSchemaVersion,
 } from '../../src/security/backupEnvelope.ts';
 import { createProfileKeyManager, keyFromHex } from '../../src/security/keyMaterial.ts';
 
@@ -52,6 +55,33 @@ test('wrong key, damaged ciphertext, wrong profile, and incompatible schema fail
   await assert.rejects(openBackupEnvelope(nativeAlgorithmAdapter, key, 'owner-a', 2, backup), /incompatible/);
   await assert.rejects(openBackupEnvelope(nativeAlgorithmAdapter, key, 'owner-a', 1, backup.subarray(0, 12)), /Invalid backup size/);
   assert.throws(() => keyFromHex('short'), /Invalid 256-bit/);
+});
+
+test('passphrase backups use a salted KDF and reject wrong passphrases, tampering, profiles, and schemas', async () => {
+  const bytes = new Uint8Array([83, 81, 76, 0, 1, 2, 3, 4]);
+  const random = async (count) => randomBytes(count);
+  const first = await createPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', 'owner-a', 8, bytes, random);
+  const second = await createPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', 'owner-a', 8, bytes, random);
+  assert.notDeepEqual(Buffer.from(first), Buffer.from(second), 'independent salt and nonce produce different encrypted backups');
+  assert.equal(Buffer.from(first).includes(bytes), false, 'raw SQLite bytes are not present in the portable backup');
+  const restored = await openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', null, 8, first);
+  assert.deepEqual(Buffer.from(restored.database), Buffer.from(bytes));
+  assert.equal(restored.profileId, 'owner-a');
+  assert.equal(restored.schemaVersion, 8);
+  await assert.rejects(openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'a different backup phrase', null, 8, first), /incorrect or .*damaged/);
+  await assert.rejects(openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', 'owner-b', 8, first), /different Mizan profile/);
+  await assert.rejects(openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', null, 7, first), /incompatible/);
+  const older = await createPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', 'owner-a', 8, bytes, random);
+  assert.equal((await openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', null, 11, older)).schemaVersion, 8,
+    'a supported older backup can reach the isolated migration path');
+  assert.doesNotThrow(() => assertBackupSchemaVersion(11, 11, 11), 'current schema backups are accepted');
+  assert.doesNotThrow(() => assertBackupSchemaVersion(8, 8, 11), 'older schema backups can be migrated');
+  assert.throws(() => assertBackupSchemaVersion(8, 11, 11), /incompatible/, 'envelope metadata must match the actual SQLite image');
+  assert.throws(() => assertBackupSchemaVersion(12, 12, 11), /incompatible/, 'a newer database is never downgraded');
+  await assert.rejects(createPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'short', 'owner-a', 8, bytes, random), /at least 12/);
+  const damaged = first.slice();
+  damaged[damaged.length - 1] ^= 1;
+  await assert.rejects(openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', null, 8, damaged), /incorrect or .*damaged/);
 });
 
 test('device key manager creates once, isolates profiles, and refuses missing or corrupted keys', async () => {

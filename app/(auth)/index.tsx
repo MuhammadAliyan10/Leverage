@@ -4,18 +4,20 @@ import {
   View,
   Text,
   TextInput,
+  Image,
   TouchableOpacity,
   Pressable,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
 } from 'react-native';
-import { Check, Eye, EyeOff, LockKeyhole, Mail, ShieldCheck, UserRound, WalletCards } from 'lucide-react-native';
+import { Check, Eye, EyeOff, LockKeyhole, Mail, ShieldCheck, UserRound } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Controller, useForm, useWatch } from 'react-hook-form';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { zodResolver } from '@hookform/resolvers/zod';
 import Toast from 'react-native-toast-message';
+import { getLocalAuthFailureMessage } from '../../src/security/localAuthError';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { useAuth } from '../../src/context/AuthContext';
@@ -32,6 +34,7 @@ const AUTH_BUTTON_CLASS = 'houselog-button w-full flex-row items-center justify-
 
 export default function AuthScreen() {
   const params = useLocalSearchParams<{ email?: string | string[] }>();
+  const router = useRouter();
   const [mode, setMode] = useState<Mode>('signin');
   const [rememberMe, setRememberMe] = useState(true);
   const [showSignInPassword, setShowSignInPassword] = useState(false);
@@ -87,8 +90,8 @@ export default function AuthScreen() {
     let result: { success: boolean; error?: string; passwordUpgradePending?: boolean };
     try {
       result = await signIn(data.email, data.password, rememberMe);
-    } catch {
-      result = { success: false, error: 'Local sign in could not complete. Check device storage and try again.' };
+    } catch (error) {
+      result = { success: false, error: getLocalAuthFailureMessage(error) };
     }
     if (!result.success) {
       if (result.error?.toLowerCase().includes('email') || result.error?.toLowerCase().includes('account')) {
@@ -157,8 +160,8 @@ export default function AuthScreen() {
         >
           <View className="w-full max-w-[460px] self-center py-5">
             <View className="mb-7 h-32 items-center justify-center">
-              <View className="relative h-24 w-24 items-center justify-center rounded-full bg-primary/10">
-                <WalletCards size={46} color={PRIMARY_COLOR} strokeWidth={1.8} />
+              <View className="relative h-24 w-24 items-center justify-center rounded-2xl bg-primary/10">
+                <Image source={require('../../assets/images/mizan-icon.png')} className="h-20 w-20 rounded-2xl" accessibilityLabel="Mizan app logo" />
                 <View className="absolute -bottom-4 -right-4 h-10 w-10 items-center justify-center rounded-full border-[3px] border-gray-50 bg-white shadow-md dark:border-neutral-950 dark:bg-neutral-900">
                   <ShieldCheck size={21} color={PRIMARY_COLOR} strokeWidth={2} />
                 </View>
@@ -170,7 +173,7 @@ export default function AuthScreen() {
               {mode === 'signin' ? 'Login' : 'Register'}
             </Text>
             <Text className="font-body mb-5 mt-1 text-sm text-[#66717e] dark:text-neutral-300">
-              {mode === 'signin' ? 'Please sign in to continue.' : 'Create your HouseLog account to get started.'}
+              {mode === 'signin' ? 'Sign in to your profile on this device.' : 'Create your Mizan profile to get started.'}
             </Text>
 
             {restoreError && (
@@ -358,8 +361,11 @@ export default function AuthScreen() {
               </TouchableOpacity>
             </View>
             <Text className="font-body mt-5 text-center text-xs text-gray-400 dark:text-neutral-500">
-              HouseLog keeps your financial records on this device.
+              Mizan keeps profiles and financial records separately on each device. A browser profile does not automatically sync to Android.
             </Text>
+            <TouchableOpacity accessibilityRole="button" onPress={() => router.push('/restore' as never)} className="mt-4 min-h-11 items-center justify-center">
+              <Text className="font-body text-sm font-semibold text-primary">Restore an encrypted backup</Text>
+            </TouchableOpacity>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>

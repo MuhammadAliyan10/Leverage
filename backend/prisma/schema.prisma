@@ -1,0 +1,361 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id              String               @id @default(cuid())
+  name            String
+  email           String               @unique
+  emailVerified   Boolean              @default(false)
+  image           String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  syncRevision    BigInt               @default(0)
+  sessions        Session[]
+  authAccounts    AuthAccount[]
+  financeAccounts FinanceAccount[]
+  transactions    FinanceTransaction[]
+  budgets         Budget[]
+  savingsGoals    SavingsGoal[]
+  savingsGoalEvents SavingsGoalEvent[]
+  emergencyFundConfig EmergencyFundConfig?
+  emergencyFundEvents EmergencyFundEvent[]
+  recurringSchedules RecurringSchedule[]
+  scheduleOccurrences ScheduleOccurrence[]
+  financeDomainRecords FinanceDomainRecord[]
+  mutations       MutationReceipt[]
+  changes         ChangeLog[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model AuthAccount {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+model RateLimit {
+  id          String @id @default(cuid())
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+}
+
+model FinanceAccount {
+  id                   String               @default(uuid())
+  userId               String
+  name                 String
+  type                 String
+  currency             String
+  openingBalanceMinor  BigInt               @default(0)
+  archivedAt           DateTime?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  revision             Int                  @default(1)
+  user                 User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  transactions         FinanceTransaction[] @relation("FromAccount")
+  transferDestinations FinanceTransaction[] @relation("ToAccount")
+  savingsGoalEvents    SavingsGoalEvent[]
+  emergencyFundEvents  EmergencyFundEvent[]
+  recurringSchedulesFrom RecurringSchedule[] @relation("ScheduleFromAccount")
+  recurringSchedulesTo   RecurringSchedule[] @relation("ScheduleToAccount")
+
+  @@id([id, userId])
+  @@index([userId, archivedAt, createdAt])
+}
+
+model FinanceTransaction {
+  id                String               @default(uuid())
+  userId            String
+  amountMinor       BigInt
+  currency          String
+  type              String
+  classificationId  String
+  categoryLabel     String
+  accountId         String?
+  toAccountId       String?
+  occurredAt        DateTime
+  note              String?
+  paymentMethod     String?
+  sourceName        String?
+  sourceAmountMinor BigInt?
+  sourceCurrency    String?
+  exchangeRate      String?
+  referenceNumber   String?
+  taxStatus         String               @default("unreviewed")
+  taxYear           Int?
+  refundOfId        String?
+  reversalOfId      String?
+  correctionOfId    String?
+  createdAt         DateTime             @default(now())
+  user              User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  account           FinanceAccount?      @relation("FromAccount", fields: [accountId, userId], references: [id, userId], onDelete: Restrict)
+  toAccount         FinanceAccount?      @relation("ToAccount", fields: [toAccountId, userId], references: [id, userId], onDelete: Restrict)
+  idempotency       MutationReceipt?
+  refundOf          FinanceTransaction?  @relation("TransactionRefunds", fields: [refundOfId, userId], references: [id, userId], onDelete: Restrict)
+  refunds           FinanceTransaction[] @relation("TransactionRefunds")
+  reversalOf        FinanceTransaction?  @relation("TransactionReversals", fields: [reversalOfId, userId], references: [id, userId], onDelete: Restrict)
+  reversals         FinanceTransaction[] @relation("TransactionReversals")
+  correctionOf      FinanceTransaction?  @relation("TransactionCorrections", fields: [correctionOfId, userId], references: [id, userId], onDelete: Restrict)
+  corrections       FinanceTransaction[] @relation("TransactionCorrections")
+  savingsGoalEvents SavingsGoalEvent[] @relation("SavingsEventTransaction")
+  emergencyFundEvents EmergencyFundEvent[] @relation("EmergencyEventTransaction")
+  scheduleOccurrences  ScheduleOccurrence[]
+
+  @@id([id, userId])
+  @@index([userId, occurredAt(sort: Desc), id(sort: Desc)])
+  @@index([userId, type, occurredAt(sort: Desc)])
+  @@index([userId, classificationId, occurredAt(sort: Desc)])
+  @@index([userId, refundOfId, occurredAt])
+  @@index([userId, reversalOfId])
+  @@index([userId, correctionOfId])
+}
+
+model Budget {
+  id             String    @default(uuid())
+  userId         String
+  categoryId     String
+  amountMinor    BigInt
+  currency       String
+  periodStart    DateTime  @db.Date
+  periodEnd      DateTime  @db.Date
+  rolloverPolicy String
+  revision       Int       @default(1)
+  changeRevision Int       @default(1)
+  supersedesId   String?
+  supersededAt   DateTime?
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  user           User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  supersedes     Budget?   @relation("BudgetRevisions", fields: [supersedesId, userId], references: [id, userId], onDelete: Restrict)
+  revisions      Budget[]  @relation("BudgetRevisions")
+
+  @@id([id, userId])
+  @@unique([userId, categoryId, currency, periodStart, revision])
+  @@index([userId, periodStart, periodEnd, currency])
+  @@index([userId, categoryId, currency, periodStart, revision(sort: Desc)])
+}
+
+model SavingsGoal {
+  id          String             @default(uuid())
+  userId      String
+  name        String
+  targetMinor BigInt
+  currency    String
+  targetDate  DateTime?          @db.Date
+  status      String             @default("active")
+  revision    Int                @default(1)
+  completedAt DateTime?
+  archivedAt DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  user        User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  events      SavingsGoalEvent[]
+
+  @@id([id, userId])
+  @@index([userId, status, createdAt])
+}
+
+model SavingsGoalEvent {
+  id             String               @default(uuid())
+  userId         String
+  goalId         String
+  eventType      String
+  amountMinor    BigInt
+  currency       String
+  accountId      String?
+  transactionId  String?
+  idempotencyKey String
+  eventDate      DateTime
+  note           String               @default("")
+  createdAt      DateTime             @default(now())
+  user           User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  goal           SavingsGoal          @relation(fields: [goalId, userId], references: [id, userId], onDelete: Restrict)
+  account        FinanceAccount?      @relation(fields: [accountId, userId], references: [id, userId], onDelete: Restrict)
+  transaction    FinanceTransaction?  @relation("SavingsEventTransaction", fields: [transactionId, userId], references: [id, userId], onDelete: Restrict)
+
+  @@id([id, userId])
+  @@unique([userId, idempotencyKey])
+  @@unique([transactionId, userId])
+  @@index([userId, goalId, eventDate, id])
+  @@index([userId, accountId, eventDate])
+}
+
+model EmergencyFundConfig {
+  userId               String   @id
+  currency             String
+  coverageMonths       Int
+  essentialMonthlyMinor BigInt
+  revision              Int      @default(1)
+  updatedAt            DateTime @updatedAt
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+}
+
+model EmergencyFundEvent {
+  id             String              @default(uuid())
+  userId         String
+  eventType      String
+  amountMinor    BigInt
+  currency       String
+  accountId      String
+  transactionId  String?
+  idempotencyKey String
+  eventDate      DateTime
+  note           String              @default("")
+  createdAt      DateTime            @default(now())
+  user           User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  account        FinanceAccount      @relation(fields: [accountId, userId], references: [id, userId], onDelete: Restrict)
+  transaction    FinanceTransaction? @relation("EmergencyEventTransaction", fields: [transactionId, userId], references: [id, userId], onDelete: Restrict)
+
+  @@id([id, userId])
+  @@unique([userId, idempotencyKey])
+  @@unique([transactionId, userId])
+  @@index([userId, eventDate, id])
+  @@index([userId, accountId, eventDate])
+}
+
+model MutationReceipt {
+  id             String              @id @default(uuid())
+  userId         String
+  idempotencyKey String
+  mutationType   String
+  requestHash    String
+  response       Json
+  createdAt      DateTime            @default(now())
+  transactionId  String?
+  user           User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  transaction    FinanceTransaction? @relation(fields: [transactionId, userId], references: [id, userId], onDelete: Restrict)
+
+  @@unique([userId, idempotencyKey])
+  @@unique([transactionId, userId])
+  @@index([userId, createdAt])
+}
+
+model ChangeLog {
+  sequence   BigInt   @id @default(autoincrement())
+  cursor     BigInt
+  userId     String
+  entityType String
+  entityId   String
+  revision   Int
+  payload    Json
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, entityType, entityId, revision])
+  @@unique([userId, cursor])
+  @@index([userId, cursor])
+}
+
+model RecurringSchedule {
+  id               String   @db.VarChar(160)
+  userId           String
+  scheduleType     String
+  name             String
+  amountMinor      BigInt
+  currency         String
+  classificationId String?
+  accountId        String
+  toAccountId      String?
+  billId           String?
+  frequency        String
+  startDate        DateTime @db.Date
+  endDate          DateTime? @db.Date
+  nextDueDate      DateTime @db.Date
+  status           String
+  revision         Int      @default(1)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  account          FinanceAccount @relation("ScheduleFromAccount", fields: [accountId, userId], references: [id, userId], onDelete: Restrict)
+  toAccount        FinanceAccount? @relation("ScheduleToAccount", fields: [toAccountId, userId], references: [id, userId], onDelete: Restrict)
+  occurrences      ScheduleOccurrence[]
+
+  @@id([id, userId])
+  @@index([userId, status, nextDueDate, id])
+  @@index([userId, accountId, status])
+}
+
+model ScheduleOccurrence {
+  id             String   @db.VarChar(220)
+  userId         String
+  scheduleId     String   @db.VarChar(160)
+  occurrenceDate DateTime @db.Date
+  status         String
+  transactionId  String?
+  revision       Int      @default(1)
+  createdAt      DateTime @default(now())
+  resolvedAt     DateTime?
+  user           User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  schedule       RecurringSchedule @relation(fields: [scheduleId, userId], references: [id, userId], onDelete: Restrict)
+  transaction    FinanceTransaction? @relation(fields: [transactionId, userId], references: [id, userId], onDelete: Restrict)
+
+  @@id([id, userId])
+  @@unique([scheduleId, occurrenceDate, userId])
+  @@unique([transactionId, userId])
+  @@index([userId, status, occurrenceDate, id])
+}
+
+model FinanceDomainRecord {
+  id            String
+  userId        String
+  entityType    String
+  parentType    String?
+  parentId      String?
+  accountId     String?
+  transactionId String?
+  scheduleId    String?
+  payload       Json
+  revision      Int      @default(1)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  user          User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@id([id, userId])
+  @@unique([entityType, id, userId])
+  @@index([userId, entityType, updatedAt, id])
+  @@index([userId, parentType, parentId])
+}

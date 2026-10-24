@@ -78,7 +78,7 @@ export function LockScreen({ onUnlockPassword, onUnlockBiometric, checkBiometric
           />
         )} />
 
-        <Button title="Unlock with password" onPress={handleSubmit(submitPassword)} isLoading={isSubmitting} accessibilityRole="button" accessibilityLabel="Unlock HouseLog with profile password" />
+        <Button title="Unlock with password" onPress={handleSubmit(submitPassword)} isLoading={isSubmitting} accessibilityRole="button" accessibilityLabel="Unlock Mizan with profile password" />
         {biometricAvailable ? (
           <Pressable accessibilityRole="button" accessibilityLabel="Unlock with biometrics" disabled={biometricBusy} onPress={() => void tryBiometric()} className="mt-3 min-h-12 flex-row items-center justify-center rounded-full border border-gray-200 dark:border-neutral-700">
             <Fingerprint size={19} color={PRIMARY_COLOR} />

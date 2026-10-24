@@ -151,7 +151,7 @@ export default function OnboardingScreen() {
             <View className="mb-5 rounded-3xl border border-gray-100 bg-white p-5 shadow-sm">
               <View className="mb-4">
                 <Text className="font-body text-base font-bold text-gray-900">Choose the account type</Text>
-                <Text className="font-body mt-1 text-sm leading-5 text-gray-500">This helps HouseLog organize your balances.</Text>
+                <Text className="font-body mt-1 text-sm leading-5 text-gray-500">This helps Mizan organize your balances.</Text>
               </View>
               <Controller
                 control={control}
@@ -256,7 +256,7 @@ export default function OnboardingScreen() {
               </Text>
             </View>
             <Text className="font-body mt-4 text-center text-xs leading-5 text-gray-500 dark:text-neutral-400">
-              HouseLog is offline-first and keeps this profile and its records on this device. Password recovery is not available yet.
+              Mizan is offline-first. This profile and its records stay on this device; browser profiles do not automatically sync to Android. Password recovery is not available yet.
             </Text>
             </>}
           </View>

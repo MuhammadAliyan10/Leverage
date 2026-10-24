@@ -1,10 +1,16 @@
 {
+  "cli": {
+    "appVersionSource": "remote"
+  },
   "build": {
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "environment": "development",
       "env": {
-        "HOUSELOG_ANDROID_VARIANT": "disposable"
+        "HOUSELOG_ANDROID_VARIANT": "disposable",
+        "EXPO_PUBLIC_NEON_AUTH_URL": "https://ep-snowy-union-b70t0qnx.neonauth.c-13.us-east-1.aws.neon.tech/neondb/auth",
+        "EXPO_PUBLIC_NEON_DATA_API_URL": "https://ep-snowy-union-b70t0qnx.apirest.c-13.us-east-1.aws.neon.tech/neondb/rest/v1"
       },
       "android": {
         "buildType": "apk"
@@ -13,11 +19,40 @@
     "preview": {
       "distribution": "internal",
       "developmentClient": false,
+      "environment": "preview",
       "env": {
-        "HOUSELOG_ANDROID_VARIANT": "disposable"
+        "HOUSELOG_ANDROID_VARIANT": "disposable",
+        "EXPO_PUBLIC_NEON_AUTH_URL": "https://ep-snowy-union-b70t0qnx.neonauth.c-13.us-east-1.aws.neon.tech/neondb/auth",
+        "EXPO_PUBLIC_NEON_DATA_API_URL": "https://ep-snowy-union-b70t0qnx.apirest.c-13.us-east-1.aws.neon.tech/neondb/rest/v1"
       },
       "android": {
         "buildType": "apk"
+      }
+    },
+    "production-apk": {
+      "distribution": "internal",
+      "developmentClient": false,
+      "environment": "production",
+      "env": {
+        "EXPO_PUBLIC_NEON_AUTH_URL": "https://ep-snowy-union-b70t0qnx.neonauth.c-13.us-east-1.aws.neon.tech/neondb/auth",
+        "EXPO_PUBLIC_NEON_DATA_API_URL": "https://ep-snowy-union-b70t0qnx.apirest.c-13.us-east-1.aws.neon.tech/neondb/rest/v1"
+      },
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "distribution": "store",
+      "developmentClient": false,
+      "environment": "production",
+      "env": {
+        "EXPO_PUBLIC_NEON_AUTH_URL": "https://ep-snowy-union-b70t0qnx.neonauth.c-13.us-east-1.aws.neon.tech/neondb/auth",
+        "EXPO_PUBLIC_NEON_DATA_API_URL": "https://ep-snowy-union-b70t0qnx.apirest.c-13.us-east-1.aws.neon.tech/neondb/rest/v1"
+      },
+      "autoIncrement": true,
+      "android": {
+        "buildType": "app-bundle"
       }
     }
   }

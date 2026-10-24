@@ -178,6 +178,7 @@ export function calculateNetWorthHistory(input: {
   dates: readonly string[];
   accounts: readonly (BalanceAccountInput & { createdAt: string })[];
   transactions: readonly (BalanceTransactionInput & { date: string })[];
+  accountBalanceSnapshots?: readonly {asOfDate:string;accounts:readonly BalanceAccountInput[]}[];
   assets: readonly HistoricalAssetInput[];
   holdings: readonly HistoricalHoldingInput[];
   debts: readonly HistoricalDebtInput[];
@@ -185,10 +186,11 @@ export function calculateNetWorthHistory(input: {
   return input.dates.map((asOfDate) => {
     const cutoff = Date.parse(asOfDate);
     if (!Number.isFinite(cutoff)) throw new Error('Net-worth history date is invalid.');
+    const snapshot=input.accountBalanceSnapshots?.find((item)=>item.asOfDate===asOfDate);
     const accounts = input.accounts.filter((account) => Date.parse(account.createdAt) <= cutoff);
     const accountIds = new Set(accounts.map((account) => account.id));
     const transactions = input.transactions.filter((transaction) => Date.parse(transaction.date) <= cutoff && transaction.accountId !== null && accountIds.has(transaction.accountId));
-    const balances = calculateAccountBalances(accounts, transactions);
+    const balances = snapshot?.accounts ?? calculateAccountBalances(accounts, transactions);
     const parts: Omit<NetWorthPosition, 'totalAssetsMinor'|'netWorthMinor'>[] = [];
     for (const account of balances) parts.push({currency:account.currency,cashMinor:account.balanceMinor,investmentsMinor:0,physicalAssetsMinor:0,receivablesMinor:0,liabilitiesMinor:0});
     for (const asset of input.assets) {

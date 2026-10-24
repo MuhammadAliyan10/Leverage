@@ -41,8 +41,8 @@ async function scheduleForBill(ownerId: string, bill: {
   await scheduleWithCompensation({
     schedule: () => Notifications.scheduleNotificationAsync({
       content: {
-        title: 'HouseLog bill reminder',
-        body: 'A bill you chose to track is due today. Open HouseLog to review it.',
+        title: 'Mizan bill reminder',
+        body: 'A bill you chose to track is due today. Open Mizan to review it.',
         data: { url: '/obligations', ownerId, billId: bill.id },
       },
       trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: triggerDate },

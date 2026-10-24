@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { View, Text, SectionList, TextInput, Pressable, Alert, ScrollView, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
+import { DatePickerField } from '../../components/ui/DatePickerField';
 import { Filter, Search, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, X, Edit } from 'lucide-react-native';
 import BottomSheet, { BottomSheetBackdrop, type BottomSheetBackdropProps } from '@gorhom/bottom-sheet';
 import { useTransactions, type TransactionSection } from '../../hooks/queries/useTransactions';
@@ -109,7 +110,13 @@ export default function TransactionsScreen() {
     setDraftAccountId(filters.accountId ?? '');
     setDraftCategoryId(filters.categoryId ?? '');
     setDraftCurrency(filters.currency ?? '');
-    setDraftDates({ startDate: filters.startDate, endDate: filters.endDate });
+    setDraftDates({
+      startDate: filters.startDate?.slice(0, 10),
+      // The query stores an exclusive next-day boundary; show the user's inclusive date.
+      endDate: filters.endDate
+        ? new Date(Date.parse(filters.endDate) - 86_400_000).toISOString().slice(0, 10)
+        : undefined,
+    });
     setFilterError('');
     filterSheetRef.current?.expand();
   }, [filters]);
@@ -294,7 +301,7 @@ export default function TransactionsScreen() {
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Account</Text>{accountsQuery.isError ? <Pressable accessibilityRole="button" className="mb-3 py-2" onPress={() => void accountsQuery.refetch()}><Text className="font-body text-sm text-red-600">Accounts unavailable · tap to retry</Text></Pressable> : <View className="mb-4 flex-row flex-wrap"><Choice label="All accounts" selected={!draftAccountId} onPress={() => setDraftAccountId('')} />{(accountsQuery.data ?? []).map((account) => <Choice key={account.id} label={`${account.name}${account.archivedAt ? ' · archived' : ''}`} selected={draftAccountId === account.id} onPress={() => setDraftAccountId(account.id)} />)}</View>}
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Category</Text><View className="mb-4 flex-row flex-wrap"><Choice label="All categories" selected={!draftCategoryId} onPress={() => setDraftCategoryId('')} />{Object.entries(CLASSIFICATIONS).map(([id, value]) => <Choice key={id} label={value.label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}{EVENT_CATEGORIES.map(([id, label]) => <Choice key={id} label={label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}</View>
           {allCurrencies.length > 1 ? <><Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Currency</Text><View className="mb-4 flex-row flex-wrap"><Choice label="All currencies" selected={!draftCurrency} onPress={() => setDraftCurrency('')} />{allCurrencies.map((currency) => <Choice key={currency} label={currency} selected={draftCurrency === currency} onPress={() => setDraftCurrency(draftCurrency === currency ? '' : currency)} />)}</View></> : null}
-          <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Date range · YYYY-MM-DD</Text><View className="mb-3 flex-row"><TextInput className="mr-2 h-11 flex-1 border border-gray-200 px-3 font-body text-sm text-gray-900 dark:border-neutral-700 dark:text-white" placeholder="From date" placeholderTextColor="#858995" value={draftDates.startDate ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, startDate: value || undefined }))} accessibilityLabel="Start date" /><TextInput className="h-11 flex-1 border border-gray-200 px-3 font-body text-sm text-gray-900 dark:border-neutral-700 dark:text-white" placeholder="Through date" placeholderTextColor="#858995" value={draftDates.endDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, endDate: value || undefined }))} accessibilityLabel="End date" /></View>
+          <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Date range</Text><View className="flex-row"><View className="mr-2 flex-1"><DatePickerField label="From date" accessibilityLabel="Start date" value={draftDates.startDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, startDate: value || undefined }))} clearable/></View><View className="flex-1"><DatePickerField label="Through date" accessibilityLabel="End date" value={draftDates.endDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, endDate: value || undefined }))} clearable/></View></View>
           {!!filterError && <Text accessibilityRole="alert" className="mb-3 font-body text-sm text-red-600">{filterError}</Text>}
           <View className="flex-row"><Pressable accessibilityRole="button" className="mr-2 h-12 flex-1 items-center justify-center border border-gray-300 dark:border-neutral-700" onPress={clearFilters}><Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Clear</Text></Pressable><Pressable accessibilityRole="button" className="houselog-button h-12 flex-1 items-center justify-center" onPress={applyFilters}><Text className="font-body font-semibold text-white">Apply filters</Text></Pressable></View>
         </ScrollView>

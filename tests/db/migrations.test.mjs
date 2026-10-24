@@ -81,6 +81,11 @@ function createIntermediateSchema() {
   return database;
 }
 
+function removeExtendedSyncTriggers(database) {
+  const names = database.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND (name LIKE 'CloudSync_Bill%' OR name LIKE 'CloudSync_Debt%' OR name LIKE 'CloudSync_Asset%' OR name LIKE 'CloudSync_Investment%' OR name='CloudSync_ScheduleOccurrence_outbox_resolve')").all();
+  for (const { name } of names) database.exec(`DROP TRIGGER "${name.replaceAll('"','""')}"`);
+}
+
 test('versioned migration preserves released records, maps classifications, and is repeatable', async () => {
   const database = createReleasedSchema();
   const adapter = migrationAdapter(database);
@@ -116,7 +121,7 @@ test('fresh databases receive the same schema without creating sample financial 
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM Account').get().count, 0);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 0);
   assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
-  assert.equal(LOCAL_DATABASE_VERSION, 8);
+  assert.equal(LOCAL_DATABASE_VERSION, 13);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ProfileSetup'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='AuthLoginAttempt'").get());
   assert.ok(database.prepare('PRAGMA table_info(Account)').all().some((column) => column.name === 'archivedAt'));
@@ -135,6 +140,30 @@ test('fresh databases receive the same schema without creating sample financial 
   database.close();
 });
 
+test('v9 to v12 cloud migrations preserve account mappings and pending queue rows', async () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec('PRAGMA foreign_keys=ON');
+  const adapter = migrationAdapter(database);
+  await migrateLocalDatabase(adapter);
+  database.prepare('INSERT INTO User(id,fullName,email,passwordHash,createdAt) VALUES(?,?,?,?,?)').run('v9-user','V9 User','v9@example.test','hash','2026-01-01');
+  database.prepare('INSERT INTO CloudIdentity(ownerId,cloudUserId,linkedAt,syncEnabled) VALUES(?,?,?,1)').run('v9-user','cloud-v9-user','2026-01-02');
+  database.prepare('INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,?,?,?,?)').run('v9-user','account','account-1','cloud-account-1',4);
+  database.prepare(`INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,attemptCount,nextAttemptAt,createdAt,updatedAt)
+    VALUES(?,?,?,?,?,?,1,?,'pending',0,0,?,?)`).run('tx-pending-v9','v9-user','cloud-v9-user','transaction','tx-1','transaction.create','{"id":"tx-1"}','2026-01-03','2026-01-03');
+  removeExtendedSyncTriggers(database);
+  database.exec('PRAGMA user_version=9');
+  await migrateLocalDatabase(adapter);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,13);
+  assert.deepEqual({...database.prepare('SELECT cloudId,serverRevision FROM CloudEntityMap WHERE ownerId=? AND localId=?').get('v9-user','account-1')},{cloudId:'cloud-account-1',serverRevision:4});
+  assert.deepEqual({...database.prepare('SELECT mutationId,entityType,operation,payloadJson,status FROM SyncOutbox WHERE mutationId=?').get('tx-pending-v9')},
+    {mutationId:'tx-pending-v9',entityType:'transaction',operation:'transaction.create',payloadJson:'{"id":"tx-1"}',status:'pending'});
+  assert.ok(database.prepare('PRAGMA table_info(Budget)').all().some((column) => column.name === 'synced'));
+  assert.ok(database.prepare('PRAGMA table_info(RecurringSchedule)').all().some((column) => column.name === 'synced'));
+  assert.ok(database.prepare('PRAGMA table_info(ScheduleOccurrence)').all().some((column) => column.name === 'synced'));
+  assert.ok(database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='SyncOutbox'").get().sql.includes('schedule.occurrence.resolve'));
+  database.close();
+});
+
 test('v6 to v7 migration marks profiles with active or archived accounts as already onboarded', async () => {
   const database = new DatabaseSync(':memory:');
   database.exec('PRAGMA foreign_keys=ON');
@@ -144,6 +173,7 @@ test('v6 to v7 migration marks profiles with active or archived accounts as alre
   database.prepare('INSERT INTO User(id,fullName,email,passwordHash,createdAt) VALUES(?,?,?,?,?)').run('archived-user','Archived User','archived@example.test','hash','2026-01-02');
   database.prepare('INSERT INTO Account(id,ownerId,name,type,balanceMinor,currency,createdAt,synced) VALUES(?,?,?,?,?,?,?,0)').run('active-account','active-user','Wallet','cash',500,'PKR','2026-01-03');
   database.prepare('INSERT INTO Account(id,ownerId,name,type,balanceMinor,currency,createdAt,archivedAt,synced) VALUES(?,?,?,?,?,?,?,?,0)').run('archived-account','archived-user','Old wallet','cash',0,'PKR','2026-01-04','2026-02-01');
+  removeExtendedSyncTriggers(database);
   database.exec('DROP TABLE ProfileSetup; DROP TABLE AuthLoginAttempt; PRAGMA user_version=6');
   await migrateLocalDatabase(adapter);
   assert.equal(database.prepare('SELECT firstAccountId FROM ProfileSetup WHERE ownerId=?').get('active-user').firstAccountId, 'active-account');
@@ -162,9 +192,10 @@ test('schema v4 upgrades through v5 to v6 transactionally and leaves existing fi
     DROP TRIGGER IF EXISTS BillPayment_profile_guard; DROP TRIGGER IF EXISTS BillPayment_obligation_limit_guard;`);
   for(const name of ['BillPaymentCorrectionReplacement_profile_guard','BillPaymentCorrectionReplacement_append_only_update','BillPaymentCorrectionReplacement_append_only_delete','DebtEventCorrectionReplacement_profile_guard','DebtEventCorrectionReplacement_append_only_update','DebtEventCorrectionReplacement_append_only_delete','BillPaymentCorrection_profile_guard','BillPaymentCorrection_replacement_guard','BillPaymentCorrection_append_only_update','BillPaymentCorrection_append_only_delete','DebtEventCorrection_profile_guard','DebtEventCorrection_replacement_guard','DebtEventCorrection_append_only_update','DebtEventCorrection_append_only_delete','DebtRepaymentSchedule_profile_guard','DebtRepaymentSchedule_history_update_guard','DebtRepaymentSchedule_delete_guard','DebtInterestEvent_profile_guard','DebtInterestEvent_append_only_update','DebtInterestEvent_append_only_delete']) database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
   for(const table of ['BillPaymentCorrectionReplacement','DebtEventCorrectionReplacement','BillPaymentCorrection','DebtEventCorrection','DebtRepaymentSchedule','DebtInterestEvent']) database.exec(`DROP TABLE IF EXISTS "${table}"`);
+  removeExtendedSyncTriggers(database);
   database.exec('PRAGMA user_version=4');
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version,8);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,13);
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM User WHERE id=?').get('u').n,1);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtEventCorrection'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtInterestEvent'").get());
@@ -181,9 +212,10 @@ test('a schema v5 database receives v6 asset and investment tables without chang
   for(const name of ['Asset_profile_guard','Asset_purchase_immutable','AssetValuation_profile_guard','AssetValuation_append_only_update','AssetValuation_append_only_delete','AssetActivity_profile_guard','AssetActivity_append_only_update','AssetActivity_append_only_delete','Portfolio_profile_guard','Portfolio_update_guard','Holding_profile_guard','Holding_immutable','InvestmentEvent_profile_guard','InvestmentEvent_append_only_update','InvestmentEvent_append_only_delete','InvestmentPrice_profile_guard','InvestmentPrice_append_only_update','InvestmentPrice_append_only_delete','Transaction_asset_investment_adjustment_guard'])database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
   for(const name of ['Account_insert_integrity_guard','Account_update_integrity_guard','Transaction_insert_integrity_guard','Transaction_append_only_delete','Transaction_financial_update_guard','Transaction_account_update_guard_v8'])database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
   for(const name of ['InvestmentPrice','InvestmentEvent','InvestmentHolding','InvestmentPortfolio','AssetActivity','AssetValuation','Asset'])database.exec(`DROP TABLE "${name}"`);
+  removeExtendedSyncTriggers(database);
   database.exec('PRAGMA user_version=5');
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version,8);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,13);
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM "Transaction" WHERE id=\'t\'').get().n,1);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='InvestmentEvent'").get());
   database.close();
@@ -195,7 +227,7 @@ test('budget, goal and emergency-fund migration is repeatable and protects profi
   const adapter = migrationAdapter(database);
   await migrateLocalDatabase(adapter);
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 13);
 
   database.prepare(`INSERT INTO Budget
     (id, ownerId, categoryId, amountMinor, currency, periodStart, periodEnd, rolloverPolicy, revision, createdAt)
@@ -361,6 +393,7 @@ test('the supported v7 to v8 upgrade preserves posted financial values and insta
   for (const name of ['Account_insert_integrity_guard','Account_update_integrity_guard','Account_history_currency_guard','Transaction_insert_integrity_guard','Transaction_append_only_delete','Transaction_financial_update_guard','Transaction_account_update_guard_v8']) {
     database.exec(`DROP TRIGGER IF EXISTS "${name}"`);
   }
+  removeExtendedSyncTriggers(database);
   database.exec('DROP INDEX IF EXISTS Transaction_owner_correction_idx; PRAGMA user_version=7');
   database.prepare('UPDATE "Transaction" SET date=? WHERE id=?').run('2026-02-01 12:00:00', 'tx-1');
   await migrateLocalDatabase(adapter);
@@ -368,7 +401,7 @@ test('the supported v7 to v8 upgrade preserves posted financial values and insta
   const after = database.prepare('SELECT id,ownerId,amountMinor,type,accountId,date FROM "Transaction" WHERE id=?').get('tx-1');
   assert.deepEqual([after.id,after.ownerId,after.amountMinor,after.type,after.accountId], [before.id,before.ownerId,before.amountMinor,before.type,before.accountId]);
   assert.equal(after.date, '2026-02-01T12:00:00.000Z');
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 13);
   assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
   database.close();
 });

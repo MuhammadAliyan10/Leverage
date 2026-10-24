@@ -1,6 +1,6 @@
 import { resolveClassification } from '../../finance/domain.ts';
 
-export const LOCAL_DATABASE_VERSION = 8;
+export const LOCAL_DATABASE_VERSION = 13;
 
 export interface MigrationDatabase {
   execAsync(source: string): Promise<void>;
@@ -274,6 +274,755 @@ async function migrateDatabaseHardeningV8(database: MigrationDatabase): Promise<
     WHERE t.reversalOfId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM "Transaction" o WHERE o.id=t.reversalOfId AND o.ownerId=t.ownerId)
        OR t.correctionOfId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM "Transaction" o WHERE o.id=t.correctionOfId AND o.ownerId=t.ownerId)`);
   if ((invalidLinks?.count ?? 0) > 0) throw new Error('Legacy transaction links cross profiles or reference missing records; migration was rolled back.');
+}
+
+async function migrateCloudSyncV9(database: MigrationDatabase): Promise<void> {
+  await database.execAsync(`
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_bill_insert;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_bill_update;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_no_delete;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_outbox_update;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_no_delete;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_outbox_resolve;
+    DROP TRIGGER IF EXISTS ScheduleOccurrence_no_delete;
+    CREATE TABLE IF NOT EXISTS CloudIdentity (
+      ownerId TEXT PRIMARY KEY NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      cloudUserId TEXT NOT NULL UNIQUE,
+      linkedAt TEXT NOT NULL,
+      syncEnabled INTEGER NOT NULL DEFAULT 1 CHECK(syncEnabled IN (0,1))
+    );
+    CREATE TABLE IF NOT EXISTS CloudEntityMap (
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction')),
+      localId TEXT NOT NULL,
+      cloudId TEXT NOT NULL,
+      serverRevision INTEGER,
+      PRIMARY KEY(ownerId,entityType,localId),
+      UNIQUE(ownerId,entityType,cloudId)
+    );
+    CREATE TABLE IF NOT EXISTS SyncOutbox (
+      mutationId TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      cloudUserId TEXT NOT NULL,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction')),
+      entityId TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('account.create','account.update','account.archive','transaction.create')),
+      payloadVersion INTEGER NOT NULL CHECK(payloadVersion = 1),
+      payloadJson TEXT NOT NULL CHECK(json_valid(payloadJson)),
+      dependencyEntityId TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','in_flight','confirmed','rejected')),
+      attemptCount INTEGER NOT NULL DEFAULT 0 CHECK(attemptCount >= 0 AND attemptCount <= 20),
+      nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+      leaseUntil TEXT,
+      lastErrorCategory TEXT,
+      serverAckJson TEXT CHECK(serverAckJson IS NULL OR json_valid(serverAckJson)),
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      UNIQUE(ownerId,mutationId)
+    );
+    CREATE INDEX IF NOT EXISTS SyncOutbox_ready_idx ON SyncOutbox(ownerId,status,nextAttemptAt,createdAt,mutationId);
+    CREATE INDEX IF NOT EXISTS SyncOutbox_entity_idx ON SyncOutbox(ownerId,entityType,entityId,createdAt);
+    CREATE TABLE IF NOT EXISTS SyncCursor (
+      ownerId TEXT PRIMARY KEY NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      cloudUserId TEXT NOT NULL,
+      cursor TEXT NOT NULL DEFAULT '0' CHECK(cursor GLOB '[0-9]*'),
+      lastSuccessfulAt TEXT
+    );
+    CREATE TRIGGER IF NOT EXISTS SyncOutbox_immutable_confirmed
+    BEFORE UPDATE ON SyncOutbox WHEN OLD.status='confirmed' AND (
+      NEW.mutationId IS NOT OLD.mutationId OR NEW.ownerId IS NOT OLD.ownerId OR
+      NEW.cloudUserId IS NOT OLD.cloudUserId OR NEW.entityType IS NOT OLD.entityType OR
+      NEW.entityId IS NOT OLD.entityId OR NEW.operation IS NOT OLD.operation OR
+      NEW.payloadVersion IS NOT OLD.payloadVersion OR NEW.payloadJson IS NOT OLD.payloadJson OR
+      NEW.status IS NOT OLD.status OR NEW.serverAckJson IS NOT OLD.serverAckJson
+    ) BEGIN SELECT RAISE(ABORT,'confirmed sync mutations are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS CloudSync_account_insert_guard BEFORE INSERT ON Account
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='account' AND o.entityId=NEW.id AND o.operation='account.create' AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked account writes require an outbox mutation'); END;
+    CREATE TRIGGER IF NOT EXISTS CloudSync_account_update_guard BEFORE UPDATE ON Account
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND (NEW.name IS NOT OLD.name OR NEW.type IS NOT OLD.type OR NEW.archivedAt IS NOT OLD.archivedAt OR NEW.balanceMinor IS NOT OLD.balanceMinor OR NEW.currency IS NOT OLD.currency)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='account' AND o.entityId=NEW.id AND o.operation IN ('account.update','account.archive') AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked account changes require an outbox mutation'); END;
+    CREATE TRIGGER IF NOT EXISTS CloudSync_transaction_insert_guard BEFORE INSERT ON "Transaction"
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='transaction' AND o.entityId=NEW.id AND o.operation='transaction.create' AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked transaction writes require an outbox mutation'); END;
+  `);
+  const localOnlyTables = [
+    'Budget','SavingsGoal','SavingsGoalEvent','EmergencyFundConfig','EmergencyFundEvent',
+    'RecurringSchedule','ScheduleOccurrence','Bill','BillPayment','Debt','DebtEvent','DebtInterestEvent',
+    'BillPaymentCorrection','DebtEventCorrection','DebtRepaymentSchedule',
+    'Asset','AssetValuation','AssetActivity','InvestmentPortfolio','InvestmentHolding','InvestmentEvent','InvestmentPrice',
+  ];
+  for (const table of localOnlyTables) {
+    const safe = table.replaceAll('"','""');
+    await database.execAsync(`
+      CREATE TRIGGER IF NOT EXISTS CloudSync_${table}_local_only_insert BEFORE INSERT ON "${safe}"
+      WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+      CREATE TRIGGER IF NOT EXISTS CloudSync_${table}_local_only_update BEFORE UPDATE ON "${safe}"
+      WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=OLD.ownerId AND c.syncEnabled=1)
+      BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+      CREATE TRIGGER IF NOT EXISTS CloudSync_${table}_local_only_delete BEFORE DELETE ON "${safe}"
+      WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=OLD.ownerId AND c.syncEnabled=1)
+      BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+    `);
+  }
+  await database.execAsync(`
+    CREATE TRIGGER IF NOT EXISTS CloudSync_BillPaymentCorrectionReplacement_local_only_insert BEFORE INSERT ON BillPaymentCorrectionReplacement
+    WHEN EXISTS(SELECT 1 FROM BillPaymentCorrection p JOIN CloudIdentity c ON c.ownerId=p.ownerId AND c.syncEnabled=1 WHERE p.id=NEW.correctionId)
+    BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+    CREATE TRIGGER IF NOT EXISTS CloudSync_BillPaymentCorrectionReplacement_local_only_update BEFORE UPDATE ON BillPaymentCorrectionReplacement
+    WHEN EXISTS(SELECT 1 FROM BillPaymentCorrection p JOIN CloudIdentity c ON c.ownerId=p.ownerId AND c.syncEnabled=1 WHERE p.id=OLD.correctionId)
+    BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+    CREATE TRIGGER IF NOT EXISTS CloudSync_BillPaymentCorrectionReplacement_local_only_delete BEFORE DELETE ON BillPaymentCorrectionReplacement
+    WHEN EXISTS(SELECT 1 FROM BillPaymentCorrection p JOIN CloudIdentity c ON c.ownerId=p.ownerId AND c.syncEnabled=1 WHERE p.id=OLD.correctionId)
+    BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+    CREATE TRIGGER IF NOT EXISTS CloudSync_DebtEventCorrectionReplacement_local_only_insert BEFORE INSERT ON DebtEventCorrectionReplacement
+    WHEN EXISTS(SELECT 1 FROM DebtEventCorrection p JOIN CloudIdentity c ON c.ownerId=p.ownerId AND c.syncEnabled=1 WHERE p.id=NEW.correctionId)
+    BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+    CREATE TRIGGER IF NOT EXISTS CloudSync_DebtEventCorrectionReplacement_local_only_update BEFORE UPDATE ON DebtEventCorrectionReplacement
+    WHEN EXISTS(SELECT 1 FROM DebtEventCorrection p JOIN CloudIdentity c ON c.ownerId=p.ownerId AND c.syncEnabled=1 WHERE p.id=OLD.correctionId)
+    BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+    CREATE TRIGGER IF NOT EXISTS CloudSync_DebtEventCorrectionReplacement_local_only_delete BEFORE DELETE ON DebtEventCorrectionReplacement
+    WHEN EXISTS(SELECT 1 FROM DebtEventCorrection p JOIN CloudIdentity c ON c.ownerId=p.ownerId AND c.syncEnabled=1 WHERE p.id=OLD.correctionId)
+    BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+  `);
+}
+
+/** Extends the existing durable queue to immutable budget revisions and archive metadata. */
+async function migrateCloudBudgetSyncV10(database: MigrationDatabase): Promise<void> {
+  const budgetColumns = await columnsFor(database, 'Budget');
+  await addColumnIfMissing(database, 'Budget', budgetColumns, 'synced', 'INTEGER NOT NULL DEFAULT 0 CHECK(synced IN (0,1))');
+  await database.execAsync(`
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_bill_insert;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_bill_update;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_no_delete;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_outbox_update;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_no_delete;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_outbox_resolve;
+    DROP TRIGGER IF EXISTS ScheduleOccurrence_no_delete;
+    DROP TRIGGER IF EXISTS CloudSync_SavingsGoal_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_SavingsGoal_outbox_update;
+    DROP TRIGGER IF EXISTS CloudSync_SavingsGoalEvent_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_EmergencyFundConfig_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_EmergencyFundConfig_outbox_update;
+    DROP TRIGGER IF EXISTS CloudSync_EmergencyFundEvent_outbox_insert;
+    DROP TRIGGER IF EXISTS SyncOutbox_immutable_confirmed;
+    DROP TRIGGER IF EXISTS CloudSync_account_insert_guard;
+    DROP TRIGGER IF EXISTS CloudSync_account_update_guard;
+    DROP TRIGGER IF EXISTS CloudSync_transaction_insert_guard;
+    DROP TRIGGER IF EXISTS CloudSync_Budget_local_only_insert;
+    DROP TRIGGER IF EXISTS CloudSync_Budget_local_only_update;
+    DROP TRIGGER IF EXISTS CloudSync_Budget_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_Budget_outbox_archive;
+    DROP INDEX IF EXISTS SyncOutbox_ready_idx;
+    DROP INDEX IF EXISTS SyncOutbox_entity_idx;
+    ALTER TABLE CloudEntityMap RENAME TO CloudEntityMap_v9;
+    CREATE TABLE CloudEntityMap (
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget')),
+      localId TEXT NOT NULL,
+      cloudId TEXT NOT NULL,
+      serverRevision INTEGER,
+      PRIMARY KEY(ownerId,entityType,localId),
+      UNIQUE(ownerId,entityType,cloudId)
+    );
+    INSERT INTO CloudEntityMap SELECT * FROM CloudEntityMap_v9;
+    DROP TABLE CloudEntityMap_v9;
+
+    ALTER TABLE SyncOutbox RENAME TO SyncOutbox_v9;
+    CREATE TABLE SyncOutbox (
+      mutationId TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      cloudUserId TEXT NOT NULL,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget')),
+      entityId TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('account.create','account.update','account.archive','transaction.create','budget.create','budget.revise','budget.archive')),
+      payloadVersion INTEGER NOT NULL CHECK(payloadVersion = 1),
+      payloadJson TEXT NOT NULL CHECK(json_valid(payloadJson)),
+      dependencyEntityId TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','in_flight','confirmed','rejected')),
+      attemptCount INTEGER NOT NULL DEFAULT 0 CHECK(attemptCount >= 0 AND attemptCount <= 20),
+      nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+      leaseUntil TEXT,
+      lastErrorCategory TEXT,
+      serverAckJson TEXT CHECK(serverAckJson IS NULL OR json_valid(serverAckJson)),
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      UNIQUE(ownerId,mutationId)
+    );
+    INSERT INTO SyncOutbox SELECT * FROM SyncOutbox_v9;
+    DROP TABLE SyncOutbox_v9;
+    CREATE INDEX SyncOutbox_ready_idx ON SyncOutbox(ownerId,status,nextAttemptAt,createdAt,mutationId);
+    CREATE INDEX SyncOutbox_entity_idx ON SyncOutbox(ownerId,entityType,entityId,createdAt);
+
+    CREATE TRIGGER SyncOutbox_immutable_confirmed
+    BEFORE UPDATE ON SyncOutbox WHEN OLD.status='confirmed' AND (
+      NEW.mutationId IS NOT OLD.mutationId OR NEW.ownerId IS NOT OLD.ownerId OR NEW.cloudUserId IS NOT OLD.cloudUserId OR
+      NEW.entityType IS NOT OLD.entityType OR NEW.entityId IS NOT OLD.entityId OR NEW.operation IS NOT OLD.operation OR
+      NEW.payloadVersion IS NOT OLD.payloadVersion OR NEW.payloadJson IS NOT OLD.payloadJson OR
+      NEW.status IS NOT OLD.status OR NEW.serverAckJson IS NOT OLD.serverAckJson
+    ) BEGIN SELECT RAISE(ABORT,'confirmed sync mutations are immutable'); END;
+    CREATE TRIGGER CloudSync_account_insert_guard BEFORE INSERT ON Account
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='account' AND o.entityId=NEW.id AND o.operation='account.create' AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked account writes require an outbox mutation'); END;
+    CREATE TRIGGER CloudSync_account_update_guard BEFORE UPDATE ON Account
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND (NEW.name IS NOT OLD.name OR NEW.type IS NOT OLD.type OR NEW.archivedAt IS NOT OLD.archivedAt OR NEW.balanceMinor IS NOT OLD.balanceMinor OR NEW.currency IS NOT OLD.currency)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='account' AND o.entityId=NEW.id AND o.operation IN ('account.update','account.archive') AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked account changes require an outbox mutation'); END;
+    CREATE TRIGGER CloudSync_transaction_insert_guard BEFORE INSERT ON "Transaction"
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='transaction' AND o.entityId=NEW.id AND o.operation='transaction.create' AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked transaction writes require an outbox mutation'); END;
+
+    CREATE TRIGGER CloudSync_Budget_outbox_insert AFTER INSERT ON Budget
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,attemptCount,nextAttemptAt,createdAt,updatedAt)
+      SELECT CASE WHEN NEW.supersedesId IS NULL THEN 'budget.create:'||NEW.id ELSE 'budget.revise:'||NEW.id END,
+        NEW.ownerId,c.cloudUserId,'budget',NEW.id,CASE WHEN NEW.supersedesId IS NULL THEN 'budget.create' ELSE 'budget.revise' END,1,
+        CASE WHEN NEW.supersedesId IS NULL THEN json_object('id',NEW.id,'categoryId',NEW.categoryId,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'periodStart',NEW.periodStart,'periodEnd',NEW.periodEnd,'rolloverPolicy',NEW.rolloverPolicy)
+        ELSE json_object('budgetId',NEW.supersedesId,'expectedRevision',NEW.revision-1,'categoryId',NEW.categoryId,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'periodStart',NEW.periodStart,'periodEnd',NEW.periodEnd,'rolloverPolicy',NEW.rolloverPolicy) END,
+        'pending',0,0,NEW.createdAt,NEW.createdAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_Budget_outbox_archive AFTER UPDATE OF archivedAt ON Budget
+    WHEN NEW.synced=0 AND OLD.archivedAt IS NULL AND NEW.archivedAt IS NOT NULL
+      AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,attemptCount,nextAttemptAt,createdAt,updatedAt)
+      SELECT 'budget.archive:'||NEW.id,NEW.ownerId,c.cloudUserId,'budget',NEW.id,'budget.archive',1,json_object('id',NEW.id),'pending',0,0,NEW.archivedAt,NEW.archivedAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+  `);
+
+  const localOnlyTables = [
+    'SavingsGoal','SavingsGoalEvent','EmergencyFundConfig','EmergencyFundEvent',
+    'RecurringSchedule','ScheduleOccurrence','Bill','BillPayment','Debt','DebtEvent','DebtInterestEvent',
+    'BillPaymentCorrection','DebtEventCorrection','DebtRepaymentSchedule',
+    'Asset','AssetValuation','AssetActivity','InvestmentPortfolio','InvestmentHolding','InvestmentEvent','InvestmentPrice',
+  ];
+  for (const table of localOnlyTables) {
+    const safe = table.replaceAll('"','""');
+    await database.execAsync(`
+      CREATE TRIGGER IF NOT EXISTS CloudSync_${safe}_local_only_insert BEFORE INSERT ON "${safe}"
+      WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+      CREATE TRIGGER IF NOT EXISTS CloudSync_${safe}_local_only_update BEFORE UPDATE ON "${safe}"
+      WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=OLD.ownerId AND c.syncEnabled=1)
+      BEGIN SELECT RAISE(ABORT,'this financial module is not supported for cloud-linked profiles'); END;
+    `);
+  }
+}
+
+/** Adds durable cloud mutations for savings goals and emergency-fund reservations. */
+async function migrateCloudSavingsSyncV11(database: MigrationDatabase): Promise<void> {
+  for (const table of ['SavingsGoal', 'SavingsGoalEvent', 'EmergencyFundConfig', 'EmergencyFundEvent']) {
+    const columns = await columnsFor(database, table);
+    await addColumnIfMissing(database, table, columns, 'synced', 'INTEGER NOT NULL DEFAULT 0 CHECK(synced IN (0,1))');
+  }
+  await database.execAsync(`
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_bill_insert;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_bill_update;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_no_delete;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_outbox_update;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_no_delete;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_outbox_resolve;
+    DROP TRIGGER IF EXISTS ScheduleOccurrence_no_delete;
+    DROP TRIGGER IF EXISTS CloudSync_account_insert_guard;
+    DROP TRIGGER IF EXISTS CloudSync_account_update_guard;
+    DROP TRIGGER IF EXISTS CloudSync_transaction_insert_guard;
+    DROP TRIGGER IF EXISTS CloudSync_Budget_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_Budget_outbox_archive;
+    DROP INDEX IF EXISTS SyncOutbox_ready_idx;
+    DROP INDEX IF EXISTS SyncOutbox_entity_idx;
+    ALTER TABLE CloudEntityMap RENAME TO CloudEntityMap_v10;
+    CREATE TABLE CloudEntityMap (
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget','savings_goal','savings_goal_event','emergency_config','emergency_event')),
+      localId TEXT NOT NULL, cloudId TEXT NOT NULL, serverRevision INTEGER,
+      PRIMARY KEY(ownerId,entityType,localId), UNIQUE(ownerId,entityType,cloudId)
+    );
+    INSERT INTO CloudEntityMap SELECT * FROM CloudEntityMap_v10;
+    DROP TABLE CloudEntityMap_v10;
+
+    ALTER TABLE SyncOutbox RENAME TO SyncOutbox_v10;
+    CREATE TABLE SyncOutbox (
+      mutationId TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      cloudUserId TEXT NOT NULL,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget','savings_goal','savings_goal_event','emergency_config','emergency_event')),
+      entityId TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('account.create','account.update','account.archive','transaction.create','budget.create','budget.revise','budget.archive',
+        'saving.goal.create','saving.goal.update','saving.goal.event','emergency.config.save','emergency.event')),
+      payloadVersion INTEGER NOT NULL CHECK(payloadVersion = 1), payloadJson TEXT NOT NULL CHECK(json_valid(payloadJson)),
+      dependencyEntityId TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','in_flight','confirmed','rejected')),
+      attemptCount INTEGER NOT NULL DEFAULT 0 CHECK(attemptCount >= 0 AND attemptCount <= 20), nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+      leaseUntil TEXT, lastErrorCategory TEXT, serverAckJson TEXT CHECK(serverAckJson IS NULL OR json_valid(serverAckJson)),
+      createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, UNIQUE(ownerId,mutationId)
+    );
+    INSERT INTO SyncOutbox SELECT * FROM SyncOutbox_v10;
+    DROP TABLE SyncOutbox_v10;
+    CREATE INDEX SyncOutbox_ready_idx ON SyncOutbox(ownerId,status,nextAttemptAt,createdAt,mutationId);
+    CREATE INDEX SyncOutbox_entity_idx ON SyncOutbox(ownerId,entityType,entityId,createdAt);
+    DROP TRIGGER IF EXISTS SyncOutbox_immutable_confirmed;
+    CREATE TRIGGER SyncOutbox_immutable_confirmed BEFORE UPDATE ON SyncOutbox WHEN OLD.status='confirmed' AND (
+      NEW.mutationId IS NOT OLD.mutationId OR NEW.ownerId IS NOT OLD.ownerId OR NEW.cloudUserId IS NOT OLD.cloudUserId OR
+      NEW.entityType IS NOT OLD.entityType OR NEW.entityId IS NOT OLD.entityId OR NEW.operation IS NOT OLD.operation OR
+      NEW.payloadVersion IS NOT OLD.payloadVersion OR NEW.payloadJson IS NOT OLD.payloadJson OR NEW.status IS NOT OLD.status OR NEW.serverAckJson IS NOT OLD.serverAckJson
+    ) BEGIN SELECT RAISE(ABORT,'confirmed sync mutations are immutable'); END;
+  `);
+
+  const localOnly = ['SavingsGoal','SavingsGoalEvent','EmergencyFundConfig','EmergencyFundEvent'];
+  for (const table of localOnly) {
+    const safe = table.replaceAll('"','""');
+    await database.execAsync(`DROP TRIGGER IF EXISTS CloudSync_${safe}_local_only_insert; DROP TRIGGER IF EXISTS CloudSync_${safe}_local_only_update;`);
+  }
+  await database.execAsync(`
+    CREATE TRIGGER CloudSync_account_insert_guard BEFORE INSERT ON Account
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='account' AND o.entityId=NEW.id AND o.operation='account.create' AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked account writes require an outbox mutation'); END;
+    CREATE TRIGGER CloudSync_account_update_guard BEFORE UPDATE ON Account
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND (NEW.name IS NOT OLD.name OR NEW.type IS NOT OLD.type OR NEW.archivedAt IS NOT OLD.archivedAt OR NEW.balanceMinor IS NOT OLD.balanceMinor OR NEW.currency IS NOT OLD.currency)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='account' AND o.entityId=NEW.id AND o.operation IN ('account.update','account.archive') AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked account changes require an outbox mutation'); END;
+    CREATE TRIGGER CloudSync_Budget_outbox_insert AFTER INSERT ON Budget
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,attemptCount,nextAttemptAt,createdAt,updatedAt)
+      SELECT CASE WHEN NEW.supersedesId IS NULL THEN 'budget.create:'||NEW.id ELSE 'budget.revise:'||NEW.id END,NEW.ownerId,c.cloudUserId,'budget',NEW.id,CASE WHEN NEW.supersedesId IS NULL THEN 'budget.create' ELSE 'budget.revise' END,1,
+        CASE WHEN NEW.supersedesId IS NULL THEN json_object('id',NEW.id,'categoryId',NEW.categoryId,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'periodStart',NEW.periodStart,'periodEnd',NEW.periodEnd,'rolloverPolicy',NEW.rolloverPolicy)
+        ELSE json_object('budgetId',NEW.supersedesId,'expectedRevision',NEW.revision-1,'categoryId',NEW.categoryId,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'periodStart',NEW.periodStart,'periodEnd',NEW.periodEnd,'rolloverPolicy',NEW.rolloverPolicy) END,
+        'pending',0,0,NEW.createdAt,NEW.createdAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_Budget_outbox_archive AFTER UPDATE OF archivedAt ON Budget
+    WHEN NEW.synced=0 AND OLD.archivedAt IS NULL AND NEW.archivedAt IS NOT NULL AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,attemptCount,nextAttemptAt,createdAt,updatedAt)
+      SELECT 'budget.archive:'||NEW.id,NEW.ownerId,c.cloudUserId,'budget',NEW.id,'budget.archive',1,json_object('id',NEW.id),'pending',0,0,NEW.archivedAt,NEW.archivedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    DROP TRIGGER IF EXISTS CloudSync_transaction_insert_guard;
+    CREATE TRIGGER CloudSync_transaction_insert_guard BEFORE INSERT ON "Transaction"
+    WHEN NEW.synced=0 AND NEW.id NOT LIKE 'fund-transfer:%' AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='transaction' AND o.entityId=NEW.id AND o.operation='transaction.create' AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked transaction writes require an outbox mutation'); END;
+    DROP TRIGGER IF EXISTS SavingsGoalEvent_append_only_update;
+    DROP TRIGGER IF EXISTS EmergencyFundEvent_append_only_update;
+    CREATE TRIGGER SavingsGoalEvent_append_only_update BEFORE UPDATE ON SavingsGoalEvent
+    WHEN NEW.synced != 1 OR OLD.synced != 0 OR
+      NEW.id IS NOT OLD.id OR NEW.ownerId IS NOT OLD.ownerId OR NEW.goalId IS NOT OLD.goalId OR NEW.eventType IS NOT OLD.eventType OR
+      NEW.amountMinor IS NOT OLD.amountMinor OR NEW.currency IS NOT OLD.currency OR NEW.accountId IS NOT OLD.accountId OR
+      NEW.transactionId IS NOT OLD.transactionId OR NEW.idempotencyKey IS NOT OLD.idempotencyKey OR NEW.eventDate IS NOT OLD.eventDate OR
+      NEW.note IS NOT OLD.note OR NEW.createdAt IS NOT OLD.createdAt
+    BEGIN SELECT RAISE(ABORT,'savings goal history is append-only'); END;
+    CREATE TRIGGER EmergencyFundEvent_append_only_update BEFORE UPDATE ON EmergencyFundEvent
+    WHEN NEW.synced != 1 OR OLD.synced != 0 OR
+      NEW.id IS NOT OLD.id OR NEW.ownerId IS NOT OLD.ownerId OR NEW.eventType IS NOT OLD.eventType OR NEW.amountMinor IS NOT OLD.amountMinor OR
+      NEW.currency IS NOT OLD.currency OR NEW.accountId IS NOT OLD.accountId OR NEW.transactionId IS NOT OLD.transactionId OR
+      NEW.idempotencyKey IS NOT OLD.idempotencyKey OR NEW.eventDate IS NOT OLD.eventDate OR NEW.note IS NOT OLD.note OR NEW.createdAt IS NOT OLD.createdAt
+    BEGIN SELECT RAISE(ABORT,'emergency fund history is append-only'); END;
+    CREATE TRIGGER CloudSync_SavingsGoal_outbox_insert AFTER INSERT ON SavingsGoal
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,createdAt,updatedAt)
+      SELECT 'saving.goal.create:'||NEW.id,NEW.ownerId,c.cloudUserId,'savings_goal',NEW.id,'saving.goal.create',1,
+        json_object('id',NEW.id,'name',NEW.name,'targetMinor',CAST(NEW.targetMinor AS TEXT),'currency',NEW.currency,'targetDate',NEW.targetDate,'createdAt',NEW.createdAt,'updatedAt',NEW.updatedAt), 'pending',NEW.createdAt,NEW.createdAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_SavingsGoal_outbox_update AFTER UPDATE ON SavingsGoal
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1) AND
+      (NEW.name IS NOT OLD.name OR NEW.targetMinor IS NOT OLD.targetMinor OR NEW.targetDate IS NOT OLD.targetDate OR NEW.status IS NOT OLD.status OR NEW.completedAt IS NOT OLD.completedAt OR NEW.archivedAt IS NOT OLD.archivedAt)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,createdAt,updatedAt)
+      SELECT 'saving.goal.update:'||NEW.id||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'savings_goal',NEW.id,'saving.goal.update',1,
+        json_object('id',NEW.id,'name',NEW.name,'targetMinor',CAST(NEW.targetMinor AS TEXT),'targetDate',NEW.targetDate,'status',NEW.status,'completedAt',NEW.completedAt,'archivedAt',NEW.archivedAt,'expectedUpdatedAt',OLD.updatedAt,'updatedAt',NEW.updatedAt), 'pending',NEW.updatedAt,NEW.updatedAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_SavingsGoalEvent_outbox_insert AFTER INSERT ON SavingsGoalEvent
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,dependencyEntityId,createdAt,updatedAt)
+      SELECT 'saving.goal.event:'||NEW.id,NEW.ownerId,c.cloudUserId,'savings_goal_event',NEW.id,'saving.goal.event',1,
+        json_object('id',NEW.id,'goalId',NEW.goalId,'eventType',NEW.eventType,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'accountId',NEW.accountId,'transactionId',NEW.transactionId,'idempotencyKey',NEW.idempotencyKey,'eventDate',NEW.eventDate,'note',NEW.note,
+          'sourceAccountId',(SELECT accountId FROM "Transaction" WHERE id=NEW.transactionId AND ownerId=NEW.ownerId),
+          'destinationAccountId',(SELECT toAccountId FROM "Transaction" WHERE id=NEW.transactionId AND ownerId=NEW.ownerId)), 'pending',NEW.goalId,NEW.createdAt,NEW.createdAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_EmergencyFundConfig_outbox_insert AFTER INSERT ON EmergencyFundConfig
+    WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,createdAt,updatedAt)
+      SELECT 'emergency.config:'||NEW.ownerId||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'emergency_config',NEW.ownerId,'emergency.config.save',1,
+        json_object('currency',NEW.currency,'coverageMonths',NEW.coverageMonths,'essentialMonthlyMinor',CAST(NEW.essentialMonthlyMinor AS TEXT)), 'pending',NEW.updatedAt,NEW.updatedAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_EmergencyFundConfig_outbox_update AFTER UPDATE ON EmergencyFundConfig
+    WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1) AND
+      (NEW.currency IS NOT OLD.currency OR NEW.coverageMonths IS NOT OLD.coverageMonths OR NEW.essentialMonthlyMinor IS NOT OLD.essentialMonthlyMinor)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,createdAt,updatedAt)
+      SELECT 'emergency.config:'||NEW.ownerId||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'emergency_config',NEW.ownerId,'emergency.config.save',1,
+        json_object('currency',NEW.currency,'coverageMonths',NEW.coverageMonths,'essentialMonthlyMinor',CAST(NEW.essentialMonthlyMinor AS TEXT)), 'pending',NEW.updatedAt,NEW.updatedAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_EmergencyFundEvent_outbox_insert AFTER INSERT ON EmergencyFundEvent
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,dependencyEntityId,createdAt,updatedAt)
+      SELECT 'emergency.event:'||NEW.id,NEW.ownerId,c.cloudUserId,'emergency_event',NEW.id,'emergency.event',1,
+        json_object('id',NEW.id,'eventType',NEW.eventType,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'accountId',NEW.accountId,'transactionId',NEW.transactionId,'idempotencyKey',NEW.idempotencyKey,'eventDate',NEW.eventDate,'note',NEW.note,
+          'sourceAccountId',(SELECT accountId FROM "Transaction" WHERE id=NEW.transactionId AND ownerId=NEW.ownerId),
+          'destinationAccountId',(SELECT toAccountId FROM "Transaction" WHERE id=NEW.transactionId AND ownerId=NEW.ownerId)), 'pending',NEW.accountId,NEW.createdAt,NEW.createdAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+  `);
+}
+
+/** Adds durable cloud mutations for non-bill recurring schedules and their occurrences. */
+async function migrateRecurringScheduleSyncV12(database: MigrationDatabase): Promise<void> {
+  for (const table of ['RecurringSchedule', 'ScheduleOccurrence']) {
+    const columns = await columnsFor(database, table);
+    await addColumnIfMissing(database, table, columns, 'synced', 'INTEGER NOT NULL DEFAULT 0 CHECK(synced IN (0,1))');
+  }
+  await database.execAsync(`
+    DROP TRIGGER IF EXISTS CloudSync_account_insert_guard;
+    DROP TRIGGER IF EXISTS CloudSync_account_update_guard;
+    DROP TRIGGER IF EXISTS CloudSync_transaction_insert_guard;
+    DROP TRIGGER IF EXISTS CloudSync_Budget_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_Budget_outbox_archive;
+    DROP TRIGGER IF EXISTS CloudSync_SavingsGoal_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_SavingsGoal_outbox_update;
+    DROP TRIGGER IF EXISTS CloudSync_SavingsGoalEvent_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_EmergencyFundConfig_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_EmergencyFundConfig_outbox_update;
+    DROP TRIGGER IF EXISTS CloudSync_EmergencyFundEvent_outbox_insert;
+    DROP INDEX IF EXISTS SyncOutbox_ready_idx;
+    DROP INDEX IF EXISTS SyncOutbox_entity_idx;
+    CREATE TABLE CloudEntityMap_v12 (
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget','savings_goal','savings_goal_event','emergency_config','emergency_event','recurring_schedule','schedule_occurrence')),
+      localId TEXT NOT NULL, cloudId TEXT NOT NULL, serverRevision INTEGER,
+      PRIMARY KEY(ownerId,entityType,localId), UNIQUE(ownerId,entityType,cloudId)
+    );
+    INSERT INTO CloudEntityMap_v12 SELECT * FROM CloudEntityMap;
+    DROP TABLE CloudEntityMap;
+    ALTER TABLE CloudEntityMap_v12 RENAME TO CloudEntityMap;
+
+    CREATE TABLE SyncOutbox_v12 (
+      mutationId TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      cloudUserId TEXT NOT NULL,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget','savings_goal','savings_goal_event','emergency_config','emergency_event','recurring_schedule','schedule_occurrence')),
+      entityId TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('account.create','account.update','account.archive','transaction.create','budget.create','budget.revise','budget.archive',
+        'saving.goal.create','saving.goal.update','saving.goal.event','emergency.config.save','emergency.event',
+        'recurring.schedule.create','recurring.schedule.update','schedule.occurrence.create','schedule.occurrence.resolve')),
+      payloadVersion INTEGER NOT NULL CHECK(payloadVersion = 1), payloadJson TEXT NOT NULL CHECK(json_valid(payloadJson)),
+      dependencyEntityId TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','in_flight','confirmed','rejected')),
+      attemptCount INTEGER NOT NULL DEFAULT 0 CHECK(attemptCount >= 0 AND attemptCount <= 20), nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+      leaseUntil TEXT, lastErrorCategory TEXT, serverAckJson TEXT CHECK(serverAckJson IS NULL OR json_valid(serverAckJson)),
+      createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, UNIQUE(ownerId,mutationId)
+    );
+    INSERT INTO SyncOutbox_v12 SELECT * FROM SyncOutbox;
+    DROP TABLE SyncOutbox;
+    ALTER TABLE SyncOutbox_v12 RENAME TO SyncOutbox;
+    CREATE INDEX SyncOutbox_ready_idx ON SyncOutbox(ownerId,status,nextAttemptAt,createdAt,mutationId);
+    CREATE INDEX SyncOutbox_entity_idx ON SyncOutbox(ownerId,entityType,entityId,createdAt);
+    DROP TRIGGER IF EXISTS SyncOutbox_immutable_confirmed;
+    CREATE TRIGGER SyncOutbox_immutable_confirmed BEFORE UPDATE ON SyncOutbox WHEN OLD.status='confirmed' AND (
+      NEW.mutationId IS NOT OLD.mutationId OR NEW.ownerId IS NOT OLD.ownerId OR NEW.cloudUserId IS NOT OLD.cloudUserId OR
+      NEW.entityType IS NOT OLD.entityType OR NEW.entityId IS NOT OLD.entityId OR NEW.operation IS NOT OLD.operation OR
+      NEW.payloadVersion IS NOT OLD.payloadVersion OR NEW.payloadJson IS NOT OLD.payloadJson OR NEW.status IS NOT OLD.status OR NEW.serverAckJson IS NOT OLD.serverAckJson
+    ) BEGIN SELECT RAISE(ABORT,'confirmed sync mutations are immutable'); END;
+  `);
+
+  await database.execAsync(`
+    CREATE TRIGGER CloudSync_account_insert_guard BEFORE INSERT ON Account
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='account' AND o.entityId=NEW.id AND o.operation='account.create' AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked account writes require an outbox mutation'); END;
+    CREATE TRIGGER CloudSync_account_update_guard BEFORE UPDATE ON Account
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND (NEW.name IS NOT OLD.name OR NEW.type IS NOT OLD.type OR NEW.archivedAt IS NOT OLD.archivedAt OR NEW.balanceMinor IS NOT OLD.balanceMinor OR NEW.currency IS NOT OLD.currency)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='account' AND o.entityId=NEW.id AND o.operation IN ('account.update','account.archive') AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked account changes require an outbox mutation'); END;
+    CREATE TRIGGER CloudSync_Budget_outbox_insert AFTER INSERT ON Budget
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,attemptCount,nextAttemptAt,createdAt,updatedAt)
+      SELECT CASE WHEN NEW.supersedesId IS NULL THEN 'budget.create:'||NEW.id ELSE 'budget.revise:'||NEW.id END,NEW.ownerId,c.cloudUserId,'budget',NEW.id,CASE WHEN NEW.supersedesId IS NULL THEN 'budget.create' ELSE 'budget.revise' END,1,
+        CASE WHEN NEW.supersedesId IS NULL THEN json_object('id',NEW.id,'categoryId',NEW.categoryId,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'periodStart',NEW.periodStart,'periodEnd',NEW.periodEnd,'rolloverPolicy',NEW.rolloverPolicy)
+        ELSE json_object('budgetId',NEW.supersedesId,'expectedRevision',NEW.revision-1,'categoryId',NEW.categoryId,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'periodStart',NEW.periodStart,'periodEnd',NEW.periodEnd,'rolloverPolicy',NEW.rolloverPolicy) END,
+        'pending',0,0,NEW.createdAt,NEW.createdAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_Budget_outbox_archive AFTER UPDATE OF archivedAt ON Budget
+    WHEN NEW.synced=0 AND OLD.archivedAt IS NULL AND NEW.archivedAt IS NOT NULL AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,attemptCount,nextAttemptAt,createdAt,updatedAt)
+      SELECT 'budget.archive:'||NEW.id,NEW.ownerId,c.cloudUserId,'budget',NEW.id,'budget.archive',1,json_object('id',NEW.id),'pending',0,0,NEW.archivedAt,NEW.archivedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_transaction_insert_guard BEFORE INSERT ON "Transaction"
+    WHEN NEW.synced=0 AND NEW.id NOT LIKE 'fund-transfer:%' AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+      AND NOT EXISTS(SELECT 1 FROM SyncOutbox o WHERE o.ownerId=NEW.ownerId AND o.entityType='transaction' AND o.entityId=NEW.id AND o.operation='transaction.create' AND o.status IN ('pending','in_flight','confirmed'))
+    BEGIN SELECT RAISE(ABORT,'cloud-linked transaction writes require an outbox mutation'); END;
+    CREATE TRIGGER CloudSync_SavingsGoal_outbox_insert AFTER INSERT ON SavingsGoal
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,createdAt,updatedAt)
+      SELECT 'saving.goal.create:'||NEW.id,NEW.ownerId,c.cloudUserId,'savings_goal',NEW.id,'saving.goal.create',1,
+        json_object('id',NEW.id,'name',NEW.name,'targetMinor',CAST(NEW.targetMinor AS TEXT),'currency',NEW.currency,'targetDate',NEW.targetDate,'createdAt',NEW.createdAt,'updatedAt',NEW.updatedAt), 'pending',NEW.createdAt,NEW.createdAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_SavingsGoal_outbox_update AFTER UPDATE ON SavingsGoal
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1) AND
+      (NEW.name IS NOT OLD.name OR NEW.targetMinor IS NOT OLD.targetMinor OR NEW.targetDate IS NOT OLD.targetDate OR NEW.status IS NOT OLD.status OR NEW.completedAt IS NOT OLD.completedAt OR NEW.archivedAt IS NOT OLD.archivedAt)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,createdAt,updatedAt)
+      SELECT 'saving.goal.update:'||NEW.id||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'savings_goal',NEW.id,'saving.goal.update',1,
+        json_object('id',NEW.id,'name',NEW.name,'targetMinor',CAST(NEW.targetMinor AS TEXT),'targetDate',NEW.targetDate,'status',NEW.status,'completedAt',NEW.completedAt,'archivedAt',NEW.archivedAt,'expectedUpdatedAt',OLD.updatedAt,'updatedAt',NEW.updatedAt), 'pending',NEW.updatedAt,NEW.updatedAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_SavingsGoalEvent_outbox_insert AFTER INSERT ON SavingsGoalEvent
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,dependencyEntityId,createdAt,updatedAt)
+      SELECT 'saving.goal.event:'||NEW.id,NEW.ownerId,c.cloudUserId,'savings_goal_event',NEW.id,'saving.goal.event',1,
+        json_object('id',NEW.id,'goalId',NEW.goalId,'eventType',NEW.eventType,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'accountId',NEW.accountId,'transactionId',NEW.transactionId,'idempotencyKey',NEW.idempotencyKey,'eventDate',NEW.eventDate,'note',NEW.note,
+          'sourceAccountId',(SELECT accountId FROM "Transaction" WHERE id=NEW.transactionId AND ownerId=NEW.ownerId),'destinationAccountId',(SELECT toAccountId FROM "Transaction" WHERE id=NEW.transactionId AND ownerId=NEW.ownerId)), 'pending',NEW.goalId,NEW.createdAt,NEW.createdAt
+      FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_EmergencyFundConfig_outbox_insert AFTER INSERT ON EmergencyFundConfig
+    WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,createdAt,updatedAt)
+      SELECT 'emergency.config:'||NEW.ownerId||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'emergency_config',NEW.ownerId,'emergency.config.save',1,
+        json_object('currency',NEW.currency,'coverageMonths',NEW.coverageMonths,'essentialMonthlyMinor',CAST(NEW.essentialMonthlyMinor AS TEXT)), 'pending',NEW.updatedAt,NEW.updatedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_EmergencyFundConfig_outbox_update AFTER UPDATE ON EmergencyFundConfig
+    WHEN EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1) AND
+      (NEW.currency IS NOT OLD.currency OR NEW.coverageMonths IS NOT OLD.coverageMonths OR NEW.essentialMonthlyMinor IS NOT OLD.essentialMonthlyMinor)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,createdAt,updatedAt)
+      SELECT 'emergency.config:'||NEW.ownerId||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'emergency_config',NEW.ownerId,'emergency.config.save',1,
+        json_object('currency',NEW.currency,'coverageMonths',NEW.coverageMonths,'essentialMonthlyMinor',CAST(NEW.essentialMonthlyMinor AS TEXT)), 'pending',NEW.updatedAt,NEW.updatedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+    CREATE TRIGGER CloudSync_EmergencyFundEvent_outbox_insert AFTER INSERT ON EmergencyFundEvent
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1)
+    BEGIN INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,status,dependencyEntityId,createdAt,updatedAt)
+      SELECT 'emergency.event:'||NEW.id,NEW.ownerId,c.cloudUserId,'emergency_event',NEW.id,'emergency.event',1,
+        json_object('id',NEW.id,'eventType',NEW.eventType,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,'accountId',NEW.accountId,'transactionId',NEW.transactionId,'idempotencyKey',NEW.idempotencyKey,'eventDate',NEW.eventDate,'note',NEW.note,
+          'sourceAccountId',(SELECT accountId FROM "Transaction" WHERE id=NEW.transactionId AND ownerId=NEW.ownerId),'destinationAccountId',(SELECT toAccountId FROM "Transaction" WHERE id=NEW.transactionId AND ownerId=NEW.ownerId)), 'pending',NEW.accountId,NEW.createdAt,NEW.createdAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1; END;
+  `);
+
+  for (const table of ['RecurringSchedule', 'ScheduleOccurrence']) {
+    await database.execAsync(`DROP TRIGGER IF EXISTS CloudSync_${table}_local_only_insert; DROP TRIGGER IF EXISTS CloudSync_${table}_local_only_update; DROP TRIGGER IF EXISTS CloudSync_${table}_local_only_delete;`);
+  }
+  await database.execAsync(`
+    DROP TRIGGER IF EXISTS ScheduleOccurrence_no_delete;
+    CREATE TRIGGER CloudSync_RecurringSchedule_bill_insert BEFORE INSERT ON RecurringSchedule
+    WHEN NEW.scheduleType='bill' AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+    BEGIN SELECT RAISE(ABORT,'recurring bill schedules are not supported for cloud-linked profiles yet'); END;
+    CREATE TRIGGER CloudSync_RecurringSchedule_bill_update BEFORE UPDATE ON RecurringSchedule
+    WHEN (NEW.scheduleType='bill' OR OLD.scheduleType='bill') AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+    BEGIN SELECT RAISE(ABORT,'recurring bill schedules are not supported for cloud-linked profiles yet'); END;
+    CREATE TRIGGER CloudSync_RecurringSchedule_no_delete BEFORE DELETE ON RecurringSchedule
+    WHEN EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=OLD.ownerId AND syncEnabled=1)
+    BEGIN SELECT RAISE(ABORT,'cloud-linked recurring schedules cannot be deleted'); END;
+    CREATE TRIGGER ScheduleOccurrence_no_delete BEFORE DELETE ON ScheduleOccurrence
+    BEGIN SELECT RAISE(ABORT,'schedule occurrence history cannot be deleted'); END;
+
+    CREATE TRIGGER CloudSync_RecurringSchedule_outbox_insert AFTER INSERT ON RecurringSchedule
+    WHEN NEW.synced=0 AND NEW.scheduleType!='bill' AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+      SELECT 'recurring.schedule.create:'||NEW.id,NEW.ownerId,c.cloudUserId,'recurring_schedule',NEW.id,'recurring.schedule.create',1,
+        json_object('id',NEW.id,'scheduleType',NEW.scheduleType,'name',NEW.name,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,
+          'classificationId',NEW.classificationId,'accountId',NEW.accountId,'toAccountId',NEW.toAccountId,'frequency',NEW.frequency,'startDate',NEW.startDate,
+          'endDate',NEW.endDate,'nextDueDate',NEW.nextDueDate,'status',NEW.status,'createdAt',NEW.createdAt,'updatedAt',NEW.updatedAt),
+        NEW.accountId,'pending',NEW.createdAt,NEW.createdAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_RecurringSchedule_outbox_update AFTER UPDATE ON RecurringSchedule
+    WHEN NEW.synced=0 AND NEW.scheduleType!='bill' AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1) AND
+      (NEW.name IS NOT OLD.name OR NEW.amountMinor IS NOT OLD.amountMinor OR NEW.currency IS NOT OLD.currency OR NEW.classificationId IS NOT OLD.classificationId OR
+       NEW.accountId IS NOT OLD.accountId OR NEW.toAccountId IS NOT OLD.toAccountId OR NEW.frequency IS NOT OLD.frequency OR NEW.startDate IS NOT OLD.startDate OR
+       NEW.endDate IS NOT OLD.endDate OR NEW.nextDueDate IS NOT OLD.nextDueDate OR NEW.status IS NOT OLD.status)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+      SELECT 'recurring.schedule.update:'||NEW.id||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'recurring_schedule',NEW.id,'recurring.schedule.update',1,
+        json_object('id',NEW.id,'scheduleType',NEW.scheduleType,'name',NEW.name,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,
+          'classificationId',NEW.classificationId,'accountId',NEW.accountId,'toAccountId',NEW.toAccountId,'frequency',NEW.frequency,'startDate',NEW.startDate,
+          'endDate',NEW.endDate,'nextDueDate',NEW.nextDueDate,'status',NEW.status,'expectedUpdatedAt',OLD.updatedAt,'updatedAt',NEW.updatedAt),
+        NEW.accountId,'pending',NEW.updatedAt,NEW.updatedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_ScheduleOccurrence_outbox_insert AFTER INSERT ON ScheduleOccurrence
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+      SELECT 'schedule.occurrence.create:'||NEW.id,NEW.ownerId,c.cloudUserId,'schedule_occurrence',NEW.id,'schedule.occurrence.create',1,
+        json_object('id',NEW.id,'scheduleId',NEW.scheduleId,'occurrenceDate',NEW.occurrenceDate,'status','pending','createdAt',NEW.createdAt),
+        NEW.scheduleId,'pending',NEW.createdAt,NEW.createdAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_ScheduleOccurrence_outbox_resolve AFTER UPDATE ON ScheduleOccurrence
+    WHEN OLD.status='pending' AND NEW.status IN ('posted','skipped') AND NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+      SELECT 'schedule.occurrence.resolve:'||NEW.id||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'schedule_occurrence',NEW.id,'schedule.occurrence.resolve',1,
+        json_object('scheduleId',NEW.scheduleId,'status',NEW.status,'transactionId',NEW.transactionId,'resolvedAt',NEW.resolvedAt,
+          'expectedRevision',COALESCE((SELECT serverRevision FROM CloudEntityMap WHERE ownerId=NEW.ownerId AND entityType='schedule_occurrence' AND localId=NEW.id),1)),
+        NEW.scheduleId,'pending',NEW.resolvedAt,NEW.resolvedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+  `);
+}
+
+/** Adds outbox support for the existing obligation, asset, and investment ledgers. */
+async function migrateExtendedFinanceSyncV13(database: MigrationDatabase): Promise<void> {
+  await database.execAsync(`
+    DROP TRIGGER IF EXISTS CloudSync_ScheduleOccurrence_outbox_resolve;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_bill_insert;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_bill_update;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_outbox_insert;
+    DROP TRIGGER IF EXISTS CloudSync_RecurringSchedule_outbox_update;
+    PRAGMA legacy_alter_table=ON;
+    ALTER TABLE CloudEntityMap RENAME TO CloudEntityMap_v12;
+    CREATE TABLE CloudEntityMap (
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget','savings_goal','savings_goal_event','emergency_config','emergency_event','recurring_schedule','schedule_occurrence','bill','bill_payment','bill_payment_correction','debt','debt_event','debt_interest_event','debt_event_correction','debt_repayment_schedule','asset','asset_valuation','asset_activity','investment_portfolio','investment_holding','investment_event','investment_price')),
+      localId TEXT NOT NULL, cloudId TEXT NOT NULL, serverRevision INTEGER,
+      PRIMARY KEY(ownerId,entityType,localId), UNIQUE(ownerId,entityType,cloudId)
+    );
+    INSERT INTO CloudEntityMap SELECT * FROM CloudEntityMap_v12;
+    DROP TABLE CloudEntityMap_v12;
+    DROP INDEX IF EXISTS SyncOutbox_ready_idx;
+    DROP INDEX IF EXISTS SyncOutbox_entity_idx;
+    ALTER TABLE SyncOutbox RENAME TO SyncOutbox_v12;
+    CREATE TABLE SyncOutbox (
+      mutationId TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      cloudUserId TEXT NOT NULL,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget','savings_goal','savings_goal_event','emergency_config','emergency_event','recurring_schedule','schedule_occurrence','bill','bill_payment','bill_payment_correction','debt','debt_event','debt_interest_event','debt_event_correction','debt_repayment_schedule','asset','asset_valuation','asset_activity','investment_portfolio','investment_holding','investment_event','investment_price')),
+      entityId TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('account.create','account.update','account.archive','transaction.create','budget.create','budget.revise','budget.archive',
+        'saving.goal.create','saving.goal.update','saving.goal.event','emergency.config.save','emergency.event',
+        'recurring.schedule.create','recurring.schedule.update','schedule.occurrence.create','schedule.occurrence.resolve',
+        'domain.create','domain.update')),
+      payloadVersion INTEGER NOT NULL CHECK(payloadVersion = 1), payloadJson TEXT NOT NULL CHECK(json_valid(payloadJson)),
+      dependencyEntityId TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','in_flight','confirmed','rejected')),
+      attemptCount INTEGER NOT NULL DEFAULT 0 CHECK(attemptCount >= 0 AND attemptCount <= 20), nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+      leaseUntil TEXT, lastErrorCategory TEXT, serverAckJson TEXT CHECK(serverAckJson IS NULL OR json_valid(serverAckJson)),
+      createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, UNIQUE(ownerId,mutationId)
+    );
+    INSERT INTO SyncOutbox SELECT * FROM SyncOutbox_v12;
+    DROP TABLE SyncOutbox_v12;
+    CREATE INDEX SyncOutbox_ready_idx ON SyncOutbox(ownerId,status,nextAttemptAt,createdAt,mutationId);
+    CREATE INDEX SyncOutbox_entity_idx ON SyncOutbox(ownerId,entityType,entityId,createdAt);
+    DROP TRIGGER IF EXISTS SyncOutbox_immutable_confirmed;
+    CREATE TRIGGER SyncOutbox_immutable_confirmed BEFORE UPDATE ON SyncOutbox WHEN OLD.status='confirmed' AND (
+      NEW.mutationId IS NOT OLD.mutationId OR NEW.ownerId IS NOT OLD.ownerId OR NEW.cloudUserId IS NOT OLD.cloudUserId OR
+      NEW.entityType IS NOT OLD.entityType OR NEW.entityId IS NOT OLD.entityId OR NEW.operation IS NOT OLD.operation OR
+      NEW.payloadVersion IS NOT OLD.payloadVersion OR NEW.payloadJson IS NOT OLD.payloadJson OR NEW.status IS NOT OLD.status OR NEW.serverAckJson IS NOT OLD.serverAckJson
+    ) BEGIN SELECT RAISE(ABORT,'confirmed sync mutations are immutable'); END;
+    PRAGMA legacy_alter_table=OFF;
+  `);
+  await database.execAsync(`
+    CREATE TRIGGER CloudSync_RecurringSchedule_outbox_insert AFTER INSERT ON RecurringSchedule
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+      SELECT 'recurring.schedule.create:'||NEW.id,NEW.ownerId,c.cloudUserId,'recurring_schedule',NEW.id,'recurring.schedule.create',1,
+        json_object('id',NEW.id,'scheduleType',NEW.scheduleType,'name',NEW.name,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,
+          'classificationId',NEW.classificationId,'accountId',NEW.accountId,'toAccountId',NEW.toAccountId,'billId',NEW.billId,'frequency',NEW.frequency,'startDate',NEW.startDate,
+          'endDate',NEW.endDate,'nextDueDate',NEW.nextDueDate,'status',NEW.status,'createdAt',NEW.createdAt,'updatedAt',NEW.updatedAt),
+        COALESCE(NEW.billId,NEW.accountId),'pending',NEW.createdAt,NEW.createdAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_RecurringSchedule_outbox_update AFTER UPDATE ON RecurringSchedule
+    WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1) AND
+      (NEW.name IS NOT OLD.name OR NEW.amountMinor IS NOT OLD.amountMinor OR NEW.currency IS NOT OLD.currency OR NEW.classificationId IS NOT OLD.classificationId OR
+       NEW.accountId IS NOT OLD.accountId OR NEW.toAccountId IS NOT OLD.toAccountId OR NEW.billId IS NOT OLD.billId OR NEW.frequency IS NOT OLD.frequency OR NEW.startDate IS NOT OLD.startDate OR
+       NEW.endDate IS NOT OLD.endDate OR NEW.nextDueDate IS NOT OLD.nextDueDate OR NEW.status IS NOT OLD.status)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+      SELECT 'recurring.schedule.update:'||NEW.id||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'recurring_schedule',NEW.id,'recurring.schedule.update',1,
+        json_object('id',NEW.id,'scheduleType',NEW.scheduleType,'name',NEW.name,'amountMinor',CAST(NEW.amountMinor AS TEXT),'currency',NEW.currency,
+          'classificationId',NEW.classificationId,'accountId',NEW.accountId,'toAccountId',NEW.toAccountId,'billId',NEW.billId,'frequency',NEW.frequency,'startDate',NEW.startDate,
+          'endDate',NEW.endDate,'nextDueDate',NEW.nextDueDate,'status',NEW.status,'expectedUpdatedAt',OLD.updatedAt,'updatedAt',NEW.updatedAt),
+        COALESCE(NEW.billId,NEW.accountId),'pending',NEW.updatedAt,NEW.updatedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+    CREATE TRIGGER CloudSync_ScheduleOccurrence_outbox_resolve AFTER UPDATE ON ScheduleOccurrence
+    WHEN OLD.status='pending' AND NEW.status IN ('posted','skipped') AND NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+    BEGIN
+      INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+      SELECT 'schedule.occurrence.resolve:'||NEW.id||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'schedule_occurrence',NEW.id,'schedule.occurrence.resolve',1,
+        json_object('scheduleId',NEW.scheduleId,'status',NEW.status,'transactionId',NEW.transactionId,'resolvedAt',NEW.resolvedAt,
+          'expectedRevision',COALESCE((SELECT serverRevision FROM CloudEntityMap WHERE ownerId=NEW.ownerId AND entityType='schedule_occurrence' AND localId=NEW.id),1)),
+        NEW.scheduleId,'pending',NEW.resolvedAt,NEW.resolvedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+    END;
+  `);
+
+  // The JSON payload is a versioned snapshot of each local row. Linked account,
+  // transaction, and parent IDs remain explicit for server-side FK validation.
+  const specs: { table: string; type: string; parent?: string; account?: string; transaction?: string; columns: string[]; mutable?: boolean }[] = [
+    { table: 'Bill', type: 'bill', account: 'accountId', columns: ['id','name','categoryId','amountMinor','currency','dueDate','accountId','scheduleId','status','reminderId','createdAt','updatedAt'], mutable: true },
+    { table: 'BillPayment', type: 'bill_payment', parent: 'bill', transaction: 'transactionId', columns: ['id','billId','amountMinor','transactionId','paidAt','idempotencyKey','createdAt'] },
+    { table: 'BillPaymentCorrection', type: 'bill_payment_correction', parent: 'bill', transaction: 'reversalTransactionId', columns: ['id','billId','originalPaymentId','reversalTransactionId','replacementPaymentId','reason','createdAt'] },
+    { table: 'Debt', type: 'debt', account: 'accountId', columns: ['id','direction','counterparty','principalMinor','currency','accountId','interestRateBps','openedAt','dueDate','status','createdAt','updatedAt'], mutable: true },
+    { table: 'DebtEvent', type: 'debt_event', parent: 'debt', account: 'accountId', transaction: 'transactionId', columns: ['id','debtId','eventType','principalMinor','interestMinor','accountId','transactionId','eventDate','idempotencyKey','note','createdAt'] },
+    { table: 'DebtInterestEvent', type: 'debt_interest_event', parent: 'debt', columns: ['id','debtId','eventType','amountMinor','reversalOfEventId','eventDate','idempotencyKey','note','createdAt'] },
+    { table: 'DebtEventCorrection', type: 'debt_event_correction', parent: 'debt', transaction: 'reversalTransactionId', columns: ['id','debtId','originalEventId','reversalTransactionId','replacementEventId','reason','createdAt'] },
+    { table: 'DebtRepaymentSchedule', type: 'debt_repayment_schedule', parent: 'debt', columns: ['id','debtId','frequency','firstDueDate','installmentAmountMinor','interestMethod','rateBps','installmentCount','status','createdAt','updatedAt'], mutable: true },
+    { table: 'Asset', type: 'asset', columns: ['id','name','category','currency','purchaseValueMinor','purchaseDate','ownershipBps','notes','createdAt'] },
+    { table: 'AssetValuation', type: 'asset_valuation', parent: 'asset', columns: ['id','assetId','valueMinor','valuationDate','source','idempotencyKey','createdAt'] },
+    { table: 'AssetActivity', type: 'asset_activity', parent: 'asset', account: 'accountId', transaction: 'transactionId', columns: ['id','assetId','eventType','ownershipBps','costBasisMinor','proceedsMinor','accountId','transactionId','eventDate','idempotencyKey','createdAt'] },
+    { table: 'InvestmentPortfolio', type: 'investment_portfolio', account: 'cashAccountId', columns: ['id','name','currency','cashAccountId','createdAt'] },
+    { table: 'InvestmentHolding', type: 'investment_holding', parent: 'investment_portfolio', columns: ['id','portfolioId','symbol','name','category','currency','createdAt'] },
+    { table: 'InvestmentEvent', type: 'investment_event', parent: 'investment_holding', transaction: 'transactionId', columns: ['id','holdingId','eventType','quantityMicros','unitPriceMinor','feeMinor','amountMinor','splitNumerator','splitDenominator','transactionId','eventDate','idempotencyKey','createdAt'] },
+    { table: 'InvestmentPrice', type: 'investment_price', parent: 'investment_holding', columns: ['id','holdingId','unitPriceMinor','priceDate','source','idempotencyKey','createdAt'] },
+  ];
+  for (const spec of specs) {
+    const columns = await columnsFor(database,spec.table);
+    await addColumnIfMissing(database,spec.table,columns,'synced','INTEGER NOT NULL DEFAULT 0 CHECK(synced IN (0,1))');
+  }
+  for (const spec of specs) {
+    for (const suffix of ['insert','update','delete']) await database.execAsync(`DROP TRIGGER IF EXISTS CloudSync_${spec.table}_local_only_${suffix}`);
+    const data = `json_object(${spec.columns.map((c) => `'${c}',NEW."${c}"`).join(',')})`;
+    const parentKey = spec.parent ? spec.columns.find((c) => ['billId','debtId','assetId','portfolioId','holdingId'].includes(c)) : null;
+    const parentExpr = parentKey ? `NEW."${parentKey}"` : 'NULL';
+    const parentTypeExpr = spec.parent ? `'${spec.parent}'` : 'NULL';
+    const accountExpr = spec.account ? `NEW."${spec.account}"` : 'NULL';
+    const txExpr = spec.transaction ? `NEW."${spec.transaction}"` : 'NULL';
+    const expectedRevision = spec.mutable ? `,'expectedRevision',COALESCE((SELECT serverRevision FROM CloudEntityMap WHERE ownerId=NEW.ownerId AND entityType='${spec.type}' AND localId=NEW.id),1)+(SELECT COUNT(*) FROM SyncOutbox WHERE ownerId=NEW.ownerId AND entityType='${spec.type}' AND entityId=NEW.id AND operation='domain.update' AND status IN ('pending','in_flight'))` : '';
+    const immutableGuard = spec.mutable ? '' : `
+      CREATE TRIGGER CloudSync_${spec.table}_immutable_update BEFORE UPDATE ON "${spec.table}"
+      WHEN EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=OLD.ownerId AND syncEnabled=1)
+      BEGIN SELECT RAISE(ABORT,'cloud-linked ${spec.type} history cannot be overwritten'); END;`;
+    await database.execAsync(`
+      DROP TRIGGER IF EXISTS CloudSync_${spec.table}_outbox_insert;
+      DROP TRIGGER IF EXISTS CloudSync_${spec.table}_outbox_update;
+      CREATE TRIGGER CloudSync_${spec.table}_outbox_insert AFTER INSERT ON "${spec.table}"
+      WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+      BEGIN
+        INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+        SELECT 'domain:${spec.type}:'||NEW.id,NEW.ownerId,c.cloudUserId,'${spec.type}',NEW.id,'domain.create',1,
+          json_object('entityType','${spec.type}','id',NEW.id,'parentType',${parentTypeExpr},'parentId',${parentExpr},'accountId',${accountExpr},'transactionId',${txExpr},'scheduleId',${spec.table === 'Bill' ? 'NEW.scheduleId' : 'NULL'},'data',${data}),
+          COALESCE(${parentExpr},${accountExpr},${txExpr}),'pending',NEW.createdAt,NEW.createdAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+      END;
+      ${spec.mutable ? `CREATE TRIGGER CloudSync_${spec.table}_outbox_update AFTER UPDATE ON "${spec.table}"
+      WHEN NEW.synced=0 AND EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=NEW.ownerId AND syncEnabled=1)
+      BEGIN
+        INSERT INTO SyncOutbox(mutationId,ownerId,cloudUserId,entityType,entityId,operation,payloadVersion,payloadJson,dependencyEntityId,status,createdAt,updatedAt)
+        SELECT 'domain:${spec.type}:'||NEW.id||':'||lower(hex(randomblob(16))),NEW.ownerId,c.cloudUserId,'${spec.type}',NEW.id,'domain.update',1,
+          json_object('entityType','${spec.type}','id',NEW.id,'parentType',${parentTypeExpr},'parentId',${parentExpr},'accountId',${accountExpr},'transactionId',${txExpr},'scheduleId',${spec.table === 'Bill' ? 'NEW.scheduleId' : 'NULL'},'data',${data}${expectedRevision}),
+          COALESCE(${parentExpr},${accountExpr},${txExpr}),'pending',NEW.updatedAt,NEW.updatedAt FROM CloudIdentity c WHERE c.ownerId=NEW.ownerId AND c.syncEnabled=1;
+      END;` : ''}
+      ${immutableGuard}
+      CREATE TRIGGER CloudSync_${spec.table}_immutable_delete BEFORE DELETE ON "${spec.table}"
+      WHEN EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId=OLD.ownerId AND syncEnabled=1)
+      BEGIN SELECT RAISE(ABORT,'cloud-linked ${spec.type} history cannot be deleted'); END;
+    `);
+  }
+  for (const table of ['BillPaymentCorrectionReplacement','DebtEventCorrectionReplacement']) {
+    for (const suffix of ['insert','update','delete']) await database.execAsync(`DROP TRIGGER IF EXISTS CloudSync_${table}_local_only_${suffix}`);
+  }
+  await database.execAsync(`
+    CREATE TRIGGER CloudSync_BillPaymentCorrectionReplacement_no_delete BEFORE DELETE ON BillPaymentCorrectionReplacement
+    WHEN EXISTS(SELECT 1 FROM BillPaymentCorrection c JOIN CloudIdentity i ON i.ownerId=c.ownerId AND i.syncEnabled=1 WHERE c.id=OLD.correctionId)
+    BEGIN SELECT RAISE(ABORT,'cloud-linked bill payment correction history cannot be deleted'); END;
+    CREATE TRIGGER CloudSync_DebtEventCorrectionReplacement_no_delete BEFORE DELETE ON DebtEventCorrectionReplacement
+    WHEN EXISTS(SELECT 1 FROM DebtEventCorrection c JOIN CloudIdentity i ON i.ownerId=c.ownerId AND i.syncEnabled=1 WHERE c.id=OLD.correctionId)
+    BEGIN SELECT RAISE(ABORT,'cloud-linked debt correction history cannot be deleted'); END;
+  `);
 }
 
 async function migrateLegacyColumns(database: MigrationDatabase): Promise<void> {
@@ -1087,6 +1836,11 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
     if (currentVersion < 6) await migrateAssetsInvestmentsV6(database);
     if (currentVersion < 7) await migrateOnboardingStateV7(database);
     if (currentVersion < 8) await migrateDatabaseHardeningV8(database);
+    if (currentVersion < 9) await migrateCloudSyncV9(database);
+    if (currentVersion < 10) await migrateCloudBudgetSyncV10(database);
+    if (currentVersion < 11) await migrateCloudSavingsSyncV11(database);
+    if (currentVersion < 12) await migrateRecurringScheduleSyncV12(database);
+    if (currentVersion < 13) await migrateExtendedFinanceSyncV13(database);
     // No server acknowledgement can be verified for the legacy sync flags.
     await database.execAsync('UPDATE Account SET synced = 0 WHERE synced != 0');
     await database.execAsync('UPDATE "Transaction" SET synced = 0 WHERE synced != 0');

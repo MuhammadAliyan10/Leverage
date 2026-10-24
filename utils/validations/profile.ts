@@ -6,7 +6,7 @@ export const profileNameSchema = z.object({
 
 export const changePasswordSchema = z.object({
   currentPassword: z.string().min(1, 'Enter your current password.').max(1024, 'Password is too long.'),
-  newPassword: z.string().min(10, 'Use at least 10 characters.').max(1024, 'Password is too long.')
+  newPassword: z.string().min(12, 'Use at least 12 characters.').max(1024, 'Password is too long.')
     .regex(/[A-Z]/, 'Add at least one uppercase letter.').regex(/[0-9]/, 'Add at least one number.'),
   confirmPassword: z.string().min(1, 'Confirm your new password.').max(1024, 'Password is too long.'),
 }).refine((data) => data.newPassword === data.confirmPassword, {

@@ -3,7 +3,7 @@ import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Linking, Moda
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
-import { useRouter } from 'expo-router';
+import { useRouter, type Href } from 'expo-router';
 import { Activity, Bell, Building2, CalendarClock, ChevronRight, Cloud, Coins, Eye, EyeOff, Fingerprint, KeyRound, LockKeyhole, LogOut, Moon, PiggyBank, ShieldCheck, TrendingUp, UserRound, UsersRound, X } from 'lucide-react-native';
 import type { LucideIcon } from 'lucide-react-native';
 import { Controller, useForm } from 'react-hook-form';
@@ -13,10 +13,13 @@ import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { useAuth } from '../../src/context/AuthContext';
 import type { AppearancePreference } from '../../src/security/settingsPreferences';
-import type { DbUser } from '../../src/db/local/client';
+import { localDb, type DbUser } from '../../src/db/local/client';
 import { useAppLock } from '../../hooks/useAppLock';
 import { changePasswordSchema, profileNameSchema, type ChangePasswordForm, type ProfileNameForm } from '../../utils/validations/profile';
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
+import { CloudSyncModal } from '../../components/settings/CloudSyncModal';
+import { cloudApiConfigured } from '../../src/cloud/authClient';
+import { isDisposableAndroidVerificationBuild } from '../../src/security/verificationBuild';
 
 interface SettingRowProps {
   icon: LucideIcon;
@@ -69,9 +72,11 @@ type ProfileRow = Omit<DbUser, 'passwordHash'>;
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const { user, sessionNotice, signOut, updateProfileName, changePassword, listProfiles, appearance, profileSettings, updateAppearance, updateProfileSettings, switchLocalProfile } = useAuth();
+  const { user, sessionNotice, signOut, updateProfileName, changePassword, listProfiles, appearance, profileSettings, updateAppearance, updateProfileSettings, switchLocalProfile, restoreBackup } = useAuth();
   const { biometricAvailability } = useAppLock(false, () => undefined);
   const [panel, setPanel] = useState<'name' | 'password' | 'switch' | null>(null);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [cloudSyncOpen, setCloudSyncOpen] = useState(false);
   const [biometricAvailable, setBiometricAvailable] = useState(false);
   const [permission, setPermission] = useState<PermissionState>(Platform.OS === 'web' ? 'unavailable' : 'loading');
   const [permissionCanAskAgain, setPermissionCanAskAgain] = useState(false);
@@ -100,6 +105,7 @@ export default function SettingsScreen() {
 
   const initials = user?.fullName.split(' ').map((part) => part[0]).join('').toUpperCase().slice(0, 2) ?? '?';
   const version = Constants.expoConfig?.version ?? Constants.nativeAppVersion ?? 'Unavailable';
+  const disposableVerificationBuild = isDisposableAndroidVerificationBuild(Constants.expoConfig?.extra);
 
   const saveAppearance = async (value: AppearancePreference) => {
     setSavingSettings(true);
@@ -160,7 +166,7 @@ export default function SettingsScreen() {
   };
 
   const handleSignOut = () => {
-    const message = 'Your local financial records will remain on this device. Pending HouseLog bill reminders for this profile will be removed.';
+    const message = 'Your local financial records will remain on this device. Pending Mizan bill reminders for this profile will be removed.';
     if (Platform.OS === 'web') {
       if (typeof window !== 'undefined' && window.confirm(`Sign out?\n\n${message}`)) void signOut();
       return;
@@ -217,20 +223,21 @@ export default function SettingsScreen() {
           <SettingRow icon={ShieldCheck} title="Password fallback" value="Always available" />
         </Section>
 
-        <Section title="Notifications" description="HouseLog schedules local bill reminders only. Notification text is generic and does not include bill names or amounts.">
+        <Section title="Notifications" description="Mizan schedules local bill reminders only. Notification text is generic and does not include bill names or amounts.">
           <SettingRow icon={Bell} title="Device permission" value={permission === 'loading' ? 'Checking…' : permission === 'allowed' ? 'Allowed' : permission === 'not-allowed' ? 'Not allowed' : 'Unavailable'} onPress={permission === 'not-allowed' && Platform.OS !== 'web' ? () => void manageNotificationPermission() : undefined} accessibilityLabel="Notification permission status" />
           <SettingRow icon={Bell} title="Local bill reminders" right={<Switch accessibilityLabel="Enable local bill reminders" accessibilityState={{ checked: profileSettings.remindersEnabled, disabled: savingSettings }} value={profileSettings.remindersEnabled} disabled={savingSettings} onValueChange={(value) => void toggleReminders(value)} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" />} />
           <SettingRow icon={CalendarClock} title="Manage bill reminders" onPress={() => router.push('/obligations')} />
         </Section>
 
-        <Section title="Data & privacy" description="HouseLog keeps this profile’s data in the local SQLite database on this device. Cloud sync is not available. The production database is not verified as encrypted at rest. Encrypted backup utilities exist, but user-facing backup and restore have not been verified; there is currently no verified recovery path if this device is lost. Forgotten profile passwords cannot be reset remotely.">
+        <Section title="Data & privacy" description="Profiles are stored separately on each device. When cloud sync is connected, it currently covers accounts, transactions, budgets, savings goals, and emergency-fund records. Recurring schedules, bills, debts, assets, and investments stay local, and existing history is not imported. SQLCipher is configured for native builds, but encryption and recovery still require Android runtime verification. Encrypted backups include all local profiles on this device; keep the backup file and its separate passphrase safe. Mizan cannot recover a forgotten passphrase. Android automatic device backup is disabled.">
           <SettingRow icon={ShieldCheck} title="Storage" value="This device only" />
-          <SettingRow icon={Activity} title="Backup & restore" value="Not available" />
+          {disposableVerificationBuild ? <SettingRow icon={ShieldCheck} title="Native storage verification" value="Disposable test only" onPress={() => router.push('/native-verification' as Href)} /> : null}
+          <SettingRow icon={Activity} title="Encrypted backup & restore" value={Platform.OS === 'web' ? 'Mobile app only' : 'Available'} onPress={Platform.OS === 'web' ? undefined : () => setRecoveryOpen(true)} />
         </Section>
 
-        <Section title="About" description="Personal finance tracking designed to work offline. HouseLog does not connect to banks or provide live investment prices.">
-          <SettingRow icon={Activity} title="HouseLog version" value={version} />
-          <SettingRow icon={Cloud} title="Cloud sync" value="Not available" />
+        <Section title="About" description="Personal finance tracking designed to work offline. Mizan does not connect to banks or provide live investment prices.">
+          <SettingRow icon={Activity} title="Mizan version" value={version} />
+          <SettingRow icon={Cloud} title="Cloud sync" value={Platform.OS === 'web' ? 'Mobile app only' : cloudApiConfigured ? 'Connect account' : 'Not configured'} onPress={Platform.OS === 'web' ? undefined : () => setCloudSyncOpen(true)} />
         </Section>
 
         <Section title="Session">
@@ -249,8 +256,75 @@ export default function SettingsScreen() {
         loadProfiles={listProfiles}
         onSwitchProfile={switchLocalProfile}
       />
+      <RecoveryModal
+        key={recoveryOpen ? 'recovery-open' : 'recovery-closed'}
+        visible={recoveryOpen}
+        onClose={() => setRecoveryOpen(false)}
+        onExport={async (passphrase) => {
+          if (!user) throw new Error('Unlock a profile before creating a backup.');
+          await localDb.recovery.exportEncryptedBackup(user.id, passphrase);
+        }}
+        onRestore={async (bytes, passphrase) => {
+          await restoreBackup(bytes, passphrase);
+          setRecoveryOpen(false);
+          Alert.alert('Backup restored', 'Sign in with the restored local profile to continue.');
+        }}
+      />
+      <CloudSyncModal visible={cloudSyncOpen} ownerId={user?.id ?? ''} fullName={user?.fullName ?? ''} onClose={() => setCloudSyncOpen(false)} />
     </SafeAreaView>
   );
+}
+
+function RecoveryModal({ visible, onClose, onExport, onRestore }: {
+  visible: boolean;
+  onClose: () => void;
+  onExport: (passphrase: string) => Promise<void>;
+  onRestore: (backup: Uint8Array, passphrase: string) => Promise<void>;
+}) {
+  const [passphrase, setPassphrase] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const validate = () => {
+    if (passphrase.length < 12 || passphrase.length > 256) return 'Use a passphrase between 12 and 256 characters.';
+    if (confirmation !== passphrase) return 'The passphrases do not match.';
+    return null;
+  };
+  const exportBackup = async () => {
+    const message = validate();
+    if (message) { setError(message); return; }
+    setBusy(true); setError(null);
+    try { await onExport(passphrase); Alert.alert('Encrypted backup created', 'Keep the backup file and passphrase in separate safe places. Mizan cannot recover a forgotten passphrase.'); onClose(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Backup could not be created.'); }
+    finally { setBusy(false); }
+  };
+  const restoreBackup = async () => {
+    if (passphrase.length < 12 || passphrase.length > 256) { setError('Enter the passphrase used to create this backup.'); return; }
+    setBusy(true); setError(null);
+    try {
+      const bytes = await localDb.recovery.pickEncryptedBackup();
+      if (!bytes) { setBusy(false); return; }
+      Alert.alert('Replace local financial records?', 'Mizan will validate the backup first, then replace the records on this device. The current database is preserved unless the restored database passes verification.', [
+        { text: 'Cancel', style: 'cancel', onPress: () => setBusy(false) },
+        { text: 'Validate and restore', style: 'destructive', onPress: () => { void onRestore(bytes, passphrase).catch((cause) => setError(cause instanceof Error ? cause.message : 'Restore failed.')).finally(() => setBusy(false)); } },
+      ]);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Backup file could not be opened.'); setBusy(false); }
+  };
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1 justify-end bg-black/40">
+      <SafeAreaView edges={['bottom']} className="rounded-t-3xl bg-gray-50 px-5 pt-4 dark:bg-neutral-950" style={{ borderBottomLeftRadius: 0, borderBottomRightRadius: 0 }}>
+        <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-xl font-bold text-gray-900 dark:text-white">Encrypted backup</Text><Pressable accessibilityRole="button" accessibilityLabel="Close backup" onPress={onClose} className="min-h-11 min-w-11 items-center justify-center rounded-full bg-white dark:bg-neutral-800"><X size={20} color="#687386" /></Pressable></View>
+        <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">This file contains all local profiles on this device. Use a unique passphrase with at least 12 characters. A random salt and PBKDF2 protect the encrypted backup.</Text>
+        <Input label="Backup passphrase" value={passphrase} onChangeText={setPassphrase} secureTextEntry={!showPassword} autoCapitalize="none" autoCorrect={false} error={undefined} trailingAction={<Pressable accessibilityRole="button" accessibilityLabel={showPassword ? 'Hide passphrase' : 'Show passphrase'} onPress={() => setShowPassword((shown) => !shown)}>{showPassword ? <EyeOff size={19} color="#737d8d" /> : <Eye size={19} color="#737d8d" />}</Pressable>} />
+        <Input label="Confirm passphrase" value={confirmation} onChangeText={setConfirmation} secureTextEntry={!showPassword} autoCapitalize="none" autoCorrect={false} error={undefined} />
+        {error ? <Text accessibilityRole="alert" className="font-body mb-3 text-sm text-red-600">{error}</Text> : null}
+        <Button title="Create encrypted backup" onPress={() => void exportBackup()} isLoading={busy} />
+        <Pressable accessibilityRole="button" disabled={busy} onPress={() => void restoreBackup()} className="mt-3 min-h-12 items-center justify-center"><Text className="font-body font-semibold text-primary">Choose backup file and restore</Text></Pressable>
+        <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Restore replaces this device’s local records after integrity, schema, profile, and financial checks. A successful restore signs you out.</Text>
+      </SafeAreaView>
+    </KeyboardAvoidingView>
+  </Modal>;
 }
 
 function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSaveName, onChangePassword, loadProfiles, onSwitchProfile }: {
@@ -304,7 +378,7 @@ function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSav
     catch (error) { nameForm.setError('fullName', { type: 'server', message: error instanceof Error ? error.message : 'Name could not be saved.' }); }
   };
   const submitPassword = async (data: ChangePasswordForm) => {
-    try { await onChangePassword(data.currentPassword, data.newPassword); onClose(); Alert.alert('Password changed', 'Your local profile password was updated. HouseLog cannot reset it remotely.'); }
+    try { await onChangePassword(data.currentPassword, data.newPassword); onClose(); Alert.alert('Password changed', 'Your local profile password was updated. Mizan cannot reset it remotely.'); }
     catch (error) { passwordForm.setError('currentPassword', { type: 'server', message: error instanceof Error ? error.message : 'Password could not be changed.' }); }
   };
   const chooseProfile = async (profile: ProfileRow) => {
@@ -338,7 +412,7 @@ function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSav
             <Button title="Change password" onPress={passwordForm.handleSubmit(submitPassword)} isLoading={passwordForm.formState.isSubmitting} />
           </> : null}
           {mode === 'switch' ? <>
-            <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">Choose a profile, then enter its password. HouseLog will not authenticate it automatically.</Text>
+            <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">Choose a profile, then enter its password. Mizan will not authenticate it automatically.</Text>
             {loadingProfiles ? <View className="items-center py-6"><ActivityIndicator color={PRIMARY_COLOR} /><Text className="font-body mt-2 text-sm text-gray-500">Loading profiles…</Text></View> : null}
             {profileError ? <View className="py-2"><Text accessibilityRole="alert" className="font-body text-sm text-red-600">{profileError}</Text><Pressable accessibilityRole="button" onPress={() => setRetry((value) => value + 1)} className="mt-3 min-h-11 justify-center"><Text className="font-body font-semibold text-primary">Retry</Text></Pressable></View> : null}
             {!loadingProfiles && !profileError ? <ScrollView keyboardShouldPersistTaps="handled">

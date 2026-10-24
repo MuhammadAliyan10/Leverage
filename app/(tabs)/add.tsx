@@ -27,7 +27,6 @@ import {
   CURRENCIES,
   isCurrencyCode,
   resolveClassification,
-  type ClassificationId,
 } from '../../src/finance/domain';
 
 // 1. Zod Validation Schema
@@ -84,34 +83,13 @@ const addTransactionSchema = z.object({
 
 type AddTransactionFormData = z.infer<typeof addTransactionSchema>;
 
-const CLASSIFICATION_EMOJI: Record<ClassificationId, string> = {
-  salary: '💼',
-  freelance: '🧑‍💻',
-  business_revenue: '🏪',
-  family_gift: '🎁',
-  foreign_remittance: '🌍',
-  investment_return: '📈',
-  rental_income: '🏠',
-  other_income: '＋',
-  food: '🍔',
-  transport: '🚗',
-  bills: '💡',
-  shopping: '🛍️',
-  health: '💊',
-  bank_fee: '🏦',
-  housing: '🏠',
-  other_expense: '＋',
-  expense_refund: '↩️',
-};
 const EXPENSE_CATEGORIES = EXPENSE_CLASSIFICATION_IDS.map((id) => ({
   id,
   name: CLASSIFICATIONS[id].label,
-  emoji: CLASSIFICATION_EMOJI[id],
 }));
 const INCOME_SOURCES = INCOME_CLASSIFICATION_IDS.map((id) => ({
   id,
   name: CLASSIFICATIONS[id].label,
-  emoji: CLASSIFICATION_EMOJI[id],
 }));
 
 registerTranslation('en', en);
@@ -385,12 +363,12 @@ export default function AddTransactionScreen() {
   const saveTransaction = (addAnother = false) => { void handleSubmit((data) => onSubmit(data, addAnother))(); };
 
   const getTypeTextClass = (type: string, currentSelected: string) => {
-    if (type !== currentSelected) return 'text-gray-500';
+    if (type !== currentSelected) return 'text-gray-500 dark:text-neutral-300';
     switch (type) {
-      case 'Expense': return 'text-red-500';
-      case 'Income': return 'text-green-500';
-      case 'Transfer': return 'text-blue-500';
-      default: return 'text-gray-500';
+      case 'Expense': return 'text-red-500 dark:text-red-300';
+      case 'Income': return 'text-green-500 dark:text-green-300';
+      case 'Transfer': return 'text-blue-500 dark:text-blue-300';
+      default: return 'text-gray-500 dark:text-neutral-300';
     }
   };
 
@@ -426,14 +404,14 @@ export default function AddTransactionScreen() {
             {correctionRestriction && <Text className="font-body mb-3 w-full border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{correctionRestriction}</Text>}
             {profileChanged && <Text className="font-body mb-3 w-full border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">Your profile changed while this form was open. Please reopen Add to continue safely.</Text>}
             {correctionLoadFailed && <Pressable accessibilityRole="button" className="mb-3 self-center border border-red-300 px-4 py-2" onPress={() => { setCorrectionLoadedId(null); setCorrectionLoadFailedId(null); setCorrectionRetry((value) => value + 1); }}><Text className="font-body text-sm font-semibold text-red-700">Retry loading original transaction</Text></Pressable>}
-            <View className="flex-row rounded-full bg-gray-200 p-1 w-full max-w-sm">
+            <View className="flex-row rounded-full bg-gray-200 p-1 w-full max-w-sm dark:bg-neutral-900">
               {(['Expense', 'Income', 'Transfer'] as const).map((type) => (
                 <Pressable
                   key={type}
                   accessibilityRole="button"
                   accessibilityState={{ selected: transactionType === type }}
                   disabled={Boolean(correctionOf && !correctionReady)}
-                  className={`min-h-11 flex-1 items-center justify-center rounded-full py-2.5 ${transactionType === type ? 'bg-white shadow-sm dark:bg-neutral-800' : ''}`}
+                  className={`min-h-11 flex-1 items-center justify-center rounded-full py-2.5 ${transactionType === type ? 'bg-white shadow-sm dark:bg-neutral-700' : ''}`}
                   onPress={() => {
                     setValue('type', type);
                     setAccountSearch('');
@@ -547,7 +525,6 @@ export default function AddTransactionScreen() {
                       onPress={() => setValue('categoryId', cat.id, { shouldValidate: true })}
                       className={`mr-2 min-h-11 flex-row items-center rounded-full border px-3 py-2 ${isSelected ? 'border-primary bg-primary/10' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
                     >
-                      <Text className="font-body text-base mr-2">{cat.emoji}</Text>
                       <Text className={`font-body text-sm font-semibold ${isSelected ? 'text-primary' : 'text-gray-600 dark:text-neutral-300'}`}>{cat.name}</Text>
                     </Pressable>
                   );
@@ -614,7 +591,7 @@ export default function AddTransactionScreen() {
                   <Text className="font-body text-xs leading-5 text-gray-500">Enter the exchange rate shown by your bank or provider. The converted PKR amount is what will be added to your account.</Text>
                 </View>}
                 <Text className="font-body mt-4 text-sm font-semibold text-gray-700">Tax record</Text>
-                <Text className="font-body mt-1 text-xs text-gray-500">Your record only; HouseLog does not decide the legal tax treatment.</Text>
+                <Text className="font-body mt-1 text-xs text-gray-500">Your record only; Mizan does not decide the legal tax treatment.</Text>
                 <View className="mt-2 flex-row flex-wrap gap-2">{([['unreviewed', 'Not reviewed'], ['taxable', 'Taxable'], ['non_taxable', 'Non-taxable']] as const).map(([value, label]) => <Pressable key={value} onPress={() => setValue('taxStatus', value)} className={`rounded-full border px-3 py-2 ${selectedTaxStatus === value ? 'border-primary bg-primary/10' : 'border-gray-200'}`}><Text className="font-body text-xs font-semibold">{label}</Text></Pressable>)}</View>
               </View>
             )}

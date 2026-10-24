@@ -12,9 +12,12 @@ export interface RecurringScheduleDraft {
   amountMinor: number; currency: string; classificationId?: string | null; accountId: string; toAccountId?: string | null;
   billId?: string | null; frequency: RecurrenceFrequency; startDate: string; endDate?: string | null;
 }
-interface ScheduleRow extends RecurringScheduleDraft { nextDueDate: string; status: 'active' | 'paused' | 'cancelled' }
-interface BillRow { id: string; ownerId: string; name: string; categoryId: string; amountMinor: number; currency: string; dueDate: string; accountId: string; status: string; paidMinor: number; reminderId:string|null }
-interface DebtRow { id: string; ownerId: string; direction: 'borrowed' | 'lent'; counterparty: string; principalMinor: number; currency: string; accountId: string; interestRateBps: number; status: string; principalSettledMinor: number; interestPaidMinor: number; interestAccruedMinor: number }
+export interface ScheduleRow extends RecurringScheduleDraft { nextDueDate: string; status: 'active' | 'paused' | 'cancelled' }
+export interface BillRow { id: string; ownerId: string; name: string; categoryId: string; amountMinor: number; currency: string; dueDate: string; accountId: string; status: string; paidMinor: number; reminderId:string|null; scheduleId:string|null }
+export interface DebtRow { id: string; ownerId: string; direction: 'borrowed' | 'lent'; counterparty: string; principalMinor: number; currency: string; accountId: string; interestRateBps: number; status: string; principalSettledMinor: number; interestPaidMinor: number; interestAccruedMinor: number }
+export interface BillPaymentHistoryRow { id:string; ownerId:string; billId:string; amountMinor:number; transactionId:string; paidAt:string; corrected:number; reason:string|null; reversalTransactionId:string|null; replacementPaymentId:string|null }
+export interface DebtHistoryRow { id:string; ownerId:string; debtId:string; eventType:string; principalMinor:number; interestMinor:number; accountId:string|null; transactionId:string|null; eventDate:string; note:string; corrected:number; isAccrual:number }
+export interface ScheduleOccurrenceRow { id:string; ownerId:string; scheduleId:string; occurrenceDate:string; status:'pending'|'posted'|'skipped'; transactionId:string|null; resolvedAt:string|null; name:string; scheduleType:'income'|'expense'|'transfer'|'bill'; amountMinor:number; currency:string; accountId:string; toAccountId:string|null; classificationId:string|null; billId:string|null; frequency:RecurrenceFrequency; startDate:string; endDate:string|null; nextDueDate:string; scheduleStatus:'active'|'paused'|'cancelled' }
 
 function validateDraft(input: RecurringScheduleDraft): void {
   if (!input.id.trim() || !input.ownerId.trim() || input.name.trim().length < 1 || input.name.trim().length > 120) throw new Error('Schedule ID, profile and a 1–120 character name are required.');
@@ -112,7 +115,7 @@ export function createObligationsStore(
       }),
       occurrences: async (ownerId: string, status?: 'pending'|'posted'|'skipped') => {
         if (!ownerId.trim()) throw new Error('A profile is required to read occurrences.');
-        return (await read()).getAllAsync(`SELECT o.*,s.name,s.scheduleType,s.amountMinor,s.currency,s.accountId,s.toAccountId,s.classificationId,s.billId FROM ScheduleOccurrence o JOIN RecurringSchedule s ON s.id=o.scheduleId AND s.ownerId=o.ownerId WHERE o.ownerId=?${status ? ' AND o.status=?' : ''} ORDER BY o.occurrenceDate,o.id`, status ? [ownerId,status] : [ownerId]);
+        return (await read()).getAllAsync<ScheduleOccurrenceRow>(`SELECT o.*,s.name,s.scheduleType,s.amountMinor,s.currency,s.accountId,s.toAccountId,s.classificationId,s.billId,s.frequency,s.startDate,s.endDate,s.nextDueDate,s.status AS scheduleStatus FROM ScheduleOccurrence o JOIN RecurringSchedule s ON s.id=o.scheduleId AND s.ownerId=o.ownerId WHERE o.ownerId=?${status ? ' AND o.status=?' : ''} ORDER BY o.occurrenceDate,o.id`, status ? [ownerId,status] : [ownerId]);
       },
       resolveOccurrence: (ownerId: string, id: string, status: 'skipped'|'posted', transactionId?: string, resolvedAt = new Date().toISOString()) => write(async (sql) => {
         if (!ownerId.trim() || !id.trim() || (status === 'posted' && !transactionId)) throw new Error('Occurrence resolution is incomplete.');
@@ -239,7 +242,7 @@ export function createObligationsStore(
         await sql.runAsync("UPDATE Bill SET status=?,reminderId=NULL,updatedAt=? WHERE ownerId=? AND id=? AND status IN ('upcoming','due','overdue')",[status,new Date().toISOString(),ownerId,id]);
         return bill.reminderId;
       }),
-      history: async(ownerId:string,billId:string) => (await read()).getAllAsync(`SELECT p.*,EXISTS(SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id) AS corrected,c.reason,c.reversalTransactionId,
+      history: async(ownerId:string,billId:string) => (await read()).getAllAsync<BillPaymentHistoryRow>(`SELECT p.*,EXISTS(SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id) AS corrected,c.reason,c.reversalTransactionId,
         (SELECT r.replacementPaymentId FROM BillPaymentCorrectionReplacement r JOIN BillPaymentCorrection x ON x.id=r.correctionId WHERE x.originalPaymentId=p.id) AS replacementPaymentId
         FROM BillPayment p LEFT JOIN BillPaymentCorrection c ON c.originalPaymentId=p.id WHERE p.ownerId=? AND p.billId=? ORDER BY p.paidAt,p.id`,[ownerId,billId]),
     },
@@ -371,7 +374,7 @@ export function createObligationsStore(
         const result=await sql.runAsync("UPDATE DebtRepaymentSchedule SET status='cancelled',updatedAt=? WHERE id=? AND ownerId=? AND status='active'",[new Date().toISOString(),id,ownerId]);
         if(result&&typeof result==='object'&&'changes' in result&&(result as {changes:number}).changes===0) throw new Error('Active repayment schedule was not found.');
       }),
-      history: async(ownerId:string,debtId:string) => (await read()).getAllAsync(`SELECT e.id,e.ownerId,e.debtId,e.eventType,e.principalMinor,e.interestMinor,e.accountId,e.transactionId,e.eventDate,e.note,
+      history: async(ownerId:string,debtId:string) => (await read()).getAllAsync<DebtHistoryRow>(`SELECT e.id,e.ownerId,e.debtId,e.eventType,e.principalMinor,e.interestMinor,e.accountId,e.transactionId,e.eventDate,e.note,
         EXISTS(SELECT 1 FROM DebtEventCorrection c WHERE c.originalEventId=e.id) AS corrected,0 AS isAccrual FROM DebtEvent e WHERE e.ownerId=? AND e.debtId=?
         UNION ALL SELECT i.id,i.ownerId,i.debtId,CASE WHEN i.eventType='charge' THEN 'interest_charge' ELSE 'interest_reversal' END AS eventType,0 AS principalMinor,i.amountMinor AS interestMinor,NULL AS accountId,NULL AS transactionId,i.eventDate,i.note,
         EXISTS(SELECT 1 FROM DebtInterestEvent r WHERE r.reversalOfEventId=i.id) AS corrected,1 AS isAccrual FROM DebtInterestEvent i WHERE i.ownerId=? AND i.debtId=? ORDER BY eventDate,id`,[ownerId,debtId,ownerId,debtId]),

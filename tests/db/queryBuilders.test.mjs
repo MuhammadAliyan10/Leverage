@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { buildAccountBalanceQuery, buildFilteredTransactionPredicate, buildRecentAccountPreferenceQuery, buildTransactionListQuery } from '../../src/db/local/queryBuilders.ts';
+import { buildAccountBalanceQuery, buildFilteredTransactionPredicate, buildHistoricalAccountBalanceQuery, buildRecentAccountPreferenceQuery, buildTransactionListQuery } from '../../src/db/local/queryBuilders.ts';
 import { calculateAccountBalances } from '../../src/finance/balances.ts';
 
 test('account balance aggregation matches ledger rules without returning transaction history', () => {
@@ -34,6 +34,64 @@ test('account balance aggregation matches ledger rules without returning transac
     assert.ok(query.sql.includes('SUM(events.delta)'));
     assert.ok(!query.sql.includes('SELECT * FROM "Transaction"'));
   } finally { database.close(); }
+});
+
+test('historical indexed account snapshots match full ledger replay across refunds, reversals and transfers', () => {
+  const database=new DatabaseSync(':memory:');
+  try {
+    database.exec(`CREATE TABLE Account (id TEXT PRIMARY KEY,ownerId TEXT,name TEXT,type TEXT,balanceMinor INTEGER,currency TEXT,createdAt TEXT,archivedAt TEXT,synced INTEGER);
+      CREATE TABLE "Transaction" (id TEXT PRIMARY KEY,ownerId TEXT,amountMinor INTEGER,type TEXT,accountId TEXT,toAccountId TEXT,reversalOfId TEXT,date TEXT);
+      CREATE INDEX Transaction_owner_date_id_idx ON "Transaction"(ownerId,date DESC,id DESC);
+      INSERT INTO Account VALUES ('cash','u1','Cash','cash',10000,'PKR','2026-01-01',NULL,0),('bank','u1','Bank','bank',5000,'PKR','2026-01-05','2026-02-01',0),('other','u2','Other','cash',7000,'PKR','2026-01-01',NULL,0);
+      INSERT INTO "Transaction" VALUES
+        ('income','u1',5000,'Income','cash',NULL,NULL,'2026-01-10'),
+        ('expense','u1',2000,'Expense','cash',NULL,NULL,'2026-01-11'),
+        ('transfer','u1',1000,'Transfer','cash','bank',NULL,'2026-01-12'),
+        ('refund','u1',500,'Refund','cash',NULL,'expense','2026-01-13'),
+        ('transfer-reversal','u1',1000,'Reversal','cash','bank','transfer','2026-02-02'),
+        ('future','u1',3000,'Income','cash',NULL,NULL,'2026-03-01'),
+        ('foreign','u2',9000,'Income','other',NULL,NULL,'2026-01-10');`);
+    const accounts=database.prepare('SELECT id,ownerId,name,type,balanceMinor,currency,createdAt,archivedAt FROM Account WHERE ownerId=?').all('u1').map((row)=>({...row}));
+    const transactions=database.prepare('SELECT * FROM "Transaction" WHERE ownerId=? ORDER BY date,id').all('u1').map((row)=>({...row}));
+    for(const cutoff of ['2026-01-12','2026-01-14','2026-02-03','2026-03-02']){
+      const query=buildHistoricalAccountBalanceQuery('u1',cutoff);
+      const actual=database.prepare(query.sql).all(...query.params).map((row)=>({...row}));
+      const eligibleAccounts=accounts.filter((account)=>account.createdAt<=cutoff);
+      const eligibleTransactions=transactions.filter((transaction)=>transaction.date<=cutoff);
+      const expected=calculateAccountBalances(eligibleAccounts,eligibleTransactions);
+      assert.deepEqual(actual.map(({id,balanceMinor})=>({id,balanceMinor})),expected.map(({id,balanceMinor})=>({id,balanceMinor})));
+    }
+  } finally { database.close(); }
+});
+
+test('12 historical snapshots stay in SQLite for 1,000, 10,000 and 50,000 ledger rows', () => {
+  for(const count of [1_000,10_000,50_000]){
+    const database=new DatabaseSync(':memory:');
+    try {
+      database.exec(`CREATE TABLE Account (id TEXT PRIMARY KEY,ownerId TEXT,name TEXT,type TEXT,balanceMinor INTEGER,currency TEXT,createdAt TEXT,archivedAt TEXT,synced INTEGER);
+        CREATE TABLE "Transaction" (id TEXT PRIMARY KEY,ownerId TEXT,amountMinor INTEGER,type TEXT,accountId TEXT,toAccountId TEXT,reversalOfId TEXT,date TEXT);
+        CREATE INDEX Transaction_owner_date_id_idx ON "Transaction"(ownerId,date DESC,id DESC);
+        INSERT INTO Account VALUES ('cash','u1','Cash','cash',1000000,'PKR','2026-01-01T00:00:00.000Z',NULL,0);`);
+      database.exec('BEGIN');
+      const insert=database.prepare('INSERT INTO "Transaction" VALUES(?,?,?,?,?,?,?,?)');
+      for(let index=0;index<count;index+=1){
+        const month=index%12;const day=Math.floor(index/12)%28+1;const date=`2026-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}T12:00:00.000Z`;
+        insert.run(`tx-${index}`,'u1',1,'Expense','cash',null,null,date);
+      }
+      database.exec('COMMIT');
+      const eligible=[];
+      for(let index=0;index<count;index+=1){const month=index%12;const day=Math.floor(index/12)%28+1;eligible.push(`2026-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}T12:00:00.000Z`);}
+      const snapshotStart=performance.now();
+      for(let month=1;month<=12;month+=1){
+        const cutoff=new Date(Date.UTC(2026,month,0,23,59,59,999)).toISOString();
+        const query=buildHistoricalAccountBalanceQuery('u1',cutoff);
+        const result=database.prepare(query.sql).get(...query.params);
+        const txCount=eligible.filter((date)=>date<=cutoff).length;
+        assert.equal(result.balanceMinor,1_000_000-txCount);
+      }
+      console.log(`Synthetic historical cash snapshots: ${count} ledger rows, 12 SQL snapshots in ${(performance.now()-snapshotStart).toFixed(2)} ms (Node SQLite).`);
+    } finally { database.close(); }
+  }
 });
 
 test('dashboard balance aggregation remains equivalent through 50,000 synthetic ledger rows', () => {

@@ -56,6 +56,31 @@ export function buildAccountBalanceQuery(ownerId: string, includeArchived = fals
   };
 }
 
+/** Calculates one historical cash snapshot inside SQLite without materializing ledger history in JS. */
+export function buildHistoricalAccountBalanceQuery(ownerId:string,asOfDate:string):{sql:string;params:string[]} {
+  if(!ownerId.trim())throw new Error('A profile is required to calculate historical account balances.');
+  if(!Number.isFinite(Date.parse(asOfDate)))throw new Error('A valid historical cutoff is required.');
+  return {
+    sql:`WITH parameters(ownerId,cutoff) AS (VALUES(?,?)),cash_events(accountId,delta) AS (
+      SELECT t.accountId,CASE WHEN t.type IN ('Income','Refund') THEN t.amountMinor ELSE -t.amountMinor END
+      FROM "Transaction" t,parameters p WHERE t.ownerId=p.ownerId AND t.date<=p.cutoff AND t.type IN ('Income','Expense','Refund') AND t.accountId IS NOT NULL
+      UNION ALL SELECT t.accountId,-t.amountMinor FROM "Transaction" t,parameters p WHERE t.ownerId=p.ownerId AND t.date<=p.cutoff AND t.type='Transfer' AND t.accountId IS NOT NULL
+      UNION ALL SELECT t.toAccountId,t.amountMinor FROM "Transaction" t,parameters p WHERE t.ownerId=p.ownerId AND t.date<=p.cutoff AND t.type='Transfer' AND t.toAccountId IS NOT NULL
+      UNION ALL SELECT t.accountId,CASE original.type WHEN 'Income' THEN -t.amountMinor WHEN 'Expense' THEN t.amountMinor WHEN 'Transfer' THEN t.amountMinor END
+      FROM "Transaction" t JOIN "Transaction" original ON original.id=t.reversalOfId AND original.ownerId=t.ownerId,parameters p
+      WHERE t.ownerId=p.ownerId AND t.date<=p.cutoff AND t.type='Reversal' AND original.type IN ('Income','Expense','Transfer') AND t.accountId IS NOT NULL
+      UNION ALL SELECT t.toAccountId,-t.amountMinor FROM "Transaction" t JOIN "Transaction" original ON original.id=t.reversalOfId AND original.ownerId=t.ownerId,parameters p
+      WHERE t.ownerId=p.ownerId AND t.date<=p.cutoff AND t.type='Reversal' AND original.type='Transfer' AND t.toAccountId IS NOT NULL
+    )
+    SELECT a.id,a.ownerId,a.name,a.type,a.balanceMinor AS openingBalanceMinor,a.balanceMinor+COALESCE(SUM(events.delta),0) AS balanceMinor,a.currency,a.createdAt,a.archivedAt,a.synced
+    FROM Account a,parameters p LEFT JOIN cash_events events ON events.accountId=a.id
+    WHERE a.ownerId=p.ownerId AND a.createdAt<=p.cutoff
+    GROUP BY a.id,a.ownerId,a.name,a.type,a.balanceMinor,a.currency,a.createdAt,a.archivedAt,a.synced
+    ORDER BY a.createdAt,a.id`,
+    params:[ownerId,asOfDate],
+  };
+}
+
 export function buildTransactionPagePredicate({
   ownerId,
   order = 'desc',

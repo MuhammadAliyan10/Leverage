@@ -1,5 +1,6 @@
 import { calculateHoldingPosition, ownedAssetValue, type InvestmentEvent } from '../../finance/assetsInvestments.ts';
 import { isCurrencyCode } from '../../finance/domain.ts';
+import { buildHistoricalAccountBalanceQuery } from './queryBuilders.ts';
 
 export interface AssetSql {
   getFirstAsync<T>(sql: string, params?: readonly (string | number | null)[]): Promise<T | null>;
@@ -75,32 +76,49 @@ export function createAssetsInvestmentsStore(read: () => Promise<AssetSql>, writ
     }
     return [...grouped.values()].map(({ meta, events }) => ({ ...meta, ...calculateHoldingPosition(events, meta.currentPriceMinor), priceDate: meta.priceDate, priceSource: meta.priceSource }));
   };
-  const historyData = async (ownerId:string) => {
+  const historyData = async (ownerId:string,dates:readonly string[]) => {
     validIdentity(ownerId);const sql=await read();
+    const accountBalanceSnapshots=await Promise.all(dates.map(async(asOfDate)=>{
+      const query=buildHistoricalAccountBalanceQuery(ownerId,asOfDate);
+      const accounts=await sql.getAllAsync<{id:string;ownerId:string;name:string;type:string;balanceMinor:number;currency:string;createdAt:string;archivedAt:string|null; synced:number}>(query.sql,query.params);
+      return {asOfDate,accounts:accounts.map((account)=>({...account,synced:Boolean(account.synced)}))};
+    }));
+    const groupBy = <T,>(rows: readonly T[], keyOf: (row:T)=>string): Map<string,T[]> => {
+      const groups=new Map<string,T[]>();
+      for(const row of rows){const key=keyOf(row);const group=groups.get(key);if(group)group.push(row);else groups.set(key,[row]);}
+      return groups;
+    };
     const assetRows=await sql.getAllAsync<{id:string;currency:string;purchaseDate:string;purchaseValueMinor:number;ownershipBps:number}>('SELECT id,currency,purchaseDate,purchaseValueMinor,ownershipBps FROM Asset WHERE ownerId=?',[ownerId]);
     const valuations=await sql.getAllAsync<{assetId:string;valueMinor:number;valuationDate:string}>('SELECT assetId,valueMinor,valuationDate FROM AssetValuation WHERE ownerId=? ORDER BY assetId,valuationDate,id',[ownerId]);
     const disposals=await sql.getAllAsync<{assetId:string;ownershipBps:number;eventDate:string}>('SELECT assetId,ownershipBps,eventDate FROM AssetActivity WHERE ownerId=? AND eventType=\'disposal\' ORDER BY assetId,eventDate,id',[ownerId]);
+    const valuationsByAsset=groupBy(valuations,(row)=>row.assetId);
+    const disposalsByAsset=groupBy(disposals,(row)=>row.assetId);
     const assets=assetRows.map((asset)=>({ ...asset,
-      valuations:valuations.filter((row)=>row.assetId===asset.id).map((row)=>({valueMinor:row.valueMinor,date:row.valuationDate})),
-      disposals:disposals.filter((row)=>row.assetId===asset.id).map((row)=>({ownershipBps:row.ownershipBps,date:row.eventDate})),
+      valuations:(valuationsByAsset.get(asset.id)??[]).map((row)=>({valueMinor:row.valueMinor,date:row.valuationDate})),
+      disposals:(disposalsByAsset.get(asset.id)??[]).map((row)=>({ownershipBps:row.ownershipBps,date:row.eventDate})),
     }));
     const holdingRows=await sql.getAllAsync<{id:string;currency:string}>('SELECT id,currency FROM InvestmentHolding WHERE ownerId=?',[ownerId]);
     const investmentEvents=await sql.getAllAsync<{holdingId:string;eventType:InvestmentEvent['eventType'];quantityMicros:number;unitPriceMinor:number;feeMinor:number;amountMinor:number;splitNumerator:number;splitDenominator:number;eventDate:string}>('SELECT holdingId,eventType,quantityMicros,unitPriceMinor,feeMinor,amountMinor,splitNumerator,splitDenominator,eventDate FROM InvestmentEvent WHERE ownerId=? ORDER BY holdingId,eventDate,id',[ownerId]);
     const prices=await sql.getAllAsync<{holdingId:string;unitPriceMinor:number;priceDate:string}>('SELECT holdingId,unitPriceMinor,priceDate FROM InvestmentPrice WHERE ownerId=? ORDER BY holdingId,priceDate,id',[ownerId]);
+    const eventsByHolding=groupBy(investmentEvents,(row)=>row.holdingId);
+    const pricesByHolding=groupBy(prices,(row)=>row.holdingId);
     const holdings=holdingRows.map((holding)=>({ ...holding,
-      events:investmentEvents.filter((row)=>row.holdingId===holding.id).map((row)=>({eventType:row.eventType,quantityMicros:row.quantityMicros,unitPriceMinor:row.unitPriceMinor,feeMinor:row.feeMinor,amountMinor:row.amountMinor,splitNumerator:row.splitNumerator,splitDenominator:row.splitDenominator,date:row.eventDate})),
-      prices:prices.filter((row)=>row.holdingId===holding.id).map((row)=>({unitPriceMinor:row.unitPriceMinor,date:row.priceDate})),
+      events:(eventsByHolding.get(holding.id)??[]).map((row)=>({eventType:row.eventType,quantityMicros:row.quantityMicros,unitPriceMinor:row.unitPriceMinor,feeMinor:row.feeMinor,amountMinor:row.amountMinor,splitNumerator:row.splitNumerator,splitDenominator:row.splitDenominator,date:row.eventDate})),
+      prices:(pricesByHolding.get(holding.id)??[]).map((row)=>({unitPriceMinor:row.unitPriceMinor,date:row.priceDate})),
     }));
     const debtRows=await sql.getAllAsync<{id:string;direction:'borrowed'|'lent';currency:string;principalMinor:number;openedAt:string}>('SELECT id,direction,currency,principalMinor,openedAt FROM Debt WHERE ownerId=?',[ownerId]);
     const debtEvents=await sql.getAllAsync<{debtId:string;id:string;eventType:string;principalMinor:number;interestMinor:number;eventDate:string}>('SELECT debtId,id,eventType,principalMinor,interestMinor,eventDate FROM DebtEvent WHERE ownerId=? ORDER BY debtId,eventDate,id',[ownerId]);
     const corrections=await sql.getAllAsync<{debtId:string;originalEventId:string;createdAt:string}>('SELECT debtId,originalEventId,createdAt FROM DebtEventCorrection WHERE ownerId=? ORDER BY debtId,createdAt,id',[ownerId]);
     const interestEvents=await sql.getAllAsync<{debtId:string;eventType:'charge'|'reversal';amountMinor:number;eventDate:string}>('SELECT debtId,eventType,amountMinor,eventDate FROM DebtInterestEvent WHERE ownerId=? ORDER BY debtId,eventDate,id',[ownerId]);
+    const debtEventsByDebt=groupBy(debtEvents,(row)=>row.debtId);
+    const correctionsByDebt=groupBy(corrections,(row)=>row.debtId);
+    const interestEventsByDebt=groupBy(interestEvents,(row)=>row.debtId);
     const debts=debtRows.map((debt)=>({ ...debt,
-      events:debtEvents.filter((row)=>row.debtId===debt.id),
-      corrections:corrections.filter((row)=>row.debtId===debt.id),
-      interestEvents:interestEvents.filter((row)=>row.debtId===debt.id),
+      events:debtEventsByDebt.get(debt.id)??[],
+      corrections:correctionsByDebt.get(debt.id)??[],
+      interestEvents:interestEventsByDebt.get(debt.id)??[],
     }));
-    return {assets,holdings,debts};
+    return {assets,holdings,debts,accountBalanceSnapshots};
   };
 
   return {
