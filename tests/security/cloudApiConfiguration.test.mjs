@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { assertProductionCloudApiConfigured, assertProductionNeonConfigured, resolveCloudApiBaseUrl, resolveNeonAuthUrl, resolveNeonDataApiUrl } from '../../src/cloud/apiConfiguration.ts';
+import { assertProductionCloudApiConfigured, assertProductionNeonConfigured, resolveCloudApiBaseUrl, resolveNativeAuthRequestOrigin, resolveNeonAuthUrl, resolveNeonDataApiUrl, withNativeAuthRequestOrigin } from '../../src/cloud/apiConfiguration.ts';
 
 test('cloud API accepts a production HTTPS origin and normalizes its trailing slash', () => {
   assert.equal(resolveCloudApiBaseUrl(' https://mizan-api.fly.dev/ ', false), 'https://mizan-api.fly.dev');
@@ -40,4 +40,17 @@ test('Neon Auth and Data API URLs are accepted only for their expected HTTPS end
   assert.equal(resolveNeonDataApiUrl('https://ep-abc.apirest.c-1.us-east-1.aws.neon.tech/neondb/rest/v1?token=x'), null);
   assert.throws(() => assertProductionNeonConfigured('production-apk', undefined, undefined), /NEON_AUTH_URL/);
   assert.doesNotThrow(() => assertProductionNeonConfigured('production', 'https://ep-abc.neonauth.c-1.us-east-1.aws.neon.tech/neondb/auth', 'https://ep-abc.apirest.c-1.us-east-1.aws.neon.tech/neondb/rest/v1'));
+});
+
+test('native auth fallback origin is derived only from a valid configured Neon Auth endpoint', () => {
+  assert.equal(resolveNativeAuthRequestOrigin('https://ep-abc.neonauth.c-1.us-east-1.aws.neon.tech/neondb/auth'), 'https://ep-abc.neonauth.c-1.us-east-1.aws.neon.tech');
+  assert.equal(resolveNativeAuthRequestOrigin(undefined), null);
+  assert.equal(resolveNativeAuthRequestOrigin('http://ep-abc.neonauth.c-1.us-east-1.aws.neon.tech/neondb/auth'), null);
+});
+
+test('only native auth requests missing a usable origin receive the auth-service origin', () => {
+  assert.equal(withNativeAuthRequestOrigin(new Headers(), true, 'https://auth.example.test').get('origin'), 'https://auth.example.test');
+  assert.equal(withNativeAuthRequestOrigin(new Headers({ origin: 'null' }), true, 'https://auth.example.test').get('origin'), 'https://auth.example.test');
+  assert.equal(withNativeAuthRequestOrigin(new Headers({ origin: 'houselog://' }), true, 'https://auth.example.test').get('origin'), 'houselog://');
+  assert.equal(withNativeAuthRequestOrigin(new Headers(), false, 'https://auth.example.test').get('origin'), null);
 });

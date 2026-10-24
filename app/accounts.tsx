@@ -10,7 +10,7 @@ import { useAccounts } from '../hooks/queries/useAccounts';
 import { useAuth } from '../src/context/AuthContext';
 import { localDb } from '../src/db/local/client';
 import { ACCOUNT_TYPES, CURRENCIES, type AccountType, type CurrencyCode } from '../src/finance/domain';
-import { formatMinorUnits, parseMinorUnits } from '../src/finance/ledger';
+import { formatGroupedAmountInput, formatMinorUnits, parseMinorUnits } from '../src/finance/ledger';
 
 export default function AccountsScreen() {
   const router = useRouter();
@@ -50,7 +50,7 @@ export default function AccountsScreen() {
   };
   const beginEdit = (account: typeof records[number]) => {
     if (account.archivedAt) return;
-    setSelectedId(account.id); setName(account.name); setType(account.type as AccountType); setCurrency(account.currency as CurrencyCode); setOpeningBalance((account.balanceMinor / 100).toFixed(2));
+    setSelectedId(account.id); setName(account.name); setType(account.type as AccountType); setCurrency(account.currency as CurrencyCode); setOpeningBalance(formatGroupedAmountInput((account.balanceMinor / 100).toFixed(2)));
   };
   const refresh = async () => {
     await Promise.all([
@@ -121,7 +121,7 @@ export default function AccountsScreen() {
         <Text className="font-body mb-2 text-sm font-semibold text-gray-600 dark:text-neutral-300">Currency</Text>
         <View className="mb-4 flex-row flex-wrap">{currencyOptions.map((code) => <Pressable key={code} disabled={busy || financialFieldsLocked} accessibilityRole="radio" accessibilityState={{ checked: currency === code, disabled: busy || financialFieldsLocked }} onPress={() => setCurrency(code)} className={`mb-2 mr-2 rounded-full border px-3 py-2 ${currency === code ? 'border-primary bg-primary/10' : 'border-gray-200 bg-white dark:border-neutral-700 dark:bg-neutral-800'} ${financialFieldsLocked ? 'opacity-60' : ''}`}><Text className={["font-body", (currency === code ? 'font-semibold text-primary' : 'text-gray-600 dark:text-neutral-300')].filter(Boolean).join(' ')}>{code}</Text></Pressable>)}</View>
         <Text className="font-body mb-1 text-sm font-semibold text-gray-600 dark:text-neutral-300">Opening balance</Text>
-        <TextInput accessibilityLabel="Opening balance" value={openingBalance} onChangeText={setOpeningBalance} editable={!busy && !financialFieldsLocked} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#9ca3af" inputMode="decimal" className="font-body mb-4 rounded-xl border border-gray-200 bg-white px-4 py-3 text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white" />
+        <TextInput accessibilityLabel="Opening balance" value={openingBalance} onChangeText={(value) => setOpeningBalance(formatGroupedAmountInput(value))} editable={!busy && !financialFieldsLocked} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#9ca3af" inputMode="decimal" className="font-body mb-4 rounded-xl border border-gray-200 bg-white px-4 py-3 text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white" />
         {!!selected && <Text className="font-body mb-3 text-xs leading-5 text-gray-500 dark:text-neutral-400">{editConstraintsQuery.isLoading ? 'Checking account history and sync settings…' : editConstraintsQuery.isError ? 'Could not verify edit limits. Try again before changing account details.' : financialFieldsLocked ? 'Opening balance and currency are read-only because history exists or cloud sync is enabled.' : 'Opening balance and currency lock after transactions are recorded so account history stays consistent.'}</Text>}
         {feedback && <Text accessibilityRole={feedback.isError ? 'alert' : 'text'} accessibilityLiveRegion="polite" className={`font-body mb-3 text-sm ${feedback.isError ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>{feedback.message}</Text>}
         {selected && editConstraintsQuery.isError && <Pressable onPress={() => void editConstraintsQuery.refetch()} className="mb-3 self-start"><Text className="font-body font-semibold text-primary">Retry account checks</Text></Pressable>}

@@ -42,7 +42,12 @@ export function useSavingsOverview() {
       const [goals, emergency] = await Promise.all([localDb.savings.goals(user.id), localDb.emergencyFund.get(user.id)]);
       return { goals: goals.map((goal) => ({ ...goal, progress: calculateSavingsGoalProgress({
         ownerId: user.id, currency: goal.currency, targetMinor: goal.targetMinor,
-        contributions: [{ ownerId: user.id, currency: goal.currency, amountMinor: Math.max(0, goal.actualMinor) }],
+        // A new goal has no contribution rows and its aggregate is zero. Keep
+        // that as an empty contribution list: zero is valid progress, but it is
+        // not a valid posted contribution amount.
+        contributions: goal.actualMinor === 0
+          ? []
+          : [{ ownerId: user.id, currency: goal.currency, amountMinor: goal.actualMinor }],
       }) })), emergency };
     },
   });

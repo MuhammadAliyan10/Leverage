@@ -30,7 +30,7 @@ test('minor-unit parsing rejects precision loss, signs, and unsafe values', () =
 });
 
 test('editable amount formatting avoids floating-point round trips', () => {
-  assert.equal(formatMinorUnitsForInput(2_000_000), '20000');
+  assert.equal(formatMinorUnitsForInput(2_000_000), '20,000');
   assert.equal(formatMinorUnitsForInput(5), '0.05');
   assert.equal(formatMinorUnitsForInput(1_234), '12.34');
   assert.equal(formatMinorUnitsForInput(12_340), '123.4');

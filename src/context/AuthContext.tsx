@@ -71,10 +71,9 @@ async function persistSession(userId: string, rememberMe: boolean): Promise<void
       window.sessionStorage.removeItem(SESSION_KEY);
       window.localStorage.removeItem(SIGNED_OUT_KEY);
     } else {
-      window.localStorage.setItem(SIGNED_OUT_KEY, '1');
       window.localStorage.removeItem(SESSION_KEY);
-      window.sessionStorage.removeItem(SESSION_KEY);
       window.localStorage.removeItem(SIGNED_OUT_KEY);
+      window.sessionStorage.setItem(SESSION_KEY, userId);
     }
     return;
   }

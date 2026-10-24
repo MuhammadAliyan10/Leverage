@@ -63,7 +63,7 @@ export function parseMinorUnits(input: string, fractionDigits = 2): number {
   }
 
   const value = input.trim();
-  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
+  const match = /^(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d*))?$/.exec(value);
   if (!match) throw new Error('Enter a positive amount using digits and an optional decimal point.');
 
   const fraction = match[2] ?? '';
@@ -72,7 +72,7 @@ export function parseMinorUnits(input: string, fractionDigits = 2): number {
   }
 
   const scale = 10n ** BigInt(fractionDigits);
-  const whole = BigInt(match[1]);
+  const whole = BigInt(match[1].replaceAll(',', ''));
   const fractional = fractionDigits === 0
     ? 0n
     : BigInt(fraction.padEnd(fractionDigits, '0') || '0');
@@ -82,6 +82,16 @@ export function parseMinorUnits(input: string, fractionDigits = 2): number {
     throw new Error('Amount must be greater than zero and within the supported range.');
   }
   return Number(minorUnits);
+}
+
+/** Groups the integer portion of an editable money value without changing its decimal text. */
+export function formatGroupedAmountInput(input: string): string {
+  let cleaned = input.replaceAll(',', '').replace(/[^\d.]/g, '');
+  if (cleaned.startsWith('.')) cleaned = `0${cleaned}`;
+  const separator = cleaned.indexOf('.');
+  const whole = (separator < 0 ? cleaned : cleaned.slice(0, separator)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const fraction = separator < 0 ? '' : `.${cleaned.slice(separator + 1).replaceAll('.', '')}`;
+  return `${whole}${fraction}`;
 }
 
 /** Formats integer minor units for display. Keep calculations in minor units. */
@@ -110,9 +120,10 @@ export function formatMinorUnitsForInput(amountMinor: number, fractionDigits = 2
   const absolute = BigInt(negative ? -amountMinor : amountMinor);
   const scale = 10n ** BigInt(fractionDigits);
   const whole = absolute / scale;
-  if (fractionDigits === 0) return `${negative ? '-' : ''}${whole}`;
+  const groupedWhole = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  if (fractionDigits === 0) return `${negative ? '-' : ''}${groupedWhole}`;
   const fraction = (absolute % scale).toString().padStart(fractionDigits, '0').replace(/0+$/, '');
-  return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
+  return `${negative ? '-' : ''}${groupedWhole}${fraction ? `.${fraction}` : ''}`;
 }
 
 /** Enforces the balancing and line rules before a journal entry can be saved. */

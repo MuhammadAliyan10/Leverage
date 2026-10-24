@@ -6,7 +6,7 @@
     "primaryColor": "#635BFF",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/leverage-icon.png",
+    "icon": "./assets/images/leverage-icon-standard-v2.png",
     "scheme": "houselog",
     "userInterfaceStyle": "automatic",
     "ios": {
@@ -17,14 +17,14 @@
       "allowBackup": false,
       "adaptiveIcon": {
         "backgroundColor": "#635BFF",
-        "foregroundImage": "./assets/images/leverage-icon.png"
+        "foregroundImage": "./assets/images/leverage-icon-standard-v2.png"
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.houselog.finance"
     },
     "web": {
       "output": "single",
-      "favicon": "./assets/images/leverage-icon.png"
+      "favicon": "./assets/images/leverage-icon-standard-v2.png"
     },
     "plugins": [
       [
@@ -40,7 +40,7 @@
         "expo-splash-screen",
         {
           "backgroundColor": "#635BFF",
-          "image": "./assets/images/leverage-icon.png",
+          "image": "./assets/images/leverage-icon-standard-v2.png",
           "imageWidth": 76
         }
       ],

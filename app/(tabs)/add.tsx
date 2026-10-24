@@ -12,7 +12,7 @@ import { MD3DarkTheme, MD3LightTheme, PaperProvider } from 'react-native-paper';
 import { CalendarDays, ChevronLeft, ChevronRight, CircleHelp, Clock3, Keyboard, Pencil, Search, X } from 'lucide-react-native';
 import { Button } from '../../components/ui/Button';
 import { useAddTransaction } from '../../hooks/mutations/useAddTransaction';
-import { convertForeignMinorToPkr, formatMinorUnits, formatMinorUnitsForInput, parseExchangeRate, parseMinorUnits } from '../../src/finance/ledger';
+import { convertForeignMinorToPkr, formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseExchangeRate, parseMinorUnits } from '../../src/finance/ledger';
 import { useAccounts } from '../../hooks/queries/useAccounts';
 import * as Crypto from 'expo-crypto';
 import { useAuth } from '../../src/context/AuthContext';
@@ -451,9 +451,9 @@ export default function AddTransactionScreen() {
                     placeholder="0"
                     placeholderTextColor="#d1d5db"
                     value={value}
-                    onChangeText={onChange}
+                    onChangeText={(text) => onChange(formatGroupedAmountInput(text))}
                     onBlur={onBlur}
-                    maxLength={18}
+                    maxLength={24}
                     editable={!isRemittance}
                   />
                 )}
@@ -587,7 +587,7 @@ export default function AddTransactionScreen() {
                 )}
                 {isRemittance && <View className="mt-4 gap-3">
                   <Text className="font-body text-sm font-semibold text-gray-700 dark:text-neutral-100">Original remittance details</Text>
-                  <Controller control={control} name="sourceAmount" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="Amount in original currency" keyboardType="decimal-pad" value={value} onChangeText={onChange} />} />
+                  <Controller control={control} name="sourceAmount" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="Amount in original currency" keyboardType="decimal-pad" value={value} onChangeText={(text) => onChange(formatGroupedAmountInput(text))} />} />
                   {errors.sourceAmount && <Text className="font-body text-sm text-red-500">{errors.sourceAmount.message}</Text>}
                   <View className="flex-row gap-2">{['USD', 'GBP', 'EUR', 'AED', 'SAR'].map((currency) => <Pressable key={currency} accessibilityRole="radio" accessibilityState={{ selected: sourceCurrency === currency }} onPress={() => setValue('sourceCurrency', currency)} className={`rounded-full border px-3 py-2 ${sourceCurrency === currency ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={`font-body text-xs font-semibold ${sourceCurrency === currency ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-200'}`}>{currency}</Text></Pressable>)}</View>
                   <Controller control={control} name="exchangeRate" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="PKR per 1 unit (provider rate)" keyboardType="decimal-pad" value={value} onChangeText={onChange} />} />

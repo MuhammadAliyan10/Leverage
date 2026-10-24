@@ -2,9 +2,10 @@ import { createAuthClient } from 'better-auth/react';
 import { expoClient } from '@better-auth/expo/client';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
-import { resolveNeonAuthUrl, resolveNeonDataApiUrl } from './apiConfiguration';
+import { resolveNativeAuthRequestOrigin, resolveNeonAuthUrl, resolveNeonDataApiUrl, withNativeAuthRequestOrigin } from './apiConfiguration';
 
 export const neonAuthUrl = resolveNeonAuthUrl(process.env.EXPO_PUBLIC_NEON_AUTH_URL);
+const nativeAuthRequestOrigin = resolveNativeAuthRequestOrigin(process.env.EXPO_PUBLIC_NEON_AUTH_URL);
 export const neonDataApiUrl = resolveNeonDataApiUrl(process.env.EXPO_PUBLIC_NEON_DATA_API_URL);
 export const cloudApiConfigured = neonAuthUrl !== null && neonDataApiUrl !== null;
 const tokenKey = (ownerId: string) => `mizan-neon-jwt-${encodeURIComponent(ownerId)}`;
@@ -39,7 +40,10 @@ export function getCloudAuthClient(ownerId: string) {
       baseURL: neonAuthUrl,
       fetchOptions: {
         customFetchImpl: async (input, init) => {
-          const response = await fetch(input, { ...init, credentials: 'include' });
+          const requestHeaders = new Headers(init?.headers);
+          if (input instanceof Request) input.headers.forEach((value, key) => { if (!requestHeaders.has(key)) requestHeaders.set(key, value); });
+          const headers = withNativeAuthRequestOrigin(requestHeaders, Platform.OS !== 'web', nativeAuthRequestOrigin);
+          const response = await fetch(input, { ...init, headers, credentials: 'include' });
           const jwt = response.headers.get('set-auth-jwt');
           if (jwt) await saveJwt(ownerId, jwt);
           return response;

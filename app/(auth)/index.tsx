@@ -152,15 +152,15 @@ export default function AuthScreen() {
           showsVerticalScrollIndicator={false}
         >
           <View className="w-full max-w-[460px] self-center py-5">
-            <View className="mb-7 h-32 items-center justify-center">
+            <View className="mb-6 h-24 items-center justify-center">
               <View
-                className="relative h-24 w-24 items-center justify-center rounded-full bg-primary/10"
-                style={{ width: 96, height: 96, flexGrow: 0, flexShrink: 0 }}
+                className="relative h-20 w-20 items-center justify-center rounded-full bg-primary/10"
+                style={{ width: 80, height: 80, flexGrow: 0, flexShrink: 0 }}
               >
                 <Image
-                  source={require('../../assets/images/leverage-icon.png')}
-                  className="h-20 w-20 rounded-full"
-                  style={{ width: 80, height: 80, flexGrow: 0, flexShrink: 0, borderRadius: 40 }}
+                  source={require('../../assets/images/leverage-icon-standard-v2.png')}
+                  className="h-16 w-16 rounded-full"
+                  style={{ width: 64, height: 64, flexGrow: 0, flexShrink: 0, borderRadius: 32 }}
                   resizeMode="contain"
                   accessibilityLabel="Leverage app logo"
                 />

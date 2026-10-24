@@ -32,6 +32,20 @@ export function resolveNeonAuthUrl(value: string | undefined): string | null {
   return resolveNeonEndpoint(value, '/neondb/auth');
 }
 
+/** Native requests use the configured auth service origin when the platform has no browser origin. */
+export function resolveNativeAuthRequestOrigin(value: string | undefined): string | null {
+  const endpoint = resolveNeonAuthUrl(value);
+  return endpoint ? new URL(endpoint).origin : null;
+}
+
+/** Supplies the trusted auth-service origin only for native requests with no usable origin. */
+export function withNativeAuthRequestOrigin(headers: Headers, isNative: boolean, authOrigin: string | null): Headers {
+  const result = new Headers(headers);
+  const origin = result.get('origin');
+  if (isNative && authOrigin && (!origin || origin === 'null')) result.set('Origin', authOrigin);
+  return result;
+}
+
 export function resolveNeonDataApiUrl(value: string | undefined): string | null {
   return resolveNeonEndpoint(value, '/neondb/rest/v1');
 }

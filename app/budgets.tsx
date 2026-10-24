@@ -9,7 +9,7 @@ import { BudgetProgressBar } from '../components/ui/BudgetProgressBar';
 import { DoneHeader } from '../components/ui/DoneHeader';
 import { useAuth } from '../src/context/AuthContext';
 import { CLASSIFICATIONS, CURRENCIES, EXPENSE_CLASSIFICATION_IDS, type CurrencyCode } from '../src/finance/domain';
-import { formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
+import { formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
 import { useBudgeting, useBudgetingWrites } from '../hooks/queries/useBudgeting';
 
 // A budget period is a calendar date, not an instant. Formatting local parts avoids
@@ -131,7 +131,7 @@ export default function BudgetsScreen() {
             <TextInput accessibilityLabel={`${CLASSIFICATIONS[categoryId].label} monthly budget amount in ${currency}`}
               editable={!isSaving}
               value={limits[categoryId] ?? ''} onChangeText={(value) => {
-                setLimits((previous) => ({ ...previous, [categoryId]: value }));
+                setLimits((previous) => ({ ...previous, [categoryId]: formatGroupedAmountInput(value) }));
                 setErrors((previous) => ({ ...previous, [categoryId]: '' }));
               }}
               placeholder={item ? `${formatMinorUnitsForInput(item.amountMinor)} ${item.currency}` : `Limit in ${currency}`} placeholderTextColor="#9ca3af" keyboardType="decimal-pad"

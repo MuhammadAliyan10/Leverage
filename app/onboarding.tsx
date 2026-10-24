@@ -9,7 +9,7 @@ import { useRouter } from 'expo-router';
 import { Input } from '../components/ui/Input';
 import { Button } from '../components/ui/Button';
 import { localDb } from '../src/db/local/client';
-import { parseMinorUnits } from '../src/finance/ledger';
+import { formatGroupedAmountInput, parseMinorUnits } from '../src/finance/ledger';
 import { CURRENCIES } from '../src/finance/domain';
 import { useAuth } from '../src/context/AuthContext';
 import { onboardingSchema, type OnboardingFormData } from '../utils/validations/onboarding';
@@ -223,10 +223,10 @@ export default function OnboardingScreen() {
                     leadingIcon={<Text className="font-body text-sm font-bold text-gray-600">Rs</Text>}
                     keyboardType={Platform.OS === 'ios' ? 'decimal-pad' : 'numeric'}
                     autoComplete="off"
-                    maxLength={18}
+                    maxLength={24}
                     returnKeyType="done"
                     onBlur={onBlur}
-                    onChangeText={onChange}
+                    onChangeText={(text) => onChange(formatGroupedAmountInput(text))}
                     value={value}
                     error={errors.balance?.message}
                   />
