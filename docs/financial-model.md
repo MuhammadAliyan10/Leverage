@@ -1,8 +1,8 @@
-# HouseLog financial model
+# Leverage financial model
 
 ## Product goal
 
-HouseLog helps a person record money without needing accounting knowledge, then explains what those records mean for day-to-day cash, spending, debt, and wealth. The entry flow should use familiar language. Accounting terms should have short explanations and optional detail.
+Leverage helps a person record money without needing accounting knowledge, then explains what those records mean for day-to-day cash, spending, debt, and wealth. The entry flow should use familiar language. Accounting terms should have short explanations and optional detail.
 
 ## Source of truth
 

@@ -166,7 +166,7 @@ export default function SettingsScreen() {
   };
 
   const handleSignOut = () => {
-    const message = 'Your local financial records will remain on this device. Pending Mizan bill reminders for this profile will be removed.';
+    const message = 'Your local financial records will remain on this device. Pending Leverage bill reminders for this profile will be removed.';
     if (Platform.OS === 'web') {
       if (typeof window !== 'undefined' && window.confirm(`Sign out?\n\n${message}`)) void signOut();
       return;
@@ -223,20 +223,20 @@ export default function SettingsScreen() {
           <SettingRow icon={ShieldCheck} title="Password fallback" value="Always available" />
         </Section>
 
-        <Section title="Notifications" description="Mizan schedules local bill reminders only. Notification text is generic and does not include bill names or amounts.">
+        <Section title="Notifications" description="Leverage schedules local bill reminders only. Notification text is generic and does not include bill names or amounts.">
           <SettingRow icon={Bell} title="Device permission" value={permission === 'loading' ? 'Checking…' : permission === 'allowed' ? 'Allowed' : permission === 'not-allowed' ? 'Not allowed' : 'Unavailable'} onPress={permission === 'not-allowed' && Platform.OS !== 'web' ? () => void manageNotificationPermission() : undefined} accessibilityLabel="Notification permission status" />
           <SettingRow icon={Bell} title="Local bill reminders" right={<Switch accessibilityLabel="Enable local bill reminders" accessibilityState={{ checked: profileSettings.remindersEnabled, disabled: savingSettings }} value={profileSettings.remindersEnabled} disabled={savingSettings} onValueChange={(value) => void toggleReminders(value)} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" />} />
           <SettingRow icon={CalendarClock} title="Manage bill reminders" onPress={() => router.push('/obligations')} />
         </Section>
 
-        <Section title="Data & privacy" description="Profiles are stored separately on each device. When cloud sync is connected, it currently covers accounts, transactions, budgets, savings goals, and emergency-fund records. Recurring schedules, bills, debts, assets, and investments stay local, and existing history is not imported. SQLCipher is configured for native builds, but encryption and recovery still require Android runtime verification. Encrypted backups include all local profiles on this device; keep the backup file and its separate passphrase safe. Mizan cannot recover a forgotten passphrase. Android automatic device backup is disabled.">
+        <Section title="Data & privacy" description="Profiles are stored separately on each device. When cloud sync is connected, it currently covers accounts, transactions, budgets, savings goals, and emergency-fund records. Recurring schedules, bills, debts, assets, and investments stay local, and existing history is not imported. SQLCipher is configured for native builds, but encryption and recovery still require Android runtime verification. Encrypted backups include all local profiles on this device; keep the backup file and its separate passphrase safe. Leverage cannot recover a forgotten passphrase. Android automatic device backup is disabled.">
           <SettingRow icon={ShieldCheck} title="Storage" value="This device only" />
           {disposableVerificationBuild ? <SettingRow icon={ShieldCheck} title="Native storage verification" value="Disposable test only" onPress={() => router.push('/native-verification' as Href)} /> : null}
           <SettingRow icon={Activity} title="Encrypted backup & restore" value={Platform.OS === 'web' ? 'Mobile app only' : 'Available'} onPress={Platform.OS === 'web' ? undefined : () => setRecoveryOpen(true)} />
         </Section>
 
-        <Section title="About" description="Personal finance tracking designed to work offline. Mizan does not connect to banks or provide live investment prices.">
-          <SettingRow icon={Activity} title="Mizan version" value={version} />
+        <Section title="About" description="Personal finance tracking designed to work offline. Leverage does not connect to banks or provide live investment prices.">
+          <SettingRow icon={Activity} title="Leverage version" value={version} />
           <SettingRow icon={Cloud} title="Cloud sync" value={Platform.OS === 'web' ? 'Mobile app only' : cloudApiConfigured ? 'Connect account' : 'Not configured'} onPress={Platform.OS === 'web' ? undefined : () => setCloudSyncOpen(true)} />
         </Section>
 
@@ -295,7 +295,7 @@ function RecoveryModal({ visible, onClose, onExport, onRestore }: {
     const message = validate();
     if (message) { setError(message); return; }
     setBusy(true); setError(null);
-    try { await onExport(passphrase); Alert.alert('Encrypted backup created', 'Keep the backup file and passphrase in separate safe places. Mizan cannot recover a forgotten passphrase.'); onClose(); }
+    try { await onExport(passphrase); Alert.alert('Encrypted backup created', 'Keep the backup file and passphrase in separate safe places. Leverage cannot recover a forgotten passphrase.'); onClose(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Backup could not be created.'); }
     finally { setBusy(false); }
   };
@@ -305,7 +305,7 @@ function RecoveryModal({ visible, onClose, onExport, onRestore }: {
     try {
       const bytes = await localDb.recovery.pickEncryptedBackup();
       if (!bytes) { setBusy(false); return; }
-      Alert.alert('Replace local financial records?', 'Mizan will validate the backup first, then replace the records on this device. The current database is preserved unless the restored database passes verification.', [
+      Alert.alert('Replace local financial records?', 'Leverage will validate the backup first, then replace the records on this device. The current database is preserved unless the restored database passes verification.', [
         { text: 'Cancel', style: 'cancel', onPress: () => setBusy(false) },
         { text: 'Validate and restore', style: 'destructive', onPress: () => { void onRestore(bytes, passphrase).catch((cause) => setError(cause instanceof Error ? cause.message : 'Restore failed.')).finally(() => setBusy(false)); } },
       ]);
@@ -378,7 +378,7 @@ function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSav
     catch (error) { nameForm.setError('fullName', { type: 'server', message: error instanceof Error ? error.message : 'Name could not be saved.' }); }
   };
   const submitPassword = async (data: ChangePasswordForm) => {
-    try { await onChangePassword(data.currentPassword, data.newPassword); onClose(); Alert.alert('Password changed', 'Your local profile password was updated. Mizan cannot reset it remotely.'); }
+    try { await onChangePassword(data.currentPassword, data.newPassword); onClose(); Alert.alert('Password changed', 'Your local profile password was updated. Leverage cannot reset it remotely.'); }
     catch (error) { passwordForm.setError('currentPassword', { type: 'server', message: error instanceof Error ? error.message : 'Password could not be changed.' }); }
   };
   const chooseProfile = async (profile: ProfileRow) => {
@@ -412,7 +412,7 @@ function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSav
             <Button title="Change password" onPress={passwordForm.handleSubmit(submitPassword)} isLoading={passwordForm.formState.isSubmitting} />
           </> : null}
           {mode === 'switch' ? <>
-            <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">Choose a profile, then enter its password. Mizan will not authenticate it automatically.</Text>
+            <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">Choose a profile, then enter its password. Leverage will not authenticate it automatically.</Text>
             {loadingProfiles ? <View className="items-center py-6"><ActivityIndicator color={PRIMARY_COLOR} /><Text className="font-body mt-2 text-sm text-gray-500">Loading profiles…</Text></View> : null}
             {profileError ? <View className="py-2"><Text accessibilityRole="alert" className="font-body text-sm text-red-600">{profileError}</Text><Pressable accessibilityRole="button" onPress={() => setRetry((value) => value + 1)} className="mt-3 min-h-11 justify-center"><Text className="font-body font-semibold text-primary">Retry</Text></Pressable></View> : null}
             {!loadingProfiles && !profileError ? <ScrollView keyboardShouldPersistTaps="handled">

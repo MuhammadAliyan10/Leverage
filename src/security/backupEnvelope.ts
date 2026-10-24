@@ -164,7 +164,7 @@ export async function openPassphraseBackupEnvelope(
   const schemaVersion = Number(metadataMatch[1]);
   if (schemaVersion < 1 || schemaVersion > expectedSchemaVersion) throw new Error('Backup schema version is incompatible.');
   assertProfileId(metadataMatch[2]);
-  if (expectedScope !== null && metadataMatch[2] !== expectedScope) throw new Error('Backup is for a different Mizan profile.');
+  if (expectedScope !== null && metadataMatch[2] !== expectedScope) throw new Error('Backup is for a different Leverage profile.');
   const database = plaintext.slice(newline + 1);
   if (database.length === 0 || database.length > MAX_DATABASE_BYTES) throw new Error('Backup database size is invalid.');
   return { schemaVersion, profileId: metadataMatch[2], database };

@@ -1,17 +1,17 @@
-import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
   TextInput,
   Image,
+  Keyboard,
   TouchableOpacity,
   Pressable,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
 } from 'react-native';
-import { Check, Eye, EyeOff, LockKeyhole, Mail, ShieldCheck, UserRound } from 'lucide-react-native';
+import { Check, Eye, EyeOff, LockKeyhole, Mail, UserRound } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -94,12 +94,10 @@ export default function AuthScreen() {
       result = { success: false, error: getLocalAuthFailureMessage(error) };
     }
     if (!result.success) {
-      if (result.error?.toLowerCase().includes('email') || result.error?.toLowerCase().includes('account')) {
-        setSignInError('email', { message: result.error });
-      } else {
-        setSignInError('password', { message: result.error });
-      }
-      Toast.show({ type: 'error', text1: 'Sign In Failed', text2: result.error });
+      setSignInError('root', {
+        type: 'server',
+        message: result.error || 'Sign in could not be completed. Check your details and connection, then try again.',
+      });
     } else if (result.passwordUpgradePending) {
       Toast.show({ type: 'info', text1: 'Password security update pending', text2: 'Your login was verified; stored password protection could not be upgraded yet.' });
     }
@@ -110,20 +108,19 @@ export default function AuthScreen() {
     let result: { success: boolean; error?: string };
     try {
       result = await signUp(data.fullName, data.email, data.password, rememberMe);
-    } catch {
-      result = { success: false, error: 'Local account setup could not complete. Check device storage and try again.' };
+    } catch (error) {
+      result = { success: false, error: getLocalAuthFailureMessage(error, 'sign-up') };
     }
     if (!result.success) {
-      if (result.error?.toLowerCase().includes('email')) {
-        setSignUpError('email', { message: result.error });
-      } else {
-        setSignUpError('root', { message: result.error });
-      }
-      Toast.show({ type: 'error', text1: 'Sign Up Failed', text2: result.error });
+      setSignUpError('root', {
+        type: 'server',
+        message: result.error || 'Account creation could not be completed. Check your connection and try again.',
+      });
     }
   };
 
   const switchMode = (next: Mode) => {
+    Keyboard.dismiss();
     clearSignInErrors();
     clearSignUpErrors();
     setMode(next);
@@ -144,45 +141,46 @@ export default function AuthScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
-      <View pointerEvents="none" className="absolute inset-0 overflow-hidden">
-        <View className="absolute -left-12 top-28 h-40 w-40 rounded-full bg-primary/10" />
-        <View className="absolute -right-14 bottom-24 h-48 w-48 rounded-full bg-sky-100 dark:bg-sky-950/40" />
-        <View className="absolute right-10 top-16 h-5 w-5 rounded-full bg-primary/30" />
-      </View>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         className="flex-1"
       >
         <ScrollView
-          contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', paddingHorizontal: 20, paddingVertical: 28 }}
+          contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-start', paddingHorizontal: 20, paddingVertical: 20 }}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
           showsVerticalScrollIndicator={false}
         >
           <View className="w-full max-w-[460px] self-center py-5">
             <View className="mb-7 h-32 items-center justify-center">
-              <View className="relative h-24 w-24 items-center justify-center rounded-2xl bg-primary/10">
-                <Image source={require('../../assets/images/mizan-icon.png')} className="h-20 w-20 rounded-2xl" accessibilityLabel="Mizan app logo" />
-                <View className="absolute -bottom-4 -right-4 h-10 w-10 items-center justify-center rounded-full border-[3px] border-gray-50 bg-white shadow-md dark:border-neutral-950 dark:bg-neutral-900">
-                  <ShieldCheck size={21} color={PRIMARY_COLOR} strokeWidth={2} />
-                </View>
+              <View
+                className="relative h-24 w-24 items-center justify-center rounded-full bg-primary/10"
+                style={{ width: 96, height: 96, flexGrow: 0, flexShrink: 0 }}
+              >
+                <Image
+                  source={require('../../assets/images/leverage-icon.png')}
+                  className="h-20 w-20 rounded-full"
+                  style={{ width: 80, height: 80, flexGrow: 0, flexShrink: 0, borderRadius: 40 }}
+                  resizeMode="contain"
+                  accessibilityLabel="Leverage app logo"
+                />
               </View>
-              <View className="absolute left-[30%] top-5 h-2.5 w-2.5 rounded-full bg-sky-300" />
             </View>
 
             <Text className="font-heading text-[28px] font-bold tracking-tight text-[#1b2935] dark:text-white">
               {mode === 'signin' ? 'Login' : 'Register'}
             </Text>
             <Text className="font-body mb-5 mt-1 text-sm text-[#66717e] dark:text-neutral-300">
-              {mode === 'signin' ? 'Sign in to your profile on this device.' : 'Create your Mizan profile to get started.'}
+              {mode === 'signin' ? 'Sign in to your profile on this device.' : 'Create your cloud account. An internet connection is required.'}
             </Text>
 
             {restoreError && (
-              <Text accessibilityRole="alert" className="font-body mb-4 rounded-2xl bg-red-50 p-3 text-center text-sm text-red-700">
+              <Text accessibilityRole="alert" className="font-body mb-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-center text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
                 {restoreError}
               </Text>
             )}
             {sessionNotice && (
-              <Text accessibilityRole="alert" className="font-body mb-4 rounded-2xl bg-blue-50 p-3 text-center text-xs leading-5 text-blue-800">
+              <Text accessibilityRole="alert" className="font-body mb-4 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-center text-xs leading-5 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300">
                 {sessionNotice}
               </Text>
             )}
@@ -205,7 +203,7 @@ export default function AuthScreen() {
                       returnKeyType="next"
                       onSubmitEditing={() => signInPasswordRef.current?.focus()}
                       onBlur={onBlur}
-                      onChangeText={onChange}
+                      onChangeText={(value) => { onChange(value); clearSignInErrors('root'); }}
                       value={value}
                       error={signInErrors.email?.message}
                     />
@@ -226,16 +224,23 @@ export default function AuthScreen() {
                       returnKeyType="done"
                       onSubmitEditing={handleSignInSubmit(onSignIn)}
                       onBlur={onBlur}
-                      onChangeText={onChange}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      onChangeText={(value) => { onChange(value); clearSignInErrors('root'); }}
                       value={value}
                       error={signInErrors.password?.message}
                       trailingAction={visibilityAction(showSignInPassword, () => setShowSignInPassword((v) => !v), 'password')}
                     />
                   )}
                 />
-                <RememberMe checked={rememberMe} onToggle={() => setRememberMe((checked) => !checked)} />
+                {signInErrors.root?.message ? (
+                  <Text accessibilityRole="alert" className="font-body mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm leading-5 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+                    {signInErrors.root.message}
+                  </Text>
+                ) : null}
+                <RememberMe checked={rememberMe} disabled={isSignInSubmitting} onToggle={() => setRememberMe((checked) => !checked)} />
                 <Button
-                  title="Sign in"
+                  title={isSignInSubmitting ? 'Signing in…' : 'Sign in'}
                   className={`${AUTH_BUTTON_CLASS} ${isSignInSubmitting ? 'opacity-60' : ''}`}
                   onPress={handleSignInSubmit(onSignIn)}
                   isLoading={isSignInSubmitting}
@@ -258,7 +263,7 @@ export default function AuthScreen() {
                       returnKeyType="next"
                       onSubmitEditing={() => signUpEmailRef.current?.focus()}
                       onBlur={onBlur}
-                      onChangeText={onChange}
+                      onChangeText={(value) => { onChange(value); clearSignUpErrors('root'); }}
                       value={value}
                       error={signUpErrors.fullName?.message}
                     />
@@ -281,7 +286,7 @@ export default function AuthScreen() {
                       returnKeyType="next"
                       onSubmitEditing={() => signUpPasswordRef.current?.focus()}
                       onBlur={onBlur}
-                      onChangeText={onChange}
+                      onChangeText={(value) => { onChange(value); clearSignUpErrors('root'); }}
                       value={value}
                       error={signUpErrors.email?.message}
                     />
@@ -296,14 +301,16 @@ export default function AuthScreen() {
                       placeholder="Create a password"
                       variant="pill"
                       leadingIcon={fieldIcon(LockKeyhole)}
-                      helperText="Use 10+ characters, with an uppercase letter and a number."
+                      helperText="Use at least 12 characters, with an uppercase letter and a number."
                       secureTextEntry={!showSignUpPassword}
                       textContentType="newPassword"
                       inputRef={signUpPasswordRef}
                       returnKeyType="next"
                       onSubmitEditing={() => signUpConfirmRef.current?.focus()}
                       onBlur={onBlur}
-                      onChangeText={onChange}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      onChangeText={(value) => { onChange(value); clearSignUpErrors('root'); }}
                       value={value}
                       error={signUpErrors.password?.message}
                       trailingAction={visibilityAction(showSignUpPassword, () => setShowSignUpPassword((v) => !v), 'password')}
@@ -325,7 +332,9 @@ export default function AuthScreen() {
                       returnKeyType="done"
                       onSubmitEditing={handleSignUpSubmit(onSignUp)}
                       onBlur={onBlur}
-                      onChangeText={onChange}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      onChangeText={(value) => { onChange(value); clearSignUpErrors('root'); }}
                       value={value}
                       error={signUpErrors.confirmPassword?.message}
                       trailingAction={visibilityAction(showConfirmPassword, () => setShowConfirmPassword((v) => !v), 'confirmation password')}
@@ -333,13 +342,13 @@ export default function AuthScreen() {
                   )}
                 />
                 {signUpErrors.root && (
-                  <Text accessibilityRole="alert" className="font-body mb-3 text-sm text-red-600">
+                  <Text accessibilityRole="alert" className="font-body mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm leading-5 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
                     {signUpErrors.root.message}
                   </Text>
                 )}
-                <RememberMe checked={rememberMe} onToggle={() => setRememberMe((checked) => !checked)} />
+                <RememberMe checked={rememberMe} disabled={isSignUpSubmitting} onToggle={() => setRememberMe((checked) => !checked)} />
                 <Button
-                  title="Sign up"
+                  title={isSignUpSubmitting ? 'Creating account…' : 'Sign up'}
                   className={`${AUTH_BUTTON_CLASS} ${isSignUpSubmitting ? 'opacity-60' : ''}`}
                   onPress={handleSignUpSubmit(onSignUp)}
                   isLoading={isSignUpSubmitting}
@@ -353,6 +362,9 @@ export default function AuthScreen() {
               </Text>
               <TouchableOpacity
                 accessibilityRole="button"
+                accessibilityLabel={mode === 'signin' ? 'Switch to sign up' : 'Switch to sign in'}
+                hitSlop={8}
+                disabled={isSignInSubmitting || isSignUpSubmitting}
                 onPress={() => switchMode(mode === 'signin' ? 'signup' : 'signin')}
               >
                 <Text className="font-body text-sm font-semibold text-primary">
@@ -361,7 +373,7 @@ export default function AuthScreen() {
               </TouchableOpacity>
             </View>
             <Text className="font-body mt-5 text-center text-xs text-gray-400 dark:text-neutral-500">
-              Mizan keeps profiles and financial records separately on each device. A browser profile does not automatically sync to Android.
+              Leverage keeps profiles and financial records separately on each device. A browser profile does not automatically sync to Android.
             </Text>
             <TouchableOpacity accessibilityRole="button" onPress={() => router.push('/restore' as never)} className="mt-4 min-h-11 items-center justify-center">
               <Text className="font-body text-sm font-semibold text-primary">Restore an encrypted backup</Text>
@@ -373,13 +385,15 @@ export default function AuthScreen() {
   );
 }
 
-function RememberMe({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
+function RememberMe({ checked, onToggle, disabled = false }: { checked: boolean; onToggle: () => void; disabled?: boolean }) {
   return (
     <Pressable
       accessibilityRole="checkbox"
-      accessibilityState={{ checked }}
+      accessibilityState={{ checked, disabled }}
       accessibilityLabel="Remember this profile on this device"
       className="mb-5 flex-row items-center self-start"
+      disabled={disabled}
+      hitSlop={6}
       onPress={onToggle}
     >
       <View className={`mr-2 h-[18px] w-[18px] items-center justify-center rounded border ${checked ? 'border-primary bg-primary' : 'border-gray-300 bg-white'}`}>

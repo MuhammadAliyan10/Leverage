@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { AppState, Platform } from 'react-native';
+import * as Crypto from 'expo-crypto';
 import * as Network from 'expo-network';
 import * as SecureStore from 'expo-secure-store';
 import { useColorScheme } from 'nativewind';
@@ -203,7 +204,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         let savedProfileSettings = { ...DEFAULT_PROFILE_SETTINGS };
         let settingsNotice: string | undefined;
         try { savedProfileSettings = await appSettings.getProfile(found.id); }
-        catch { settingsNotice = 'Security preferences could not be read. Mizan is locked until you verify this profile password.'; }
+        catch { settingsNotice = 'Security preferences could not be read. Leverage is locked until you verify this profile password.'; }
         if (!active) return;
         setProfileSettings(savedProfileSettings);
         const notice = settingsNotice ?? appearanceNotice;
@@ -217,7 +218,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           coldStartLockRequired: Platform.OS !== 'web',
         });
         if (restoredStatus === 'locked') {
-          setSession({ status: 'locked', user: found, ...(notice ? { notice } : { notice: 'Unlock Mizan to continue.' }) });
+          setSession({ status: 'locked', user: found, ...(notice ? { notice } : { notice: 'Unlock Leverage to continue.' }) });
         } else {
           setSession({ status: 'signedIn', user: found, ...(notice ? { notice } : {}) });
         }
@@ -235,42 +236,49 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       let result: Awaited<ReturnType<typeof localDb.user.signIn>>;
       let cloudLinkNotice: string | undefined;
-      if (cloudApiConfigured) {
-        const network = await Network.getNetworkStateAsync().catch(() => null);
-        const online = network?.isConnected === true && network.isInternetReachable !== false;
-        if (!online) {
-          result = await localDb.user.signIn(email, password);
-          if (!result.success) return { success: false, error: 'This device has no saved profile for offline sign-in. Connect to the internet and sign in once first.' };
-        } else {
-          let localUser = await localDb.user.findByEmail(email);
-          let createdShell = false;
-          if (!localUser) {
-            const shell = await localDb.user.register(email.trim().split('@')[0] || 'HouseLog user', email, password);
-            if (!shell.success) return { success: false, error: shell.error };
-            localUser = shell.user;
-            createdShell = true;
-          }
-          const cloud = getCloudAuthClient(localUser.id);
-          const remote = await cloud.signIn.email({ email: email.trim().toLowerCase(), password, rememberMe });
-          if (remote.error || !remote.data?.user?.id) {
-            if (createdShell) await localDb.user.discardUnlinkedEmptyProfile(localUser.id);
-            return { success: false, error: remote.error?.message ?? 'Cloud sign-in did not return an authenticated account.' };
-          }
-          try {
-            cloudLinkNotice = await attachAuthenticatedCloudProfile(localUser.id, remote.data.user.id, email, password);
-          } catch (error) {
-            await cloud.signOut().catch(() => undefined);
-            if (createdShell) await localDb.user.discardUnlinkedEmptyProfile(localUser.id);
-            return { success: false, error: error instanceof Error ? error.message : 'Cloud account could not be linked to this device profile.' };
-          }
-          const refreshed = await localDb.user.findById(localUser.id);
-          if (!refreshed) return { success: false, error: 'The authenticated local profile could not be loaded.' };
-          result = { success: true, user: refreshed, passwordUpgradePending: false };
-        }
-      } else {
+      const network = await Network.getNetworkStateAsync().catch(() => null);
+      const online = network?.isConnected === true && network.isInternetReachable !== false;
+      if (!online) {
         result = await localDb.user.signIn(email, password);
+        if (!result.success) return { success: false, error: 'This device has no saved profile for offline sign-in. Connect to the internet and sign in once first.' };
+      } else {
+        if (!cloudApiConfigured) return { success: false, error: 'Cloud sign-in is not configured in this app build. No local-only sign-in was attempted while online.' };
+
+        // Keep the existing device ID for auth-session storage, but do not create a
+        // local profile until Neon has authenticated these credentials.
+        let localUser = await localDb.user.findByEmail(email);
+        const ownerId = localUser?.id ?? Crypto.randomUUID();
+        const cloud = getCloudAuthClient(ownerId);
+        let remote: Awaited<ReturnType<typeof cloud.signIn.email>>;
+        try {
+          remote = await cloud.signIn.email({ email: email.trim().toLowerCase(), password, rememberMe });
+        } catch (error) {
+          return { success: false, error: `Cloud sign-in could not reach Neon Auth: ${error instanceof Error ? error.message : 'Check your internet connection and try again.'}` };
+        }
+        if (remote.error || !remote.data?.user?.id) {
+          return { success: false, error: remote.error?.message ?? 'Cloud sign-in did not return an authenticated account.' };
+        }
+
+        if (!localUser) {
+          const displayName = email.trim().split('@')[0] || 'Leverage user';
+          const local = await localDb.user.register(displayName, email, password, ownerId);
+          if (!local.success) {
+            await cloud.signOut().catch(() => undefined);
+            return { success: false, error: `Cloud sign-in succeeded, but this device could not prepare its local profile: ${local.error} Your cloud account is unchanged; resolve local storage and sign in again.` };
+          }
+          localUser = local.user;
+        }
+
+        try {
+          cloudLinkNotice = await attachAuthenticatedCloudProfile(localUser.id, remote.data.user.id, email, password);
+        } catch (error) {
+          await cloud.signOut().catch(() => undefined);
+          return { success: false, error: error instanceof Error ? `${error.message} Cloud authentication succeeded; sign in again to retry linking this device.` : 'Cloud authentication succeeded, but this device could not be linked. Sign in again to retry.' };
+        }
+        const refreshed = await localDb.user.findById(localUser.id);
+        if (!refreshed) return { success: false, error: 'Cloud authentication succeeded, but the local profile could not be loaded. Your cloud account is unchanged.' };
+        result = { success: true, user: refreshed, passwordUpgradePending: false };
       }
-      if (!result.success) return { success: false, error: result.error };
       let notice: string | undefined = typeof cloudLinkNotice === 'string' ? cloudLinkNotice : undefined;
       let savedProfileSettings = { ...DEFAULT_PROFILE_SETTINGS };
       try { savedProfileSettings = await appSettings.getProfile(result.user.id); }
@@ -278,7 +286,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try { await localDb.user.claimLegacyData(result.user.id); }
       catch { notice ??= 'Signed in. Older unassigned records could not be linked and were left unchanged.'; }
       try { await persistSession(result.user.id, rememberMe); }
-      catch { notice = 'Signed in for this session, but the saved sign-in preference could not be updated. You may need to sign in again after closing Mizan.'; }
+      catch { notice = 'Signed in for this session, but the saved sign-in preference could not be updated. You may need to sign in again after closing Leverage.'; }
       if (sequenceRef.current !== operation) return { success: false, error: 'Sign-in was cancelled. Please try again.' };
       queryClient.clear();
       setProfileSettings(savedProfileSettings);
@@ -286,53 +294,59 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession({ status: 'signedIn', user: result.user, ...(notice ? { notice } : {}) });
       return { success: true, passwordUpgradePending: result.passwordUpgradePending };
     } catch (error) {
-      return { success: false, error: getLocalAuthFailureMessage(error) };
+      return { success: false, error: getLocalAuthFailureMessage(error, 'sign-in') };
     } finally { if (sequenceRef.current === operation) operationRef.current = false; }
   };
 
-  const signUp = useCallback(async (fullName: string, email: string, password: string, rememberMe: boolean) => {
+  const signUp = async (fullName: string, email: string, password: string, rememberMe: boolean) => {
     if (operationRef.current) return { success: false, error: 'Authentication is already in progress. Please wait.' };
     operationRef.current = true;
     const operation = ++sequenceRef.current;
     try {
-      let result: Awaited<ReturnType<typeof localDb.user.register>>;
-      let notice: string | undefined;
-      let preserveProfileSettings = false;
-      if (cloudApiConfigured) {
-        const network = await Network.getNetworkStateAsync().catch(() => null);
-        if (network?.isConnected !== true || network.isInternetReachable === false) return { success: false, error: 'Connect to the internet to create your cloud account.' };
-        let existing = await localDb.user.findByEmail(email);
-        const existingLocalProfile = existing !== null;
-        preserveProfileSettings = existingLocalProfile;
-        if (!existing) {
-          result = await localDb.user.register(fullName, email, password);
-          if (!result.success) return { success: false, error: result.error };
-          existing = result.user;
-        }
-        const cloud = getCloudAuthClient(existing.id);
-        const remote = await cloud.signUp.email({ name: fullName, email: email.trim().toLowerCase(), password });
-        if (remote.error || !remote.data?.user?.id) {
-          if (!existingLocalProfile) await localDb.user.discardUnlinkedEmptyProfile(existing.id);
-          return { success: false, error: remote.error?.message ?? 'Cloud sign-up did not return an authenticated account.' };
-        }
-        let cloudLinkNotice: string | undefined;
-        try {
-          cloudLinkNotice = await attachAuthenticatedCloudProfile(existing.id, remote.data.user.id, email, password);
-        } catch (error) {
-          await cloud.signOut().catch(() => undefined);
-          if (!existingLocalProfile) await localDb.user.discardUnlinkedEmptyProfile(existing.id);
-          return { success: false, error: error instanceof Error ? `${error.message} The cloud account was created; sign in to retry linking this device.` : 'The cloud account was created, but this device could not be linked. Sign in to retry linking.' };
-        }
-        const authenticatedLocalProfile = await localDb.user.findById(existing.id);
-        if (!authenticatedLocalProfile) return { success: false, error: 'Cloud account created, but the device profile could not be loaded. Sign in again to retry.' };
-        result = { success: true, user: authenticatedLocalProfile, passwordUpgradePending: false };
-        if (existingLocalProfile) notice = cloudLinkNotice ?? 'Cloud account created and linked to your existing device profile.';
-        else if (cloudLinkNotice) notice = cloudLinkNotice;
-      } else {
-        result = await localDb.user.register(fullName, email, password);
+      if (!cloudApiConfigured) return { success: false, error: 'Cloud registration is not configured in this app build. Connect this build to Neon before creating an account.' };
+      const network = await Network.getNetworkStateAsync().catch(() => null);
+      if (network?.isConnected !== true || network.isInternetReachable === false) return { success: false, error: 'Connect to the internet to create your cloud account.' };
+
+      // This read preserves an existing device profile and its history. Neon creates
+      // the account before this flow writes any new local profile data.
+      const existing = await localDb.user.findByEmail(email);
+      const existingLocalProfile = existing !== null;
+      const preserveProfileSettings = existingLocalProfile;
+      const ownerId = existing?.id ?? Crypto.randomUUID();
+      const cloud = getCloudAuthClient(ownerId);
+      let remote: Awaited<ReturnType<typeof cloud.signUp.email>>;
+      try {
+        remote = await cloud.signUp.email({ name: fullName, email: email.trim().toLowerCase(), password });
+      } catch (error) {
+        return { success: false, error: `Cloud registration could not reach Neon Auth: ${error instanceof Error ? error.message : 'Check your internet connection and try again.'}` };
       }
-      if (!result.success) return { success: false, error: result.error };
-      notice ??= cloudApiConfigured ? 'Cloud account created. This device is linked and local changes will sync when connected.' : 'Mizan stores this profile and its financial records on this device. There is no cloud account recovery.';
+      if (remote.error || !remote.data?.user?.id) {
+        return { success: false, error: remote.error?.message ?? 'Cloud sign-up did not return an authenticated account.' };
+      }
+
+      let profile = existing;
+      if (!profile) {
+        const local = await localDb.user.register(fullName, email, password, ownerId);
+        if (!local.success) {
+          await cloud.signOut().catch(() => undefined);
+          return { success: false, error: `Your cloud account was created, but this device could not save its local profile: ${local.error} Fix local storage, then sign in to finish linking this device.` };
+        }
+        profile = local.user;
+      }
+
+      let cloudLinkNotice: string | undefined;
+      try {
+        cloudLinkNotice = await attachAuthenticatedCloudProfile(profile.id, remote.data.user.id, email, password);
+      } catch (error) {
+        await cloud.signOut().catch(() => undefined);
+        return { success: false, error: error instanceof Error ? `${error.message} Your cloud account remains created; sign in again to retry linking this device.` : 'Your cloud account remains created, but this device could not be linked. Sign in again to retry.' };
+      }
+      const authenticatedLocalProfile = await localDb.user.findById(profile.id);
+      if (!authenticatedLocalProfile) return { success: false, error: 'Cloud account created, but the device profile could not be loaded. Sign in again to retry.' };
+      const result: Awaited<ReturnType<typeof localDb.user.register>> = { success: true, user: authenticatedLocalProfile, passwordUpgradePending: false };
+      let notice: string | undefined = cloudLinkNotice;
+      if (existingLocalProfile && !notice) notice = 'Cloud account created and linked to your existing device profile.';
+      notice ??= 'Cloud account created and linked to this device.';
       let initialSettings = { ...DEFAULT_PROFILE_SETTINGS };
       if (!preserveProfileSettings) {
         try { await appSettings.setProfile(result.user.id, initialSettings); }
@@ -350,10 +364,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setPendingProfileEmail(null);
       setSession({ status: 'signedIn', user: result.user, notice });
       return { success: true, notice };
-    } catch {
-      return { success: false, error: 'Local profile setup could not complete. Check device storage and try again.' };
+    } catch (error) {
+      return { success: false, error: getLocalAuthFailureMessage(error, 'sign-up') };
     } finally { if (sequenceRef.current === operation) operationRef.current = false; }
-  }, [queryClient, setSession]);
+  };
 
   const signOut = useCallback(async () => {
     const current = sessionRef.current;
@@ -365,7 +379,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const failures: string[] = [];
     try { await persistSignedOut(); }
     catch {
-      failures.push('Secure storage could not confirm removal of the saved profile. Reopen Mizan and verify sign-in is required.');
+      failures.push('Secure storage could not confirm removal of the saved profile. Reopen Leverage and verify sign-in is required.');
       if (Platform.OS !== 'web') {
         try { await SecureStore.deleteItemAsync(SESSION_KEY); }
         catch { failures.push('Secure storage also rejected the session removal attempt; this device may restore the saved session when reopened.'); }
@@ -420,7 +434,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const current = sessionRef.current;
     if (current.status !== 'signedIn') return;
     queryClient.clear();
-    setSession({ status: 'locked', user: current.user, notice: 'Unlock Mizan to continue.' });
+    setSession({ status: 'locked', user: current.user, notice: 'Unlock Leverage to continue.' });
   }, [queryClient, setSession]);
 
   const unlockAfterBiometric = useCallback((): boolean => {

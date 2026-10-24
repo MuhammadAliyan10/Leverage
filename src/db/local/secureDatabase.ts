@@ -2,6 +2,7 @@ import * as SQLite from 'expo-sqlite';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { File, FileMode } from 'expo-file-system';
+import { getSqliteFile } from './sqliteFile';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { utf8ToBytes } from '@noble/hashes/utils.js';
 
@@ -13,8 +14,7 @@ const SQLITE_HEADER = [83, 81, 76, 105, 116, 101, 32, 102, 111, 114, 109, 97, 11
 let keyPromise: Promise<string> | null = null;
 
 function dbFile(name: string): File {
-  if (!SQLite.defaultDatabaseDirectory) throw new Error('The local database directory is unavailable.');
-  return new File(SQLite.defaultDatabaseDirectory, name);
+  return getSqliteFile(name);
 }
 
 function hasPlainSqliteHeader(file: File): boolean {

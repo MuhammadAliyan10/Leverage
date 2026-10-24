@@ -9,7 +9,7 @@ export default ({ config }: { config: ExpoConfig }): ExpoConfig => {
   if (!disposable) return config;
   return {
     ...config,
-    name: 'Mizan Verification',
+    name: 'Leverage Verification',
     android: {
       ...config.android,
       package: 'com.houselog.verification',

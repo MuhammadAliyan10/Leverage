@@ -1,4 +1,4 @@
-# Mizan API (Phase 2 basic cloud sync)
+# Leverage API (cloud sync)
 
 This is a separate Node service. It is not imported by the Expo bundle. Neon credentials are used only by this server and the Prisma CLI.
 
@@ -15,7 +15,7 @@ This is a separate Node service. It is not imported by the Expo bundle. Neon cre
 The backend can be packaged without exposing a database credential in the image:
 
 ```sh
-docker build -t mizan-api:local .
+docker build -t leverage-api:local .
 ```
 
 The image runs as the unprivileged `node` user and starts the compiled server with `npm run start:production`'s equivalent (`node dist/src/index.js`). Supply `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `ALLOWED_ORIGINS`, and optionally `PORT` through the hosting provider's runtime secret/configuration store. `DATABASE_URL` must be the pooled runtime PostgreSQL URL with TLS enabled in production. Do not pass credentials as Docker build arguments or bake them into the image. The image health check uses `/health/ready`.

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ArrowLeft, Eye, EyeOff, ShieldCheck } from 'lucide-react-native';
+import { ArrowLeft, Eye, EyeOff, FileUp } from 'lucide-react-native';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { useAuth } from '../../src/context/AuthContext';
@@ -23,7 +23,7 @@ export default function RestoreBackupScreen() {
     try {
       const bytes = await localDb.recovery.pickEncryptedBackup();
       if (!bytes) { setBusy(false); return; }
-      Alert.alert('Restore Mizan backup?', 'Mizan will validate the encrypted file, schema, profile, financial data and foreign keys before replacing this device’s local database.', [
+      Alert.alert('Restore Leverage backup?', 'Leverage will validate the encrypted file, schema, profile, financial data and foreign keys before replacing this device’s local database.', [
         { text: 'Cancel', style: 'cancel', onPress: () => setBusy(false) },
         { text: 'Validate and restore', onPress: () => {
           void restoreBackup(bytes, passphrase).then(() => {
@@ -37,16 +37,23 @@ export default function RestoreBackupScreen() {
 
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1">
-      <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', paddingHorizontal: 24, paddingVertical: 32 }} keyboardShouldPersistTaps="handled">
-        <View className="w-full max-w-[460px] self-center">
-          <Pressable accessibilityRole="button" accessibilityLabel="Back to sign in" onPress={() => router.back()} className="mb-8 h-11 w-11 items-center justify-center rounded-full bg-white dark:bg-neutral-900"><ArrowLeft size={20} color={PRIMARY_COLOR} /></Pressable>
-          <View className="mb-5 h-14 w-14 items-center justify-center rounded-2xl bg-primary/10"><ShieldCheck size={28} color={PRIMARY_COLOR} /></View>
-          <Text className="font-heading text-2xl font-bold text-gray-900 dark:text-white">Restore encrypted backup</Text>
-          <Text className="font-body mb-7 mt-2 text-sm leading-5 text-gray-600 dark:text-neutral-300">Choose your Mizan .hlbk file and enter its backup passphrase. You must remember this passphrase; it is not your profile password.</Text>
-          <Input label="Backup passphrase" placeholder="At least 12 characters" value={passphrase} onChangeText={(value) => { setPassphrase(value); setError(null); }} secureTextEntry={!visible} autoCapitalize="none" autoCorrect={false} error={undefined} trailingAction={<Pressable accessibilityRole="button" accessibilityLabel={visible ? 'Hide passphrase' : 'Show passphrase'} onPress={() => setVisible((value) => !value)}>{visible ? <EyeOff size={19} color="#737d8d" /> : <Eye size={19} color="#737d8d" />}</Pressable>} />
-          {error ? <Text accessibilityRole="alert" className="font-body mb-3 text-sm text-red-600">{error}</Text> : null}
-          <Button title="Choose backup file" onPress={() => void restore()} isLoading={busy} />
-          <Text className="font-body mt-5 text-xs leading-5 text-gray-500 dark:text-neutral-400">Restore validates the file before activating it. A damaged backup or incorrect passphrase leaves the existing database unchanged.</Text>
+      <ScrollView contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 20, paddingTop: 14, paddingBottom: 32 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <View className="w-full max-w-[480px] self-center">
+          <Pressable accessibilityRole="button" accessibilityLabel="Back to sign in" onPress={() => router.replace('/(auth)')} className="mb-8 h-11 w-11 items-center justify-center rounded-full border border-gray-200 bg-white dark:border-neutral-800 dark:bg-neutral-900"><ArrowLeft size={20} color={PRIMARY_COLOR} /></Pressable>
+
+          <Text className="font-heading text-[30px] font-bold tracking-tight text-gray-900 dark:text-white">Restore your backup</Text>
+          <Text className="font-body mb-7 mt-2 text-sm leading-6 text-gray-600 dark:text-neutral-300">Bring your financial profile back to this device using your encrypted <Text className="font-semibold text-gray-800 dark:text-neutral-100">.hlbk</Text> backup and its backup passphrase.</Text>
+
+          <View className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+            <Input label="Backup passphrase" placeholder="Enter at least 12 characters" value={passphrase} onChangeText={(value) => { setPassphrase(value); setError(null); }} secureTextEntry={!visible} autoCapitalize="none" autoCorrect={false} error={error ?? undefined} helperText="This is different from your Leverage sign-in password." trailingAction={<Pressable accessibilityRole="button" accessibilityLabel={visible ? 'Hide passphrase' : 'Show passphrase'} hitSlop={10} onPress={() => setVisible((value) => !value)}>{visible ? <EyeOff size={19} color="#737d8d" /> : <Eye size={19} color="#737d8d" />}</Pressable>} />
+            <Button title={busy ? 'Preparing restore…' : 'Choose encrypted backup'} onPress={() => void restore()} isLoading={busy} accessibilityLabel="Choose encrypted backup file" />
+            <Text className="font-body mt-3 text-center text-xs leading-5 text-gray-500 dark:text-neutral-400">Select the backup file saved on this device or in your files.</Text>
+          </View>
+
+          <View className="mt-5 flex-row items-start gap-3 rounded-2xl border border-primary/15 bg-primary/5 p-4">
+            <FileUp size={19} color={PRIMARY_COLOR} />
+            <Text className="font-body flex-1 text-xs leading-5 text-gray-600 dark:text-neutral-300">Your current local database stays unchanged unless the backup passes its passphrase, profile, schema, financial-data, and integrity checks.</Text>
+          </View>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>

@@ -69,7 +69,7 @@ test('passphrase backups use a salted KDF and reject wrong passphrases, tamperin
   assert.equal(restored.profileId, 'owner-a');
   assert.equal(restored.schemaVersion, 8);
   await assert.rejects(openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'a different backup phrase', null, 8, first), /incorrect or .*damaged/);
-  await assert.rejects(openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', 'owner-b', 8, first), /different Mizan profile/);
+  await assert.rejects(openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', 'owner-b', 8, first), /different Leverage profile/);
   await assert.rejects(openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', null, 7, first), /incompatible/);
   const older = await createPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', 'owner-a', 8, bytes, random);
   assert.equal((await openPassphraseBackupEnvelope(nativeAlgorithmAdapter, 'my memorable backup phrase', null, 11, older)).schemaVersion, 8,

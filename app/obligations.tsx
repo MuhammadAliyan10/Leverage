@@ -147,7 +147,7 @@ export default function ObligationsScreen() {
   };
   const correctBillPayment=(bill:BillRecord,payment:BillPaymentRecord)=>{
     if(!user) return;
-    void confirmAction('Correct bill payment?','The original payment stays in history. Mizan will append a full reversal and optionally a replacement using the amount entered below.','Reverse / replace').then((confirmed)=>{
+    void confirmAction('Correct bill payment?','The original payment stays in history. Leverage will append a full reversal and optionally a replacement using the amount entered below.','Reverse / replace').then((confirmed)=>{
       if(!confirmed) return;
       void run(async()=>{
         const id=makeId(); const entered=paymentAmount[payment.id]?.trim();

@@ -7,22 +7,22 @@ interface ButtonProps extends TouchableOpacityProps {
   isLoading?: boolean;
 }
 
-export const Button: React.FC<ButtonProps> = ({ title, isLoading, disabled, ...props }) => {
+export const Button: React.FC<ButtonProps> = ({ title, isLoading, disabled, onPress, className, ...props }) => {
   const isDisabled = disabled || isLoading;
 
   return (
     <TouchableOpacity
+      {...props}
       className={`houselog-button w-full flex-row items-center justify-center py-3.5
-        ${isDisabled ? 'bg-primary/60' : 'active:bg-primary/90'}
+        ${isDisabled ? 'bg-primary/60' : 'active:bg-primary/90'} ${className ?? ''}
       `}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: isDisabled, busy: Boolean(isLoading) }}
       disabled={isDisabled}
       onPress={(e) => {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        if (props.onPress) {
-          props.onPress(e);
-        }
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
+        onPress?.(e);
       }}
-      {...props}
     >
       {isLoading ? (
         <ActivityIndicator color="#ffffff" className="mr-2" />

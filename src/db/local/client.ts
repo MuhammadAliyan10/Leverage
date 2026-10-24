@@ -2,6 +2,7 @@ import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
 import * as FileSystem from 'expo-file-system/legacy';
 import { File, Paths } from 'expo-file-system';
+import { getSqliteFile } from './sqliteFile';
 import { Platform, Share } from 'react-native';
 import {
   normalizeAccountDraft,
@@ -420,8 +421,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 function recoveryFile(name: string): File {
-  if (!SQLite.defaultDatabaseDirectory) throw new Error('The local database directory is unavailable.');
-  return new File(SQLite.defaultDatabaseDirectory, name);
+  return getSqliteFile(name);
 }
 
 async function validateBackupDatabase(bytes: Uint8Array, expectedProfileId: string, envelopeSchemaVersion: number): Promise<SQLite.SQLiteDatabase> {
@@ -458,18 +458,18 @@ async function exportEncryptedBackup(ownerId: string, passphrase: string): Promi
     snapshot,
     async (count) => Crypto.getRandomBytesAsync(count),
   );
-  const destination = new File(Paths.cache, `mizan-${new Date().toISOString().slice(0, 10)}.hlbk`);
+  const destination = new File(Paths.cache, `leverage-${new Date().toISOString().slice(0, 10)}.hlbk`);
   destination.create({ overwrite: true });
   destination.write(envelope);
   try {
     if (Platform.OS === 'android') {
       const selected = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
       if (!selected.granted) throw new Error('Backup export was cancelled.');
-      const uri = await FileSystem.StorageAccessFramework.createFileAsync(selected.directoryUri, `Mizan-${new Date().toISOString().slice(0, 10)}`, 'application/octet-stream');
+      const uri = await FileSystem.StorageAccessFramework.createFileAsync(selected.directoryUri, `Leverage-${new Date().toISOString().slice(0, 10)}`, 'application/octet-stream');
       await FileSystem.writeAsStringAsync(uri, bytesToBase64(envelope), { encoding: FileSystem.EncodingType.Base64 });
       return;
     }
-    const result = await Share.share({ title: 'Mizan encrypted backup', url: destination.uri });
+    const result = await Share.share({ title: 'Leverage encrypted backup', url: destination.uri });
     if (result.action === Share.dismissedAction) throw new Error('Backup sharing was cancelled.');
   } finally {
     if (destination.exists) destination.delete();
@@ -543,7 +543,8 @@ export const localDb = {
         if (!user) throw new Error('The local profile was not found.');
         const now = new Date().toISOString();
         if (!prior) await transaction.runAsync('INSERT INTO CloudIdentity(ownerId,cloudUserId,linkedAt,syncEnabled) VALUES(?,?,?,1)', [ownerId,cloudUserId,now]);
-        await transaction.runAsync('INSERT INTO SyncCursor(ownerId,cloudUserId,cursor,lastSuccessfulAt) VALUES(?,?,\'0\',NULL) ON CONFLICT(ownerId,cloudUserId) DO NOTHING', [ownerId,cloudUserId]);
+        // SyncCursor is one row per local profile, keyed by ownerId alone.
+        await transaction.runAsync('INSERT INTO SyncCursor(ownerId,cloudUserId,cursor,lastSuccessfulAt) VALUES(?,?,\'0\',NULL) ON CONFLICT(ownerId) DO NOTHING', [ownerId,cloudUserId]);
         const accounts = await transaction.getAllAsync<AccountRow>(`SELECT id,ownerId,name,type,balanceMinor,currency,createdAt,archivedAt,synced
           FROM Account WHERE ownerId=? ORDER BY createdAt,id`, [ownerId]);
         const accountIds = new Set(accounts.map((account) => account.id));
@@ -1277,15 +1278,15 @@ export const localDb = {
   },
 
   user: {
-    register: async (fullName: string, email: string, password: string): Promise<AuthResult> => {
+    register: async (fullName: string, email: string, password: string, profileId?: string): Promise<AuthResult> => {
       const normalizedName = fullName.trim();
       const normalizedEmail = email.trim().toLocaleLowerCase('en-US');
       if (normalizedName.length < 2 || normalizedName.length > 60) return { success: false, error: 'Enter a valid full name.' };
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return { success: false, error: 'Enter a valid email address.' };
       if (password.length < 12 || password.length > 1024 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
-        return { success: false, error: 'Password does not meet the Mizan password requirements.' };
+        return { success: false, error: 'Password does not meet the Leverage password requirements.' };
       }
-      const id = Crypto.randomUUID();
+      const id = profileId ?? Crypto.randomUUID();
       const createdAt = new Date().toISOString();
 
       try {
@@ -1307,7 +1308,7 @@ export const localDb = {
         if (/unique constraint failed:\s*user\.email/i.test(message) || message === 'An account with this email already exists.') {
           return { success: false, error: 'An account with this email already exists.' };
         }
-        return { success: false, error: 'Your local profile could not be created. Check device storage and try again.' };
+        return { success: false, error: getLocalAuthFailureMessage(error, 'sign-up') };
       }
       return { success: true, user: { id, fullName: normalizedName, email: normalizedEmail, createdAt } };
     },
@@ -1349,7 +1350,7 @@ export const localDb = {
           passwordUpgradePending: !user.passwordHash.startsWith('pbkdf2-sha256$') && !verification.upgraded,
         };
       } catch (error) {
-        return { success: false, error: getLocalAuthFailureMessage(error) };
+        return { success: false, error: getLocalAuthFailureMessage(error, 'sign-in') };
       }
     },
 
@@ -1420,7 +1421,7 @@ export const localDb = {
     changePassword: async (ownerId: string, currentPassword: string, newPassword: string): Promise<void> => {
       if (!ownerId.trim()) throw new Error('Your local profile is unavailable. Sign in again.');
       if (newPassword.length < 10 || newPassword.length > 1024 || !/[A-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
-        throw new Error('The new password does not meet the Mizan password requirements.');
+        throw new Error('The new password does not meet the Leverage password requirements.');
       }
       try {
         const database = await getDb();

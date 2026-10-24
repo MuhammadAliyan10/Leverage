@@ -41,7 +41,7 @@ export default function NativeVerificationScreen() {
       const verification = await prepareNativeSqlCipherVerification();
       setResult(verification);
       setPendingRestart(true);
-      setMessage('First check passed. Fully close Mizan Verification, reopen it, then return here and complete the restart check.');
+      setMessage('First check passed. Fully close Leverage Verification, reopen it, then return here and complete the restart check.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Native encryption verification failed.');
     } finally { setRunning(false); }

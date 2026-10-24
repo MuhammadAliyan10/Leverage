@@ -3,6 +3,7 @@ import * as Crypto from 'expo-crypto';
 import * as SQLite from 'expo-sqlite';
 import * as SecureStore from 'expo-secure-store';
 import { File, FileMode } from 'expo-file-system';
+import { getSqliteFile } from '../db/local/sqliteFile';
 
 const SQLITE_HEADER = [83, 81, 76, 105, 116, 101, 32, 102, 111, 114, 109, 97, 116, 32, 51, 0];
 const PENDING_RESTART_CHECK = 'mizan.native-sqlcipher-check.v1';
@@ -60,7 +61,7 @@ export async function prepareNativeSqlCipherVerification(): Promise<NativeStorag
   const key = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
   const suffix = Array.from((await Crypto.getRandomBytesAsync(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
   const databaseName = `mizan-sqlcipher-verification-${suffix}.db`;
-  const databaseFile = new File(directory, databaseName);
+  const databaseFile = getSqliteFile(databaseName);
   let database: SQLite.SQLiteDatabase | null = null;
   let retainForRestartCheck = false;
 

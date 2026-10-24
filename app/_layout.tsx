@@ -120,6 +120,7 @@ function RootNavigator() {
       )}
       <Stack>
         <Stack.Screen name="(auth)" options={{ headerShown: false }} />
+        <Stack.Screen name="(auth)/restore" options={{ headerShown: false }} />
         <Stack.Screen name="onboarding" options={{ headerShown: false }} />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="budgets" options={{ headerShown: false, presentation: 'modal' }} />

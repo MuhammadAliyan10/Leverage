@@ -28,6 +28,19 @@ async function setup() {
   return { database, sql: adapter(database) };
 }
 
+test('sync cursor idempotency uses its actual owner primary key', async () => {
+  const { database } = await setup();
+  const insertCursor = database.prepare(`INSERT INTO SyncCursor(ownerId,cloudUserId,cursor,lastSuccessfulAt)
+    VALUES(?,?, '0', NULL) ON CONFLICT(ownerId) DO NOTHING`);
+  insertCursor.run('local-user','cloud-user');
+  insertCursor.run('local-user','cloud-user');
+  const cursor = database.prepare('SELECT ownerId,cloudUserId,cursor FROM SyncCursor WHERE ownerId=?').get('local-user');
+  assert.equal(cursor.ownerId,'local-user');
+  assert.equal(cursor.cloudUserId,'cloud-user');
+  assert.equal(cursor.cursor,'0');
+  database.close();
+});
+
 test('local financial row and durable outbox row roll back together', async () => {
   const { database, sql } = await setup();
   database.exec('BEGIN IMMEDIATE');

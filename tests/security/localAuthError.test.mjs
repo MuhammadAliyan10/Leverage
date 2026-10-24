@@ -20,6 +20,12 @@ test('does not hide a concrete SQLite open failure behind a generic storage mess
   assert.match(message, /records were not deliberately cleared/i);
 });
 
+test('names sign-up correctly when local profile creation fails after cloud registration', () => {
+  const message = getLocalAuthFailureMessage(new Error('URI is not absolute'), 'sign-up');
+  assert.match(message, /could not complete sign-up/i);
+  assert.match(message, /URI is not absolute/i);
+});
+
 test('explains that profiles are local to each device when no profile is found', () => {
   assert.match(LOCAL_PROFILE_NOT_FOUND_MESSAGE, /browser and Android profiles separate/i);
   assert.match(LOCAL_PROFILE_NOT_FOUND_MESSAGE, /create a profile here or restore/i);

@@ -5,7 +5,7 @@ import { env } from './env.js';
 import { prisma } from './db.js';
 
 export const auth = betterAuth({
-  appName: 'Mizan',
+  appName: 'Leverage',
   baseURL: env.BETTER_AUTH_URL,
   basePath: '/api/auth',
   secret: env.BETTER_AUTH_SECRET,

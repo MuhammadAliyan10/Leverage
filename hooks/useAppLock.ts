@@ -47,7 +47,7 @@ export function useAppLock(enabled: boolean, onLock: () => void) {
     if (!(await biometricAvailability())) return false;
     try {
       const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: 'Unlock HouseLog',
+        promptMessage: 'Unlock Leverage',
         cancelLabel: 'Use password',
         disableDeviceFallback: true,
       });

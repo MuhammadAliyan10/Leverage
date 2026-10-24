@@ -591,7 +591,7 @@ export default function AddTransactionScreen() {
                   <Text className="font-body text-xs leading-5 text-gray-500">Enter the exchange rate shown by your bank or provider. The converted PKR amount is what will be added to your account.</Text>
                 </View>}
                 <Text className="font-body mt-4 text-sm font-semibold text-gray-700">Tax record</Text>
-                <Text className="font-body mt-1 text-xs text-gray-500">Your record only; Mizan does not decide the legal tax treatment.</Text>
+                <Text className="font-body mt-1 text-xs text-gray-500">Your record only; Leverage does not decide the legal tax treatment.</Text>
                 <View className="mt-2 flex-row flex-wrap gap-2">{([['unreviewed', 'Not reviewed'], ['taxable', 'Taxable'], ['non_taxable', 'Non-taxable']] as const).map(([value, label]) => <Pressable key={value} onPress={() => setValue('taxStatus', value)} className={`rounded-full border px-3 py-2 ${selectedTaxStatus === value ? 'border-primary bg-primary/10' : 'border-gray-200'}`}><Text className="font-body text-xs font-semibold">{label}</Text></Pressable>)}</View>
               </View>
             )}
