@@ -35,15 +35,15 @@ function safeRatio(numerator: number, denominator: number): number {
 }
 
 function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  return <View className={`mb-4 border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900 ${className}`}>{children}</View>;
+  return <View className={`mb-4 rounded-2xl border border-gray-100 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-900 ${className}`}>{children}</View>;
 }
 
 function SectionTitle({ title, hint }: { title: string; hint?: string }) {
   return <View className="mb-3"><Text className="font-heading text-base font-bold text-gray-900 dark:text-white">{title}</Text>{hint ? <Text className="mt-1 font-body text-xs text-gray-500 dark:text-neutral-400">{hint}</Text> : null}</View>;
 }
 
-function Money({ amount, currency, color }: { amount: number; currency: string; color?: string }) {
-  return <Text className="font-heading text-xl font-bold" style={{ color: color ?? undefined }}>{formatMinorUnits(amount, currency)}</Text>;
+function Money({ amount, currency, color, className = 'text-xl' }: { amount: number; currency: string; color?: string; className?: string }) {
+  return <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} className={`font-heading ${className} font-bold`} style={{ color: color ?? undefined }}>{formatMinorUnits(amount, currency)}</Text>;
 }
 
 export default function InsightsScreen() {
@@ -59,6 +59,9 @@ export default function InsightsScreen() {
   const data = dataQuery.data;
   const chartWidth = Math.max(225, width - 100);
   const selectedPoint = data?.monthReportRows.find((point) => point.id === selectedMonth) ?? data?.monthReportRows.at(-1);
+  const selectedLiquidity = data?.liquidity.find((position) => position.currency === data.currency);
+  const selectedNetWorth = data?.netWorth.find((position) => position.currency === data.currency);
+  const activityScale = data ? Math.max(Math.abs(data.report.incomeMinor), Math.abs(data.report.expenseMinor), 1) : 1;
 
   const pieData = useMemo(() => (data?.categories ?? []).filter((item) => item.amountMinor > 0).map((item) => {
     const style = CATEGORY_STYLE[item.category.toLowerCase()] ?? { color: '#94A3B8', icon: CircleHelp };
@@ -90,18 +93,39 @@ export default function InsightsScreen() {
           <Text className="mb-2 font-body text-[11px] text-gray-500 dark:text-neutral-400">{period} · {data.currency} only · {data.excludedCurrencies.length ? `excludes ${data.excludedCurrencies.join(', ')}` : 'no other recorded currencies excluded'}</Text>
 
           <Card>
-            <SectionTitle title="Income, spending & net" hint={`${data.report.incomeMinor >= 0 ? 'Recorded money in' : 'Net income adjustments'} and ordinary expenses`} />
-            <View className="flex-row flex-wrap gap-y-4">
-              <View className="w-1/2 pr-2"><Text className="mb-1 font-body text-xs text-gray-500 dark:text-neutral-400">Ordinary income</Text><Money amount={data.report.incomeMinor} currency={data.currency} color={GREEN} /></View>
-              <View className="w-1/2 pl-2"><Text className="mb-1 font-body text-xs text-gray-500 dark:text-neutral-400">Net ordinary spending</Text><Money amount={data.report.expenseMinor} currency={data.currency} color={ORANGE} /></View>
-              <View className="w-full border-t border-gray-100 pt-3 dark:border-neutral-800"><Text className="mb-1 font-body text-xs text-gray-500 dark:text-neutral-400">Income minus expenses</Text><Money amount={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? PRIMARY_COLOR : '#DC4C4C'} /></View>
+            <View className="mb-4 flex-row items-start justify-between">
+              <View className="flex-1 pr-2"><Text className="font-heading text-base font-bold text-gray-900 dark:text-white">Your money at a glance</Text><Text className="mt-1 font-body text-xs text-gray-500 dark:text-neutral-400">{period} · {data.currency}</Text></View>
+              <View className="rounded-full bg-primary/10 px-2.5 py-1 dark:bg-primary/20"><Text className="font-body text-[10px] font-bold text-primary dark:text-[#b9b5ff]">OVERVIEW</Text></View>
             </View>
-            <View className="mt-4 flex-row flex-wrap gap-3 border-t border-gray-100 pt-3 dark:border-neutral-800">
-              <View className="min-w-[45%] flex-1"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Avg. spending / calendar day</Text><Text className="mt-1 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(data.dailyAverageMinor, data.currency)}</Text></View>
-              <View className="min-w-[45%] flex-1"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">vs previous period</Text><Text className="mt-1 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Income {data.incomeChangePercent === null ? '—' : `${data.incomeChangePercent >= 0 ? '+' : ''}${data.incomeChangePercent.toFixed(0)}%`} · Spend {data.expenseChangePercent === null ? '—' : `${data.expenseChangePercent >= 0 ? '+' : ''}${data.expenseChangePercent.toFixed(0)}%`}</Text></View>
-              <View className="min-w-[45%] flex-1"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Spending frequency</Text><Text className="mt-1 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{data.report.expenseCount} net expense records</Text></View>
+            <View className="flex-row gap-3">
+              <View className="min-w-0 flex-1 rounded-xl border border-emerald-100 bg-emerald-50 p-3 dark:border-emerald-900/70 dark:bg-emerald-950/40">
+                <View className="mb-2 flex-row items-center"><View className="mr-2 h-2 w-2 rounded-full bg-emerald-600"/><Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Money in</Text></View>
+                <Money amount={data.report.incomeMinor} currency={data.currency} color={GREEN} className="text-lg" />
+                <View className="mt-3 h-1.5 overflow-hidden rounded-full bg-emerald-100 dark:bg-emerald-900/70"><View className="h-full rounded-full bg-emerald-600" style={{ width: `${safeRatio(Math.max(0, data.report.incomeMinor), activityScale) * 100}%` }}/></View>
+                <Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">Recorded income</Text>
+              </View>
+              <View className="min-w-0 flex-1 rounded-xl border border-orange-100 bg-orange-50 p-3 dark:border-orange-900/70 dark:bg-orange-950/30">
+                <View className="mb-2 flex-row items-center"><View className="mr-2 h-2 w-2 rounded-full bg-orange-500"/><Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Money out</Text></View>
+                <Money amount={data.report.expenseMinor} currency={data.currency} color={ORANGE} className="text-lg" />
+                <View className="mt-3 h-1.5 overflow-hidden rounded-full bg-orange-100 dark:bg-orange-900/60"><View className="h-full rounded-full bg-orange-500" style={{ width: `${safeRatio(Math.max(0, data.report.expenseMinor), activityScale) * 100}%` }}/></View>
+                <Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">Net ordinary spending</Text>
+              </View>
             </View>
-            <Text className="mt-3 font-body text-[11px] leading-4 text-gray-500 dark:text-neutral-400">Transfers, opening balances, loan principal and asset purchases are excluded from ordinary income and spending. Investment dividends follow their recorded income classification.</Text>
+            <View className={`mt-3 rounded-xl border-l-4 p-3 ${data.report.netMinor >= 0 ? 'border-emerald-600 bg-gray-50 dark:bg-neutral-800' : 'border-red-500 bg-gray-50 dark:bg-neutral-800'}`}>
+              <Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Income minus spending</Text>
+              <Money amount={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? GREEN : '#DC4C4C'} className="mt-1 text-2xl" />
+              <Text className="mt-1 font-body text-xs text-gray-500 dark:text-neutral-400">{data.report.netMinor >= 0 ? 'Recorded income is above ordinary spending.' : 'Ordinary spending is above recorded income.'}</Text>
+            </View>
+            <View className="mt-3 flex-row gap-3">
+              <View className="min-w-0 flex-1 rounded-xl bg-sky-50 p-3 dark:bg-sky-950/30"><Text className="font-body text-[11px] font-medium text-gray-600 dark:text-neutral-300">Available cash · {data.currency}</Text><Money amount={selectedLiquidity?.availableMinor ?? 0} currency={data.currency} color="#2D8CFF" className="mt-1 text-base"/><Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">After savings reservations</Text></View>
+              <View className="min-w-0 flex-1 rounded-xl bg-violet-50 p-3 dark:bg-violet-950/30"><Text className="font-body text-[11px] font-medium text-gray-600 dark:text-neutral-300">Known net worth · {data.currency}</Text>{selectedNetWorth ? <Money amount={selectedNetWorth.netWorthMinor} currency={data.currency} color="#7C4DCE" className="mt-1 text-base"/> : <Text className="mt-1 font-heading text-base font-bold text-gray-500 dark:text-neutral-400">—</Text>}<Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">Includes saved asset estimates</Text></View>
+            </View>
+            <View className="mt-4 flex-row flex-wrap gap-y-3 border-t border-gray-100 pt-3 dark:border-neutral-800">
+              <View className="w-1/2 pr-2"><Text className="font-body text-[11px] text-gray-500 dark:text-neutral-400">Avg. spending / day</Text><Text className="mt-1 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(data.dailyAverageMinor, data.currency)}</Text></View>
+              <View className="w-1/2 pl-2"><Text className="font-body text-[11px] text-gray-500 dark:text-neutral-400">Expense records</Text><Text className="mt-1 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{data.report.expenseCount}</Text></View>
+              <View className="w-full"><Text className="font-body text-[11px] text-gray-500 dark:text-neutral-400">Compared with previous period</Text><Text className="mt-1 font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">Income {data.incomeChangePercent === null ? '—' : `${data.incomeChangePercent >= 0 ? '+' : ''}${data.incomeChangePercent.toFixed(0)}%`} · Spending {data.expenseChangePercent === null ? '—' : `${data.expenseChangePercent >= 0 ? '+' : ''}${data.expenseChangePercent.toFixed(0)}%`}</Text></View>
+            </View>
+            <Text className="mt-3 font-body text-[10px] leading-4 text-gray-500 dark:text-neutral-400">Transfers, opening balances, loan principal and asset purchases are excluded from ordinary income and spending. Refunds reduce spending. Amounts in other currencies are kept separate.</Text>
           </Card>
 
           {data.monthReportRows.some((point) => point.incomeMinor !== 0 || point.expenseMinor !== 0) ? <Card>

@@ -90,6 +90,7 @@ export default function TabsLayout() {
           title: 'Add',
           tabBarLabel: 'Add',
           tabBarAccessibilityLabel: 'Add Transaction',
+          tabBarLabelStyle: [styles.label, styles.addLabel],
           tabBarIcon: () => (
             <View
               style={[
@@ -137,11 +138,16 @@ const styles = StyleSheet.create({
     fontFamily: 'Figtree',
     fontSize: 10,
     fontWeight: '600',
-    marginTop: 0,
+    marginTop: 1,
     marginBottom: 0,
   },
+  addLabel: {
+    // The floating Add button sits higher, so lower its label slightly to
+    // keep it aligned with the other tab labels.
+    marginTop: 2,
+  },
   tabIcon: {
-    marginBottom: -3,
+    marginBottom: -2,
   },
   tabItem: {
     justifyContent: 'center',

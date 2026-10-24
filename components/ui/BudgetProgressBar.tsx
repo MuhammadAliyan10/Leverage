@@ -1,21 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, Animated } from 'react-native';
-import { formatMinorUnits } from '../../src/finance/ledger';
 
 interface BudgetProgressBarProps {
-  categoryName: string;
-  icon: any;
   spent: number;
   limit: number;
-  currency?: string;
 }
 
 export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
-  categoryName,
-  icon: Icon,
   spent,
   limit,
-  currency = 'PKR',
 }) => {
   const percentage = limit > 0 ? (spent / limit) * 100 : spent > 0 ? 100 : 0;
   const clampedPercentage = Math.max(0, Math.min(percentage, 100));
@@ -45,24 +38,13 @@ export const BudgetProgressBar: React.FC<BudgetProgressBarProps> = ({
   });
 
   return (
-    <View className="mb-4">
-      {/* Top Row */}
-      <View className="flex-row items-center justify-between mb-2">
-        <View className="flex-row items-center">
-          <View className={`h-8 w-8 items-center justify-center rounded-full bg-gray-100 dark:bg-neutral-800`}>
-            <Icon size={16} color="#9ca3af" />
-          </View>
-          <Text className="font-body ml-3 font-semibold text-gray-900 dark:text-white text-base">
-            {categoryName}
-          </Text>
-        </View>
-        <Text className={["font-body", (`font-bold text-sm ${isOverBudget ? 'text-red-500' : 'text-gray-600 dark:text-gray-400'}`)].filter(Boolean).join(' ')}>
-          {formatMinorUnits(Math.round(spent * 100), currency)} / {formatMinorUnits(Math.round(limit * 100), currency)}
+    <View>
+      <View className="mb-1.5 flex-row justify-end">
+        <Text className={`font-body text-[10px] font-semibold ${isOverBudget ? 'text-red-600 dark:text-red-400' : percentage >= 75 ? 'text-amber-700 dark:text-amber-300' : 'text-gray-500 dark:text-neutral-400'}`}>
+          {isOverBudget ? `${Math.round(percentage)}% · over limit` : `${Math.round(percentage)}% used`}
         </Text>
       </View>
-
-      {/* Bottom Row (The Bar) */}
-      <View className="h-3 w-full rounded-full bg-gray-100 dark:bg-neutral-800 overflow-hidden">
+      <View accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: 100, now: clampedPercentage, text: `${Math.round(percentage)} percent used` }} className="h-2 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800">
         <Animated.View 
           className={`h-full rounded-full ${barColor}`}
           style={{ width: widthInterpolation }} 

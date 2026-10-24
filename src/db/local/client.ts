@@ -1502,6 +1502,19 @@ export const localDb = {
   },
 
   account: {
+    getEditConstraints: async (ownerId: string, accountId: string): Promise<{ transactionCount: number; cloudSyncEnabled: boolean }> => {
+      if (!ownerId.trim() || !accountId.trim()) throw new Error('A profile and account are required.');
+      const database = await getDb();
+      const row = await database.getFirstAsync<{ transactionCount: number; cloudSyncEnabled: number }>(
+        `SELECT (SELECT COUNT(*) FROM "Transaction" WHERE ownerId = ? AND (accountId = ? OR toAccountId = ?)) AS transactionCount,
+          EXISTS(SELECT 1 FROM CloudIdentity WHERE ownerId = ? AND syncEnabled = 1) AS cloudSyncEnabled
+          FROM Account WHERE ownerId = ? AND id = ? AND archivedAt IS NULL`,
+        [ownerId, accountId, accountId, ownerId, ownerId, accountId],
+      );
+      if (!row) throw new Error('This account is not available to this profile.');
+      return { transactionCount: row.transactionCount, cloudSyncEnabled: row.cloudSyncEnabled === 1 };
+    },
+
     count: async (ownerId: string): Promise<number> => {
       if (!ownerId.trim()) throw new Error('A profile is required to count accounts.');
       const database = await getDb();

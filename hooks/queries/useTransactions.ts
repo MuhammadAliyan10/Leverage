@@ -20,8 +20,9 @@ export function useTransactions(filters: TransactionListFilters = {}) {
       return page;
     },
     getNextPageParam: (page) => page.nextCursor ?? undefined,
-    staleTime: 0,
-    gcTime: 2 * 60 * 1000,
+    // Keep recently visited filter/search results warm while mutations explicitly invalidate this key.
+    staleTime: 15 * 1000,
+    gcTime: 5 * 60 * 1000,
   });
   const sections = useMemo(() => groupTransactionsByDate(query.data?.pages.flatMap((page) => page.items) ?? []), [query.data]);
   return { ...query, data: sections };

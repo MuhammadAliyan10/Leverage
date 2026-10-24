@@ -60,6 +60,20 @@ export function transactionDateTimestamp(value: string): number {
   return new Date(value).getTime();
 }
 
+/** Resolves a local calendar month without deriving date keys from UTC ISO strings. */
+export function dashboardMonthRange(date: Date): {
+  periodStart: string;
+  periodEnd: string;
+  startDate: string;
+  endDate: string;
+} {
+  if (!Number.isFinite(date.getTime())) throw new Error('Dashboard report date is invalid.');
+  const start = new Date(date.getFullYear(), date.getMonth(), 1);
+  const end = new Date(date.getFullYear(), date.getMonth() + 1, 1);
+  const key = (value: Date) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+  return { periodStart: key(start), periodEnd: key(end), startDate: start.toISOString(), endDate: end.toISOString() };
+}
+
 function isNonOperatingMovement(row: FinancialReportRow): boolean {
   const category = row.type === 'Refund' || row.type === 'Reversal' ? row.linkedCategory : row.category;
   return category !== null && category !== undefined && NON_OPERATING_CASH_CATEGORIES.has(category);

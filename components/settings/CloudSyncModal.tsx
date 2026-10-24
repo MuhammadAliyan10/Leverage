@@ -64,7 +64,7 @@ export function CloudSyncModal({ visible, ownerId, fullName, onClose }: Props) {
       const body = await response.json() as { userId?: string };
       if (typeof body.userId !== 'string' || !body.userId) throw new Error('The server returned an invalid cloud identity.');
       const imported = await localDb.cloudIdentity.linkProfileAndQueueCoreImport({ ownerId, cloudUserId: body.userId });
-      if (imported.unsupportedRecords > 0) setError(`${imported.unsupportedRecords} asset, debt, bill, or other records remain local and are not cloud-synced yet. Cash accounts and transactions are queued for cloud import.`);
+          if (imported.unsupportedRecords > 0) setError(`${imported.unsupportedRecords} records could not be queued for cloud import and remain on this device. Review the affected records and try again.`);
       await refresh();
       void syncOfflineData(ownerId).then(async (complete) => {
         await refresh();
@@ -110,7 +110,7 @@ export function CloudSyncModal({ visible, ownerId, fullName, onClose }: Props) {
           <Text className="font-body text-sm text-gray-800 dark:text-neutral-100">Cloud identity connected</Text>
           <Text className="font-body mt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Status: {syncState.replaceAll('_',' ')} · {pending} pending · {rejected} need attention</Text>
           <Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">Last successful sync: {lastSuccessfulAt ? new Date(lastSuccessfulAt).toLocaleString() : 'Not yet synced'}</Text>
-          <Text className="font-body mt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Accounts, transactions, budgets, savings goals, and emergency-fund records sync. Bills, recurring schedules, debts, assets, and investments remain local. This profile’s existing history is not imported.</Text>
+          <Text className="font-body mt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">The app saves changes to this device first, then syncs accounts, transactions, budgets, savings, recurring schedules, bills, debts, assets, and investments with Neon. Existing supported history is queued when you connect. Pending or rejected changes remain on this device; check the status above before relying on another device.</Text>
           {rejectedItems.length ? <View className="mt-3 border border-amber-300 p-3 dark:border-amber-800">
             <Text className="font-body text-xs font-semibold text-amber-800 dark:text-amber-200">Some local records need review. They remain in this device’s history.</Text>
             {rejectedItems.map((item) => <Text key={item.mutationId} className="font-body mt-2 text-xs leading-5 text-amber-800 dark:text-amber-200">{item.operation.replaceAll('.', ' ')} · {item.errorCategory ?? 'needs_review'} · {item.entityId}</Text>)}
@@ -119,7 +119,7 @@ export function CloudSyncModal({ visible, ownerId, fullName, onClose }: Props) {
           <Pressable disabled={busy || syncState === 'syncing'} onPress={() => void syncNow()} className="mt-5 min-h-12 items-center justify-center bg-primary px-4">{busy || syncState === 'syncing' ? <ActivityIndicator color="#fff" /> : <Text className="font-body font-semibold text-white">Sync now</Text>}</Pressable>
           <Pressable disabled={busy} onPress={() => void disconnectSession()} className="mt-2 min-h-11 items-center justify-center border border-primary px-4"><Text className="font-body font-semibold" style={{ color: PRIMARY_COLOR }}>Sign out of cloud</Text></Pressable>
         </> : <>
-          <Text className="font-body mb-4 text-xs leading-5 text-gray-500 dark:text-neutral-400">Connect this empty local profile to a separate cloud identity. There is no existing-history import yet; local financial records stay on this device.</Text>
+          <Text className="font-body mb-4 text-xs leading-5 text-gray-500 dark:text-neutral-400">Connect this device profile to your cloud identity. Supported existing financial history will be queued for import, and future changes will sync after local saves. Keep this device until the status confirms synchronization.</Text>
           <Text className="font-body mb-1 text-xs font-semibold text-gray-700 dark:text-neutral-200">Cloud account email</Text>
           <TextInput accessibilityLabel="Cloud account email" autoCapitalize="none" autoComplete="email" keyboardType="email-address" value={email} onChangeText={setEmail} className="mb-3 min-h-12 border border-gray-200 px-3 text-gray-900 dark:border-neutral-700 dark:text-white" />
           <Text className="font-body mb-1 text-xs font-semibold text-gray-700 dark:text-neutral-200">Cloud account password</Text>

@@ -21,10 +21,10 @@ export const GlobalHeader: React.FC<GlobalHeaderProps> = ({
   const isOffline = networkState.isConnected === false || networkState.isInternetReachable === false;
 
   return (
-    <View className="flex-row items-center justify-between px-6 pt-3 pb-3 bg-white dark:bg-neutral-950 border-b border-gray-100 dark:border-neutral-900">
+    <View className="flex-row items-center justify-between px-6 pt-3 pb-3 bg-white dark:bg-neutral-900 border-b border-gray-100 dark:border-neutral-800">
       <View className="flex-1 mr-4">
         <View className="flex-row items-center">
-          <Text className="font-heading text-xl font-black leading-6 text-black dark:text-white">{title}</Text>
+          <Text style={{ fontFamily: 'InterBlack' }} className="text-xl leading-6 text-black dark:text-white">{title}</Text>
           {isOffline && (
             <View className="ml-3 rounded-full bg-yellow-100 px-2 py-0.5">
               <Text className="font-body text-xs font-semibold text-yellow-700">Offline</Text>

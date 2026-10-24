@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { calculateExpenseBucketTotals } from '../../src/finance/reporting.ts';
+import { calculateExpenseBucketTotals, calculateFinancialReport, dashboardMonthRange } from '../../src/finance/reporting.ts';
 import { projectTransactionActivity } from '../../src/finance/transactionDisplay.ts';
 import { calculateLiquidityPositions } from '../../src/finance/liquidity.ts';
 
@@ -20,6 +20,43 @@ function row(overrides = {}) {
     ...overrides,
   };
 }
+
+test('dashboard budget keys and report bounds use the selected local calendar month in positive offsets', () => {
+  const originalTimezone = process.env.TZ;
+  process.env.TZ = 'Asia/Karachi';
+  try {
+    const range = dashboardMonthRange(new Date(2026, 9, 24, 12));
+    assert.equal(range.periodStart, '2026-10-01');
+    assert.equal(range.periodEnd, '2026-11-01');
+    assert.equal(new Date(range.startDate).getFullYear(), 2026);
+    assert.equal(new Date(range.startDate).getMonth(), 9);
+    assert.equal(new Date(range.startDate).getDate(), 1);
+    assert.equal(new Date(range.startDate).getHours(), 0);
+    assert.equal(new Date(range.endDate).getDate(), 1);
+    assert.equal(new Date(range.endDate).getMonth(), 10);
+    assert.equal(new Date(range.endDate).getHours(), 0);
+  } finally {
+    if (originalTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimezone;
+  }
+});
+
+test('dashboard monthly totals reconcile income, expenses, partial refunds, refund corrections, and currency exclusions', () => {
+  const report = calculateFinancialReport([
+    row({ id: 'salary', type: 'Income', category: 'employment', amountMinor: 100_000 }),
+    row({ id: 'food', category: 'food', amountMinor: 30_000 }),
+    row({ id: 'refund', type: 'Refund', category: 'expense_refund', amountMinor: 5_000, reversalOfId: 'food', linkedOriginalType: 'Expense', linkedCategory: 'food', linkedCurrency: 'PKR' }),
+    row({ id: 'refund-correction', type: 'Reversal', category: 'correction', amountMinor: 2_000, reversalOfId: 'refund', accountId: 'cash', linkedOriginalAccountId: 'cash', linkedOriginalType: 'Refund', linkedCategory: 'food', linkedCurrency: 'PKR', linkedRootType: 'Expense', linkedRootId: 'food', linkedRootCurrency: 'PKR' }),
+    row({ id: 'transfer', type: 'Transfer', category: 'transfer', amountMinor: 50_000, toAccountId: 'bank', destinationCurrency: 'PKR' }),
+    row({ id: 'principal', category: 'debt_principal_repayment', amountMinor: 40_000 }),
+    row({ id: 'foreign-expense', accountCurrency: 'USD', amountMinor: 900_000 }),
+  ], 'PKR', { startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-06-01T00:00:00.000Z' });
+
+  assert.equal(report.incomeMinor, 100_000);
+  assert.equal(report.expenseMinor, 27_000);
+  assert.equal(report.netMinor, 73_000);
+  assert.deepEqual(report.excludedCurrencies, ['USD']);
+});
 
 test('dashboard chart aggregation uses complete unordered rows and stays stable across pagination boundaries', () => {
   const rows = Array.from({ length: 2500 }, (_, index) => row({ id: `expense-${index}`, amountMinor: 100 }));

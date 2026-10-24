@@ -68,6 +68,7 @@ function Section({ title, children, description }: { title: string; children: Re
 }
 
 type PermissionState = 'loading' | 'allowed' | 'not-allowed' | 'unavailable';
+type BiometricState = 'checking' | 'available' | 'unavailable';
 type ProfileRow = Omit<DbUser, 'passwordHash'>;
 
 export default function SettingsScreen() {
@@ -77,10 +78,18 @@ export default function SettingsScreen() {
   const [panel, setPanel] = useState<'name' | 'password' | 'switch' | null>(null);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [cloudSyncOpen, setCloudSyncOpen] = useState(false);
-  const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [signOutDialogOpen, setSignOutDialogOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [biometricState, setBiometricState] = useState<BiometricState>(Platform.OS === 'web' ? 'unavailable' : 'checking');
   const [permission, setPermission] = useState<PermissionState>(Platform.OS === 'web' ? 'unavailable' : 'loading');
   const [permissionCanAskAgain, setPermissionCanAskAgain] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [feedback, setFeedback] = useState<{ title: string; message: string; kind: 'error' | 'info' } | null>(null);
+
+  const showFeedback = useCallback((title: string, message: string, kind: 'error' | 'info' = 'error') => {
+    setFeedback({ title, message, kind });
+    if (Platform.OS !== 'web') Alert.alert(title, message);
+  }, []);
 
   const refreshPermission = useCallback(async () => {
     if (Platform.OS === 'web') return;
@@ -90,12 +99,13 @@ export default function SettingsScreen() {
       setPermissionCanAskAgain(result.canAskAgain);
     } catch {
       setPermission('unavailable');
+      setPermissionCanAskAgain(false);
     }
   }, []);
 
   useEffect(() => {
     let active = true;
-    void biometricAvailability().then((available) => { if (active) setBiometricAvailable(available); });
+    void biometricAvailability().then((available) => { if (active) setBiometricState(available ? 'available' : 'unavailable'); });
     const permissionCheck = setTimeout(() => { void refreshPermission(); }, 0);
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') void refreshPermission();
@@ -108,23 +118,25 @@ export default function SettingsScreen() {
   const disposableVerificationBuild = isDisposableAndroidVerificationBuild(Constants.expoConfig?.extra);
 
   const saveAppearance = async (value: AppearancePreference) => {
+    setFeedback(null);
     setSavingSettings(true);
     try { await updateAppearance(value); }
-    catch (error) { Alert.alert('Appearance not saved', error instanceof Error ? error.message : 'The appearance preference could not be saved.'); }
+    catch (error) { showFeedback('Appearance not saved', error instanceof Error ? error.message : 'The appearance preference could not be saved.'); }
     finally { setSavingSettings(false); }
   };
 
   const saveProfileSetting = async (patch: Parameters<typeof updateProfileSettings>[0]) => {
+    setFeedback(null);
     setSavingSettings(true);
     try { await updateProfileSettings(patch); }
-    catch (error) { Alert.alert('Setting needs attention', error instanceof Error ? error.message : 'The setting may have been saved, but follow-up work could not be completed.'); }
+    catch (error) { showFeedback('Setting needs attention', error instanceof Error ? error.message : 'The setting may have been saved, but follow-up work could not be completed.'); }
     finally { setSavingSettings(false); }
   };
 
   const toggleReminders = async (enabled: boolean) => {
     if (enabled) {
       if (Platform.OS === 'web') {
-        Alert.alert('Mobile reminders', 'Local bill reminders are available in the installed Android or iOS app.');
+        showFeedback('Mobile reminders', 'Local bill reminders are available in the installed Android or iOS app.', 'info');
         return;
       }
       try {
@@ -132,11 +144,11 @@ export default function SettingsScreen() {
         setPermission(result.granted ? 'allowed' : 'not-allowed');
         setPermissionCanAskAgain(result.canAskAgain);
         if (!result.granted) {
-          Alert.alert('Notifications not allowed', 'Enable notifications in device settings before turning on bill reminders.');
+          showFeedback('Notifications not allowed', 'Enable notifications in device settings before turning on bill reminders.');
           return;
         }
       } catch (error) {
-        Alert.alert('Permission unavailable', error instanceof Error ? error.message : 'Notification permission could not be checked.');
+        showFeedback('Permission unavailable', error instanceof Error ? error.message : 'Notification permission could not be checked.');
         return;
       }
     }
@@ -146,7 +158,7 @@ export default function SettingsScreen() {
   const openNotificationSettings = async () => {
     if (Platform.OS === 'web') return;
     try { await Linking.openSettings(); }
-    catch (error) { Alert.alert('Settings unavailable', error instanceof Error ? error.message : 'Device notification settings could not be opened.'); }
+    catch (error) { showFeedback('Settings unavailable', error instanceof Error ? error.message : 'Device notification settings could not be opened.'); }
   };
 
   const manageNotificationPermission = async () => {
@@ -158,7 +170,7 @@ export default function SettingsScreen() {
         setPermissionCanAskAgain(result.canAskAgain);
         if (result.granted) return;
       } catch (error) {
-        Alert.alert('Permission unavailable', error instanceof Error ? error.message : 'Notification permission could not be requested.');
+        showFeedback('Permission unavailable', error instanceof Error ? error.message : 'Notification permission could not be requested.');
         return;
       }
     }
@@ -166,15 +178,19 @@ export default function SettingsScreen() {
   };
 
   const handleSignOut = () => {
-    const message = 'Your local financial records will remain on this device. Pending Leverage bill reminders for this profile will be removed.';
-    if (Platform.OS === 'web') {
-      if (typeof window !== 'undefined' && window.confirm(`Sign out?\n\n${message}`)) void signOut();
-      return;
+    setSignOutDialogOpen(true);
+  };
+
+  const confirmSignOut = async () => {
+    setSigningOut(true);
+    try {
+      await signOut();
+      setSignOutDialogOpen(false);
+    } catch (error) {
+      setSigningOut(false);
+      setSignOutDialogOpen(false);
+      showFeedback('Sign out needs attention', error instanceof Error ? error.message : 'The local profile could not be signed out completely.');
     }
-    Alert.alert('Sign out?', message, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign out', style: 'destructive', onPress: () => { void signOut(); } },
-    ]);
   };
 
   return (
@@ -182,6 +198,10 @@ export default function SettingsScreen() {
       <GlobalHeader title="Settings" description="Manage your profile and app preferences" />
       <ScrollView className="flex-1 px-4 pt-3" contentContainerStyle={{ paddingBottom: 36 }} showsVerticalScrollIndicator={false}>
         {sessionNotice ? <Text accessibilityRole="alert" className="font-body mb-3 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-800 dark:bg-amber-950 dark:text-amber-200">{sessionNotice}</Text> : null}
+        {feedback ? <View accessibilityRole={feedback.kind === 'error' ? 'alert' : 'text'} className={`mb-3 flex-row items-start rounded-xl p-3 ${feedback.kind === 'error' ? 'bg-red-50 dark:bg-red-950/50' : 'bg-primary/10 dark:bg-primary/20'}`}>
+          <View className="flex-1"><Text className={`font-body text-sm font-semibold ${feedback.kind === 'error' ? 'text-red-800 dark:text-red-200' : 'text-gray-900 dark:text-white'}`}>{feedback.title}</Text><Text className={`font-body mt-1 text-xs leading-5 ${feedback.kind === 'error' ? 'text-red-700 dark:text-red-200' : 'text-gray-700 dark:text-neutral-200'}`}>{feedback.message}</Text></View>
+          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss message" onPress={() => setFeedback(null)} className="ml-2 min-h-8 min-w-8 items-center justify-center"><X size={16} color={feedback.kind === 'error' ? '#b91c1c' : PRIMARY_COLOR} /></Pressable>
+        </View> : null}
 
         <View className="mb-4 flex-row items-center rounded-2xl bg-white p-4 dark:bg-neutral-900">
           <View className="h-12 w-12 items-center justify-center rounded-full bg-primary"><Text className="font-heading text-lg font-bold text-white">{initials}</Text></View>
@@ -204,8 +224,8 @@ export default function SettingsScreen() {
               {(['system', 'light', 'dark'] as const).map((value) => <Pressable key={value} accessibilityRole="radio" accessibilityLabel={`${value} appearance`} accessibilityState={{ checked: appearance === value, disabled: savingSettings }} disabled={savingSettings} onPress={() => void saveAppearance(value)} className={`rounded-lg px-2.5 py-2 ${appearance === value ? 'bg-white dark:bg-neutral-700' : ''}`}><Text className={`font-body text-xs font-semibold ${appearance === value ? 'text-primary' : 'text-gray-500 dark:text-neutral-400'}`}>{value[0].toUpperCase() + value.slice(1)}</Text></Pressable>)}
             </View>
           </View>
-          <SettingRow icon={Coins} title="Account currencies" value="Set per account" />
-          <SettingRow icon={Building2} title="Quick transaction account" value="Recent account by type" />
+          <SettingRow icon={Coins} title="Account currencies" value="Set per account" onPress={() => router.push('/accounts')} />
+          <SettingRow icon={Building2} title="Quick transaction account" value="Recent account by type" onPress={() => router.push('/add')} />
           <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">The Add screen already remembers the most recent account separately for income, expenses and transfers. Amounts in different currencies remain separate.</Text>
         </Section>
 
@@ -218,26 +238,26 @@ export default function SettingsScreen() {
         </Section>
 
         <Section title="Security" description="On Android and iOS, the app locks after 15 minutes in the background and requires your profile password after a cold restart when app lock is enabled. On web, a remembered session stays open across refreshes and route changes; sign out on a shared browser. Password unlock is always available.">
-          <SettingRow icon={LockKeyhole} title="App lock" right={<Switch accessibilityLabel="Enable app lock" accessibilityState={{ checked: profileSettings.appLockEnabled, disabled: savingSettings }} value={profileSettings.appLockEnabled} disabled={savingSettings} onValueChange={(value) => void saveProfileSetting({ appLockEnabled: value })} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" />} />
-          <SettingRow icon={Fingerprint} title="Biometric unlock" value={!biometricAvailable ? 'Unavailable on this device' : undefined} right={biometricAvailable ? <Switch accessibilityLabel="Enable biometric unlock" accessibilityState={{ checked: profileSettings.biometricUnlockEnabled, disabled: savingSettings || !profileSettings.appLockEnabled }} value={profileSettings.biometricUnlockEnabled} disabled={savingSettings || !profileSettings.appLockEnabled} onValueChange={(value) => void saveProfileSetting({ biometricUnlockEnabled: value })} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" /> : undefined} />
+          <SettingRow icon={LockKeyhole} title="App lock" value={Platform.OS === 'web' ? 'Unavailable in browser' : undefined} right={Platform.OS === 'web' ? undefined : <Switch accessibilityLabel="Enable app lock" accessibilityState={{ checked: profileSettings.appLockEnabled, disabled: savingSettings }} value={profileSettings.appLockEnabled} disabled={savingSettings} onValueChange={(value) => void saveProfileSetting({ appLockEnabled: value })} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" />} />
+          <SettingRow icon={Fingerprint} title="Biometric unlock" value={biometricState === 'checking' ? 'Checking…' : biometricState === 'unavailable' ? 'Unavailable on this device' : undefined} right={biometricState === 'available' ? <Switch accessibilityLabel="Enable biometric unlock" accessibilityState={{ checked: profileSettings.biometricUnlockEnabled, disabled: savingSettings || !profileSettings.appLockEnabled }} value={profileSettings.biometricUnlockEnabled} disabled={savingSettings || !profileSettings.appLockEnabled} onValueChange={(value) => void saveProfileSetting({ biometricUnlockEnabled: value })} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" /> : undefined} />
           <SettingRow icon={ShieldCheck} title="Password fallback" value="Always available" />
         </Section>
 
         <Section title="Notifications" description="Leverage schedules local bill reminders only. Notification text is generic and does not include bill names or amounts.">
           <SettingRow icon={Bell} title="Device permission" value={permission === 'loading' ? 'Checking…' : permission === 'allowed' ? 'Allowed' : permission === 'not-allowed' ? 'Not allowed' : 'Unavailable'} onPress={permission === 'not-allowed' && Platform.OS !== 'web' ? () => void manageNotificationPermission() : undefined} accessibilityLabel="Notification permission status" />
-          <SettingRow icon={Bell} title="Local bill reminders" right={<Switch accessibilityLabel="Enable local bill reminders" accessibilityState={{ checked: profileSettings.remindersEnabled, disabled: savingSettings }} value={profileSettings.remindersEnabled} disabled={savingSettings} onValueChange={(value) => void toggleReminders(value)} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" />} />
+          <SettingRow icon={Bell} title="Local bill reminders" value={Platform.OS === 'web' ? 'Unavailable in browser' : undefined} right={Platform.OS === 'web' ? undefined : <Switch accessibilityLabel="Enable local bill reminders" accessibilityState={{ checked: profileSettings.remindersEnabled, disabled: savingSettings }} value={profileSettings.remindersEnabled} disabled={savingSettings} onValueChange={(value) => void toggleReminders(value)} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" />} />
           <SettingRow icon={CalendarClock} title="Manage bill reminders" onPress={() => router.push('/obligations')} />
         </Section>
 
-        <Section title="Data & privacy" description="Profiles are stored separately on each device. When cloud sync is connected, it currently covers accounts, transactions, budgets, savings goals, and emergency-fund records. Recurring schedules, bills, debts, assets, and investments stay local, and existing history is not imported. SQLCipher is configured for native builds, but encryption and recovery still require Android runtime verification. Encrypted backups include all local profiles on this device; keep the backup file and its separate passphrase safe. Leverage cannot recover a forgotten passphrase. Android automatic device backup is disabled.">
-          <SettingRow icon={ShieldCheck} title="Storage" value="This device only" />
+        <Section title="Data & privacy" description="Profiles are stored separately on each device. The app saves to its local database first, then queues supported records for Neon cloud sync when connected; offline changes stay on this device until confirmed. Connecting queues supported existing history for import. Check Cloud Sync for pending or rejected changes before relying on another device. SQLCipher is configured for native builds, but encryption and recovery still require Android runtime verification. Encrypted backups include all local profiles on this device; keep the backup file and its separate passphrase safe. Leverage cannot recover a forgotten passphrase. Android automatic device backup is disabled.">
+          <SettingRow icon={ShieldCheck} title="Storage" value="Local database + optional cloud sync" />
           {disposableVerificationBuild ? <SettingRow icon={ShieldCheck} title="Native storage verification" value="Disposable test only" onPress={() => router.push('/native-verification' as Href)} /> : null}
-          <SettingRow icon={Activity} title="Encrypted backup & restore" value={Platform.OS === 'web' ? 'Mobile app only' : 'Available'} onPress={Platform.OS === 'web' ? undefined : () => setRecoveryOpen(true)} />
+          <SettingRow icon={Activity} title="Encrypted backup & restore" value={Platform.OS === 'web' ? 'Unavailable in browser' : 'Available'} onPress={Platform.OS === 'web' ? undefined : () => setRecoveryOpen(true)} />
         </Section>
 
         <Section title="About" description="Personal finance tracking designed to work offline. Leverage does not connect to banks or provide live investment prices.">
           <SettingRow icon={Activity} title="Leverage version" value={version} />
-          <SettingRow icon={Cloud} title="Cloud sync" value={Platform.OS === 'web' ? 'Mobile app only' : cloudApiConfigured ? 'Connect account' : 'Not configured'} onPress={Platform.OS === 'web' ? undefined : () => setCloudSyncOpen(true)} />
+          <SettingRow icon={Cloud} title="Cloud sync" value={Platform.OS === 'web' ? 'Unavailable in browser' : cloudApiConfigured ? 'Connect account' : 'Not configured'} onPress={Platform.OS === 'web' ? undefined : () => setCloudSyncOpen(true)} />
         </Section>
 
         <Section title="Session">
@@ -271,8 +291,29 @@ export default function SettingsScreen() {
         }}
       />
       <CloudSyncModal visible={cloudSyncOpen} ownerId={user?.id ?? ''} fullName={user?.fullName ?? ''} onClose={() => setCloudSyncOpen(false)} />
+      <SignOutDialog visible={signOutDialogOpen} busy={signingOut} onCancel={() => setSignOutDialogOpen(false)} onConfirm={() => void confirmSignOut()} />
     </SafeAreaView>
   );
+}
+
+function SignOutDialog({ visible, busy, onCancel, onConfirm }: { visible: boolean; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+    <View className="flex-1 items-center justify-center px-6">
+      <Pressable accessibilityRole="button" accessibilityLabel="Dismiss sign out confirmation" disabled={busy} onPress={onCancel} className="absolute inset-0 bg-black/50" />
+      <View accessibilityViewIsModal className="w-full max-w-[420px] rounded-2xl bg-white p-5 shadow-xl dark:bg-neutral-900">
+        <View className="mb-3 h-11 w-11 items-center justify-center rounded-full bg-red-50 dark:bg-red-500/15"><LogOut size={20} color="#dc2626" /></View>
+        <Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Sign out of Leverage?</Text>
+        <Text className="font-body mt-2 text-sm leading-5 text-gray-600 dark:text-neutral-300">Your local financial records will stay on this device. Pending bill reminders for this profile will be removed.</Text>
+        <View className="mt-5 flex-row justify-end gap-3">
+          <Pressable accessibilityRole="button" disabled={busy} onPress={onCancel} className="min-h-11 min-w-24 items-center justify-center border border-gray-200 px-4 dark:border-neutral-700"><Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Cancel</Text></Pressable>
+          <Pressable accessibilityRole="button" accessibilityState={{ busy, disabled: busy }} disabled={busy} onPress={onConfirm} className="min-h-11 min-w-28 flex-row items-center justify-center bg-red-600 px-4">
+            {busy ? <ActivityIndicator color="#fff" className="mr-2" /> : null}
+            <Text className="font-body font-semibold text-white">{busy ? 'Signing out…' : 'Sign out'}</Text>
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  </Modal>;
 }
 
 function RecoveryModal({ visible, onClose, onExport, onRestore }: {

@@ -38,6 +38,7 @@ function RootNavigator() {
 
   const [loaded, fontError] = useFonts({
     Inter: require('../assets/fonts/Inter-Regular.ttf'),
+    InterBlack: require('../assets/fonts/Inter-Black.ttf'),
     Figtree: require('../assets/fonts/Figtree-Regular.otf'),
   });
 

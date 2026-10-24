@@ -1,5 +1,5 @@
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, KeyboardAvoidingView, Platform, Pressable, TextInput, ScrollView, ActivityIndicator } from 'react-native';
 import { useColorScheme } from 'nativewind';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -110,7 +110,6 @@ export default function AddTransactionScreen() {
   const [timePickerVisible, setTimePickerVisible] = useState(false);
   const addTransaction = useAddTransaction();
   const { data: accounts = [], isLoading: accountsLoading, isError: accountsError } = useAccounts();
-  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState('Bank transfer');
   const [correctionOriginalAccount, setCorrectionOriginalAccount] = useState<string | null>(null);
   const [correctionLoadedId, setCorrectionLoadedId] = useState<string | null>(null);
   const [correctionLoadFailedId, setCorrectionLoadFailedId] = useState<string | null>(null);
@@ -170,12 +169,21 @@ export default function AddTransactionScreen() {
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId);
   const selectedToAccountId = useWatch({ control, name: 'toAccountId' });
   const selectedTaxStatus = useWatch({ control, name: 'taxStatus' }) ?? 'unreviewed';
+  const selectedPaymentMethod = useWatch({ control, name: 'paymentMethod' }) ?? 'Bank transfer';
   const correctionReady = Boolean(correctionOf) && correctionLoadedId === correctionOf;
   const correctionLoadFailed = Boolean(correctionOf) && correctionLoadFailedId === correctionOf;
   const correctionLoading = Boolean(correctionOf) && !correctionReady && !correctionLoadFailed;
   const categories = transactionType === 'Income' ? INCOME_SOURCES : EXPENSE_CATEGORIES;
   const visibleCategories = categories;
-  const visibleAccounts = accounts.filter((account) => `${account.name} ${account.type} ${account.currency}`.toLocaleLowerCase('en-US').includes(accountSearch.trim().toLocaleLowerCase('en-US')));
+  const normalizedAccountSearch = accountSearch.trim().toLocaleLowerCase('en-US');
+  const visibleAccounts = useMemo(() => accounts.filter((account) => (
+    `${account.name} ${account.type} ${account.currency}`.toLocaleLowerCase('en-US').includes(normalizedAccountSearch)
+  )), [accounts, normalizedAccountSearch]);
+  const visibleDestinationAccounts = useMemo(() => accounts.filter((account) => (
+    account.id !== selectedAccountId
+    && account.currency === selectedAccount?.currency
+    && `${account.name} ${account.type} ${account.currency}`.toLocaleLowerCase('en-US').includes(normalizedAccountSearch)
+  )), [accounts, normalizedAccountSearch, selectedAccount?.currency, selectedAccountId]);
   const isRemittance = transactionType === 'Income' && selectedCategoryId === 'foreign_remittance';
   const sourceAmount = useWatch({ control, name: 'sourceAmount' }) ?? '';
   const sourceCurrency = useWatch({ control, name: 'sourceCurrency' }) ?? 'USD';
@@ -237,7 +245,6 @@ export default function AddTransactionScreen() {
       setValue('note', original.note);
       setValue('sourceName', original.sourceName ?? '');
       setValue('paymentMethod', original.paymentMethod ?? 'Bank transfer');
-      setSelectedPaymentMethod(original.paymentMethod ?? 'Bank transfer');
       setValue('taxStatus', original.taxStatus);
       setValue('sourceAmount', original.sourceAmountMinor ? formatMinorUnitsForInput(original.sourceAmountMinor) : '');
       setValue('sourceCurrency', original.sourceCurrency ?? 'USD');
@@ -395,7 +402,7 @@ export default function AddTransactionScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         className="flex-1"
       >
-        <ScrollView className="flex-1 w-full" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ width: '100%', alignItems: 'center', paddingBottom: 132 }}>
+        <ScrollView className="flex-1 w-full" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ width: '100%', alignItems: 'center', paddingBottom: 24 }}>
           <View style={{ width: '100%', maxWidth: 640, alignSelf: 'center', paddingHorizontal: 16, boxSizing: 'border-box' }}>
           
           {/* Header & Toggle */}
@@ -415,7 +422,6 @@ export default function AddTransactionScreen() {
                   onPress={() => {
                     setValue('type', type);
                     setAccountSearch('');
-                    setAccountSearch('');
                     if (type !== 'Transfer') setValue('categoryId', (type === 'Income' ? INCOME_SOURCES : EXPENSE_CATEGORIES)[0].id);
                   }}
                 >
@@ -430,16 +436,16 @@ export default function AddTransactionScreen() {
           {/* Amount Hero Input */}
           <View className="w-full items-center justify-center py-6">
             <Text className="font-body mb-2 font-semibold text-gray-500 dark:text-neutral-400">{isRemittance ? 'Converted amount (PKR)' : transactionType === 'Transfer' ? 'Transfer amount' : 'Amount'}</Text>
-            <View className="w-full flex-row items-center justify-center">
-              <Text className="font-heading mr-2 text-2xl font-bold text-gray-500 dark:text-neutral-400">{isRemittance ? 'PKR' : selectedAccount?.currency ?? 'Select account'}</Text>
+            <View className="relative h-16 w-full items-center justify-center">
+              <Text className="font-heading absolute left-[12%] text-lg font-bold text-gray-500 dark:text-neutral-400">{isRemittance ? 'PKR' : selectedAccount?.currency ?? 'Select account'}</Text>
               <Controller
                 control={control}
                 name="amount"
                 render={({ field: { onChange, onBlur, value } }) => (
                   <TextInput
                     accessibilityLabel={`${transactionType} amount${selectedAccount ? ` in ${selectedAccount.currency}` : ''}`}
-                    className="font-heading text-center text-5xl font-bold text-gray-950 dark:text-white"
-                    style={{ width: 150, textAlign: 'center' }}
+                    className="font-heading h-full w-full text-center text-5xl font-bold text-gray-950 dark:text-white"
+                    style={{ width: '100%', textAlign: 'center' }}
                     keyboardType="decimal-pad"
                     autoFocus={Platform.OS !== 'web'}
                     placeholder="0"
@@ -461,7 +467,7 @@ export default function AddTransactionScreen() {
             
             {/* Account selection */}
             <View className="border-b border-gray-100 pb-4">
-              <Text className="font-body text-base font-semibold text-gray-700">{transactionType === 'Transfer' ? 'From account' : transactionType === 'Income' ? 'Deposit to' : 'Paid from'}</Text>
+              <Text className="font-body text-base font-semibold text-gray-700 dark:text-neutral-100">{transactionType === 'Transfer' ? 'From account' : transactionType === 'Income' ? 'Deposit to' : 'Paid from'}</Text>
               {accountsLoading ? (
                 <View className="mt-3 flex-row items-center"><ActivityIndicator size="small" color={PRIMARY_COLOR} /><Text className="font-body ml-2 text-sm text-gray-500">Loading accounts…</Text></View>
               ) : accountsError ? (
@@ -481,9 +487,9 @@ export default function AddTransactionScreen() {
                         accessibilityState={{ selected }}
                         accessibilityLabel={`${account.name}, ${account.type}, ${account.currency}, balance ${formatMinorUnits(account.balanceMinor, account.currency)}`}
                         onPress={() => setValue('accountId', account.id, { shouldValidate: true })}
-                        className={`mr-2 min-h-12 justify-center rounded-xl border px-3 py-2 ${selected ? 'border-primary bg-primary/10' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
+                        className={`mr-2 min-h-12 justify-center rounded-xl border px-3 py-2 ${selected ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
                       >
-                        <Text className={["font-body", (`font-semibold ${selected ? 'text-primary' : 'text-gray-700'}`)].filter(Boolean).join(' ')}>{account.name}</Text>
+                        <Text className={`font-body font-semibold ${selected ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text>
                         <Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text>
                       </Pressable>
                     );
@@ -495,13 +501,12 @@ export default function AddTransactionScreen() {
               {errors.accountId && <Text className="font-body mt-1 text-sm text-red-600">{errors.accountId.message}</Text>}
               {transactionType === 'Transfer' && accounts.length > 1 && (
                 <View className="mt-4">
-                  <Text className="font-body text-base font-semibold text-gray-700">To account</Text>
+                  <Text className="font-body text-base font-semibold text-gray-700 dark:text-neutral-100">To account</Text>
                   {accounts.length > 4 && <View className="mt-3 flex-row items-center border border-gray-200 bg-gray-50 px-3 dark:border-neutral-700 dark:bg-neutral-800"><Search size={17} color="#6b7280" /><TextInput accessibilityLabel="Search destination accounts" className="font-body min-h-11 flex-1 px-2 text-sm text-gray-900 dark:text-white" placeholder="Search destination accounts" placeholderTextColor="#9ca3af" value={accountSearch} onChangeText={setAccountSearch} /></View>}
                   <ScrollView horizontal style={{ width: '100%', flexGrow: 0, flexShrink: 1 }} className="mt-3" showsHorizontalScrollIndicator={false}>
-                    {accounts.filter((account) => account.id !== selectedAccountId && account.currency === selectedAccount?.currency).map((account) => {
+                    {visibleDestinationAccounts.map((account) => {
                       const selected = account.id === selectedToAccountId;
-                      if (!`${account.name} ${account.type} ${account.currency}`.toLocaleLowerCase('en-US').includes(accountSearch.trim().toLocaleLowerCase('en-US'))) return null;
-                      return <Pressable key={account.id} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => setValue('toAccountId', account.id, { shouldValidate: true })} className={`mr-2 min-h-12 justify-center border px-3 py-2 ${selected ? 'border-primary bg-primary/10' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={`font-body font-semibold ${selected ? 'text-primary' : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text><Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>;
+                      return <Pressable key={account.id} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => setValue('toAccountId', account.id, { shouldValidate: true })} className={`mr-2 min-h-12 justify-center border px-3 py-2 ${selected ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={`font-body font-semibold ${selected ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text><Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>;
                     })}
                   </ScrollView>
                   {!accounts.some((account) => account.id !== selectedAccountId && account.currency === selectedAccount?.currency) && <Text className="font-body mt-2 text-sm text-gray-500">No other active account uses {selectedAccount?.currency ?? 'the selected currency'}. Cross-currency transfers are not supported.</Text>}
@@ -523,9 +528,9 @@ export default function AddTransactionScreen() {
                       accessibilityRole="button"
                       accessibilityState={{ selected: isSelected }}
                       onPress={() => setValue('categoryId', cat.id, { shouldValidate: true })}
-                      className={`mr-2 min-h-11 flex-row items-center rounded-full border px-3 py-2 ${isSelected ? 'border-primary bg-primary/10' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
+                      className={`mr-2 min-h-11 flex-row items-center rounded-full border px-3 py-2 ${isSelected ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
                     >
-                      <Text className={`font-body text-sm font-semibold ${isSelected ? 'text-primary' : 'text-gray-600 dark:text-neutral-300'}`}>{cat.name}</Text>
+                      <Text className={`font-body text-sm font-semibold ${isSelected ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-600 dark:text-neutral-300'}`}>{cat.name}</Text>
                     </Pressable>
                   );
                 })}
@@ -559,18 +564,19 @@ export default function AddTransactionScreen() {
                     A gift is not salary. Keep the sender and payment proof; tax treatment depends on current rules and your circumstances.
                   </Text>
                 )}
-                <Text className="font-body mt-4 text-sm font-semibold text-gray-700">How did you receive it?</Text>
+                <Text className="font-body mt-4 text-sm font-semibold text-gray-700 dark:text-neutral-100">How did you receive it?</Text>
                 <View className="mt-2 flex-row flex-wrap gap-2">
                   {['Bank transfer', 'Digital payment', 'Cash', 'Cheque', 'Other'].map((method) => (
                     <Pressable
                       key={method}
                       onPress={() => {
-                        setSelectedPaymentMethod(method);
                         setValue('paymentMethod', method);
                       }}
-                      className={`rounded-full border px-3 py-2 ${selectedPaymentMethod === method ? 'border-primary bg-primary/10' : 'border-gray-200 bg-white'}`}
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected: selectedPaymentMethod === method }}
+                      className={`rounded-full border px-3 py-2 ${selectedPaymentMethod === method ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
                     >
-                      <Text className={["font-body", (`text-xs font-semibold ${selectedPaymentMethod === method ? 'text-primary' : 'text-gray-600'}`)].filter(Boolean).join(' ')}>{method}</Text>
+                      <Text className={`font-body text-xs font-semibold ${selectedPaymentMethod === method ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-600 dark:text-neutral-200'}`}>{method}</Text>
                     </Pressable>
                   ))}
                 </View>
@@ -580,19 +586,19 @@ export default function AddTransactionScreen() {
                   </Text>
                 )}
                 {isRemittance && <View className="mt-4 gap-3">
-                  <Text className="font-body text-sm font-semibold text-gray-700">Original remittance details</Text>
+                  <Text className="font-body text-sm font-semibold text-gray-700 dark:text-neutral-100">Original remittance details</Text>
                   <Controller control={control} name="sourceAmount" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="Amount in original currency" keyboardType="decimal-pad" value={value} onChangeText={onChange} />} />
                   {errors.sourceAmount && <Text className="font-body text-sm text-red-500">{errors.sourceAmount.message}</Text>}
-                  <View className="flex-row gap-2">{['USD', 'GBP', 'EUR', 'AED', 'SAR'].map((currency) => <Pressable key={currency} onPress={() => setValue('sourceCurrency', currency)} className={`rounded-full border px-3 py-2 ${sourceCurrency === currency ? 'border-primary bg-primary/10' : 'border-gray-200'}`}><Text className="font-body text-xs font-semibold">{currency}</Text></Pressable>)}</View>
+                  <View className="flex-row gap-2">{['USD', 'GBP', 'EUR', 'AED', 'SAR'].map((currency) => <Pressable key={currency} accessibilityRole="radio" accessibilityState={{ selected: sourceCurrency === currency }} onPress={() => setValue('sourceCurrency', currency)} className={`rounded-full border px-3 py-2 ${sourceCurrency === currency ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={`font-body text-xs font-semibold ${sourceCurrency === currency ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-200'}`}>{currency}</Text></Pressable>)}</View>
                   <Controller control={control} name="exchangeRate" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="PKR per 1 unit (provider rate)" keyboardType="decimal-pad" value={value} onChangeText={onChange} />} />
                   {errors.exchangeRate && <Text className="font-body text-sm text-red-500">{errors.exchangeRate.message}</Text>}
                   {remittancePreview ? <Text className="font-body font-semibold text-primary">Converted amount: {remittancePreview}</Text> : null}
                   <Controller control={control} name="referenceNumber" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="Bank / remittance reference number" value={value} onChangeText={onChange} />} />
                   <Text className="font-body text-xs leading-5 text-gray-500">Enter the exchange rate shown by your bank or provider. The converted PKR amount is what will be added to your account.</Text>
                 </View>}
-                <Text className="font-body mt-4 text-sm font-semibold text-gray-700">Tax record</Text>
+                <Text className="font-body mt-4 text-sm font-semibold text-gray-700 dark:text-neutral-100">Tax record</Text>
                 <Text className="font-body mt-1 text-xs text-gray-500">Your record only; Leverage does not decide the legal tax treatment.</Text>
-                <View className="mt-2 flex-row flex-wrap gap-2">{([['unreviewed', 'Not reviewed'], ['taxable', 'Taxable'], ['non_taxable', 'Non-taxable']] as const).map(([value, label]) => <Pressable key={value} onPress={() => setValue('taxStatus', value)} className={`rounded-full border px-3 py-2 ${selectedTaxStatus === value ? 'border-primary bg-primary/10' : 'border-gray-200'}`}><Text className="font-body text-xs font-semibold">{label}</Text></Pressable>)}</View>
+                <View className="mt-2 flex-row flex-wrap gap-2">{([['unreviewed', 'Not reviewed'], ['taxable', 'Taxable'], ['non_taxable', 'Non-taxable']] as const).map(([value, label]) => <Pressable key={value} accessibilityRole="radio" accessibilityState={{ selected: selectedTaxStatus === value }} onPress={() => setValue('taxStatus', value)} className={`rounded-full border px-3 py-2 ${selectedTaxStatus === value ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={`font-body text-xs font-semibold ${selectedTaxStatus === value ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-200'}`}>{label}</Text></Pressable>)}</View>
               </View>
             )}
 
@@ -668,8 +674,8 @@ export default function AddTransactionScreen() {
           onConfirm={onTimeConfirm}
         />
 
-        {/* Sticky Save Button */}
-        <View className="absolute bottom-0 left-0 right-0 border-t border-gray-200 bg-white px-4 py-3 dark:border-neutral-800 dark:bg-neutral-950">
+        {/* Keep save actions in layout so they stay clear of the tab bar. */}
+        <View className="w-full border-t border-gray-200 bg-white px-4 pt-3 pb-3 dark:border-neutral-800 dark:bg-neutral-950">
           <Button
             title={correctionLoading ? 'Loading original…' : correctionOf ? 'Save correction' : `Save ${transactionType.toLocaleLowerCase('en-US')}`}
             onPress={() => saveTransaction(false)}

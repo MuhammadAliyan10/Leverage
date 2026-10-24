@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, SectionList, TextInput, Pressable, Alert, ScrollView, ActivityIndicator } from 'react-native';
+import { View, Text, SectionList, TextInput, Pressable, Alert, ScrollView, ActivityIndicator, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { DatePickerField } from '../../components/ui/DatePickerField';
@@ -78,8 +78,8 @@ export default function TransactionsScreen() {
   const [isFocused, setIsFocused] = useState(false);
   const [filterError, setFilterError] = useState('');
   const detailSheetRef = useRef<BottomSheet>(null);
-  const filterSheetRef = useRef<BottomSheet>(null);
   const selectedIdRef = useRef<string | null>(null);
+  const [filtersVisible, setFiltersVisible] = useState(false);
   const sheetPoints = useMemo(() => ['78%'], []);
 
   useEffect(() => {
@@ -118,7 +118,7 @@ export default function TransactionsScreen() {
         : undefined,
     });
     setFilterError('');
-    filterSheetRef.current?.expand();
+    setFiltersVisible(true);
   }, [filters]);
   const openDetails = useCallback((tx: LocalTransaction) => {
     selectedIdRef.current = tx.id;
@@ -198,11 +198,11 @@ export default function TransactionsScreen() {
       startDate: draftDates.startDate,
       endDate: draftDates.endDate ? new Date(Date.parse(`${draftDates.endDate}T00:00:00.000Z`) + 86_400_000).toISOString() : undefined,
     });
-    filterSheetRef.current?.close();
+    setFiltersVisible(false);
   };
   const clearFilters = () => {
     setDraftTypes([]); setDraftAccountId(''); setDraftCategoryId(''); setDraftCurrency(''); setDraftDates({}); setFilterError(''); setFilters({});
-    filterSheetRef.current?.close();
+    setFiltersVisible(false);
   };
 
   const handleEdit = () => {
@@ -254,7 +254,7 @@ export default function TransactionsScreen() {
       <View className="px-5 pt-4 pb-2">
         <View className={`h-12 flex-row items-center border bg-gray-50 px-3 dark:bg-neutral-900 ${isFocused ? 'border-primary' : 'border-gray-200 dark:border-neutral-800'}`}>
           <Search size={19} color={isFocused ? '#635BFF' : '#858995'} />
-          <TextInput className="ml-2 flex-1 font-body text-sm text-gray-900 dark:text-white" placeholder="Search transactions, accounts, notes…" placeholderTextColor="#858995" value={searchQuery} onChangeText={setSearchQuery} onFocus={() => setIsFocused(true)} onBlur={() => setIsFocused(false)} returnKeyType="search" accessibilityLabel="Search all transactions" />
+          <TextInput className="ml-2 flex-1 font-body text-sm text-gray-900 dark:text-white" placeholder="Search transactions, accounts, notes…" placeholderTextColor="#858995" value={searchQuery} onChangeText={setSearchQuery} onFocus={() => setIsFocused(true)} onBlur={() => setIsFocused(false)} onSubmitEditing={() => setDebouncedSearch(searchQuery.trim())} returnKeyType="search" accessibilityLabel="Search all transactions" />
           {!!searchQuery && <Pressable accessibilityRole="button" accessibilityLabel="Clear search" hitSlop={8} onPress={() => { setSearchQuery(''); setDebouncedSearch(''); }}><X size={18} color="#858995" /></Pressable>}
         </View>
         <Pressable className="mt-2 self-start flex-row items-center py-1" accessibilityRole="button" accessibilityLabel={`Open filters${activeFilterCount ? `, ${activeFilterCount} active` : ''}`} onPress={openFilters}>
@@ -274,7 +274,7 @@ export default function TransactionsScreen() {
       ) : (
         <SectionList<LocalTransaction, TransactionSection>
           sections={sections} onEndReached={() => { if (hasNextPage && !isFetchingNextPage) void fetchNextPage(); }} onEndReachedThreshold={0.35}
-          keyExtractor={(item) => item.id} stickySectionHeadersEnabled={false} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag"
+          keyExtractor={(item) => item.id} stickySectionHeadersEnabled={false} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}
           contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 36, flexGrow: visibleCount ? undefined : 1 }}
           refreshing={isRefetching} onRefresh={() => void refetch()}
           ListFooterComponent={isFetchingNextPage ? <View className="py-4"><ActivityIndicator color="#635BFF" /></View> : null}
@@ -294,9 +294,13 @@ export default function TransactionsScreen() {
         />
       )}
 
-      <BottomSheet ref={filterSheetRef} index={-1} snapPoints={sheetPoints} enablePanDownToClose backdropComponent={backdrop} keyboardBehavior="interactive" keyboardBlurBehavior="restore" handleIndicatorStyle={{ backgroundColor: '#9ca3af', width: 40 }}>
-        <ScrollView className="flex-1 px-5" keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 28 }}>
-          <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Filter transactions</Text><Pressable accessibilityRole="button" accessibilityLabel="Close filters" onPress={() => filterSheetRef.current?.close()}><X size={22} color="#777" /></Pressable></View>
+      <Modal visible={filtersVisible} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setFiltersVisible(false)}>
+        <View className="flex-1 justify-end">
+          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss transaction filters" onPress={() => setFiltersVisible(false)} className="absolute inset-0 bg-black/50" />
+          <View style={{ maxHeight: '82%' }} className="w-full rounded-t-2xl border-t border-gray-200 bg-white px-5 pt-3 dark:border-neutral-700 dark:bg-neutral-900">
+            <View className="mb-3 h-1 w-10 self-center rounded-full bg-gray-300 dark:bg-neutral-600" />
+            <ScrollView className="flex-1" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 28 }}>
+          <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Filter transactions</Text><Pressable accessibilityRole="button" accessibilityLabel="Close filters" onPress={() => setFiltersVisible(false)}><X size={22} color="#777" /></Pressable></View>
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Type</Text><View className="mb-4 flex-row flex-wrap">{FILTER_TYPES.map((type) => { const selected = draftTypes.length === 0 || draftTypes.includes(type); return <Pressable key={type} accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => setDraftTypes((current) => { const effective = current.length ? current : [...FILTER_TYPES]; return effective.includes(type) ? effective.filter((item) => item !== type) : [...effective, type]; })} className={`mb-2 mr-2 border px-3 py-2 ${selected ? 'border-primary bg-primary/10' : 'border-gray-200 dark:border-neutral-700'}`}><Text className={`font-body text-xs ${selected ? 'font-semibold text-primary' : 'text-gray-700 dark:text-neutral-200'}`}>{type}</Text></Pressable>; })}</View>
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Account</Text>{accountsQuery.isError ? <Pressable accessibilityRole="button" className="mb-3 py-2" onPress={() => void accountsQuery.refetch()}><Text className="font-body text-sm text-red-600">Accounts unavailable · tap to retry</Text></Pressable> : <View className="mb-4 flex-row flex-wrap"><Choice label="All accounts" selected={!draftAccountId} onPress={() => setDraftAccountId('')} />{(accountsQuery.data ?? []).map((account) => <Choice key={account.id} label={`${account.name}${account.archivedAt ? ' · archived' : ''}`} selected={draftAccountId === account.id} onPress={() => setDraftAccountId(account.id)} />)}</View>}
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Category</Text><View className="mb-4 flex-row flex-wrap"><Choice label="All categories" selected={!draftCategoryId} onPress={() => setDraftCategoryId('')} />{Object.entries(CLASSIFICATIONS).map(([id, value]) => <Choice key={id} label={value.label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}{EVENT_CATEGORIES.map(([id, label]) => <Choice key={id} label={label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}</View>
@@ -304,11 +308,13 @@ export default function TransactionsScreen() {
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Date range</Text><View className="flex-row"><View className="mr-2 flex-1"><DatePickerField label="From date" accessibilityLabel="Start date" value={draftDates.startDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, startDate: value || undefined }))} clearable/></View><View className="flex-1"><DatePickerField label="Through date" accessibilityLabel="End date" value={draftDates.endDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, endDate: value || undefined }))} clearable/></View></View>
           {!!filterError && <Text accessibilityRole="alert" className="mb-3 font-body text-sm text-red-600">{filterError}</Text>}
           <View className="flex-row"><Pressable accessibilityRole="button" className="mr-2 h-12 flex-1 items-center justify-center border border-gray-300 dark:border-neutral-700" onPress={clearFilters}><Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Clear</Text></Pressable><Pressable accessibilityRole="button" className="houselog-button h-12 flex-1 items-center justify-center" onPress={applyFilters}><Text className="font-body font-semibold text-white">Apply filters</Text></Pressable></View>
-        </ScrollView>
-      </BottomSheet>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       <BottomSheet ref={detailSheetRef} index={-1} snapPoints={sheetPoints} enablePanDownToClose backdropComponent={backdrop} onChange={onDetailsChange} keyboardBehavior="interactive" keyboardBlurBehavior="restore" handleIndicatorStyle={{ backgroundColor: '#9ca3af', width: 40 }}>
-        {selectedTx && selectedActivity ? <ScrollView className="flex-1 px-5" keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 32 }}>
+        {selectedTx && selectedActivity ? <ScrollView className="flex-1 px-5" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 32 }}>
           <View className="mb-4 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Transaction details</Text><Pressable accessibilityRole="button" accessibilityLabel="Close transaction details" onPress={closeDetails}><X size={22} color="#777" /></Pressable></View>
           <View className="mb-4 border-b border-gray-100 pb-4 dark:border-neutral-800"><Text className="font-body text-sm font-semibold text-gray-600 dark:text-neutral-300">{selectedActivity.categoryLabel}{selectedActivity.statusLabel ? ` · ${selectedActivity.statusLabel}` : ''}</Text><Text className="mt-1 font-heading text-2xl font-bold" style={{ color: COLORS[selectedTx.type] }}>{selectedTx.type === 'Transfer' ? '↔ ' : selectedActivity.direction === 'in' ? '+ ' : '− '}{formatAmount(selectedTx.amountMinor, selectedActivity.currency)}</Text><Text className="mt-1 font-body text-sm text-gray-700 dark:text-neutral-200">{new Date(selectedTx.date).toLocaleString()}</Text></View>
           {!!selectedTx.note && <Detail label="Description" value={selectedTx.note} />}

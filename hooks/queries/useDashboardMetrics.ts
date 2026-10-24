@@ -4,6 +4,7 @@ import { useAuth } from '../../src/context/AuthContext';
 import {
   calculateExpenseBucketTotals,
   calculateFinancialReport,
+  dashboardMonthRange,
   transactionDateTimestamp,
   type FinancialBucket,
   type FinancialReportRow,
@@ -170,10 +171,8 @@ function calculateBudgetSummaries(
 export function useDashboardMetrics(reportDate: Date) {
   const { user } = useAuth();
   const dayKey = localDateKey(reportDate);
-  const monthStart = new Date(reportDate.getFullYear(), reportDate.getMonth(), 1);
-  const nextMonth = new Date(reportDate.getFullYear(), reportDate.getMonth() + 1, 1);
-  const periodStart = monthStart.toISOString().slice(0, 10);
-  const periodEnd = new Date(Date.UTC(reportDate.getFullYear(), reportDate.getMonth() + 1, 1)).toISOString().slice(0, 10);
+  const monthRange = dashboardMonthRange(reportDate);
+  const { periodStart } = monthRange;
 
   return useQuery({
     queryKey: ['dashboard', 'metrics', user?.id, dayKey],
@@ -184,12 +183,14 @@ export function useDashboardMetrics(reportDate: Date) {
       const today = new Date(`${dayKey}T12:00:00`);
       const chartStart = new Date(today.getFullYear() - 4, 0, 1);
       const chartEnd = new Date(today.getFullYear() + 1, 0, 1);
-      const monthReportStart = monthStart;
-      const monthReportEnd = nextMonth;
+      const monthReportStart = new Date(monthRange.startDate);
+      const monthReportEnd = new Date(monthRange.endDate);
       const reportQueryStart = chartStart < monthReportStart ? chartStart : monthReportStart;
       const reportQueryEnd = chartEnd > monthReportEnd ? chartEnd : monthReportEnd;
-      const budgetRangeStart = new Date(`${periodStart}T00:00:00.000Z`);
-      const budgetRangeEnd = new Date(`${periodEnd}T00:00:00.000Z`);
+      // Budget periods use the same local civil month boundaries as the activity
+      // summary; do not shift them to UTC midnight in positive-offset timezones.
+      const budgetRangeStart = monthReportStart;
+      const budgetRangeEnd = monthReportEnd;
       const queryEnd = reportQueryEnd > budgetRangeEnd ? reportQueryEnd : budgetRangeEnd;
       const [accountBalances, reportRows, activities, assets, holdings, debts, budgetRows, goals, emergencyFund, bills, reservations] = await Promise.all([
         localDb.account.findManyWithBalances(user.id, { includeArchived: true }),

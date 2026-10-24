@@ -1,5 +1,5 @@
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -12,10 +12,11 @@ import type { TransactionActivity } from '../../src/finance/transactionDisplay';
 
 const FILTERS: readonly DashboardFilter[] = ['Daily', 'Weekly', 'Monthly', 'Yearly'];
 const money = (minor: number, currency: CurrencyCode | string) => formatMinorUnits(minor, currency);
+const strongNumber = { fontFamily: 'InterBlack' } as const;
 
 function SectionTitle({ title, action, onPress }: { title: string; action?: string; onPress?: () => void }) {
   return <View className="mb-3 mt-7 flex-row items-center justify-between">
-    <Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">{title}</Text>
+    <Text style={strongNumber} className="text-lg text-gray-900 dark:text-white">{title}</Text>
     {action && onPress ? <Pressable accessibilityRole="button" accessibilityLabel={action} onPress={onPress} className="min-h-11 justify-center pl-3"><View className="border-b border-primary pb-0.5"><Text className="font-body font-semibold text-primary">{action}</Text></View></Pressable> : null}
   </View>;
 }
@@ -88,18 +89,32 @@ export default function DashboardScreen() {
   const { width } = useWindowDimensions();
   const [filter, setFilter] = useState<DashboardFilter>('Weekly');
   const [reportDate, setReportDate] = useState(() => new Date());
+  const reportDateRef = useRef(reportDate);
   const { data: metrics, isLoading, isError, isFetching, refetch } = useDashboardMetrics(reportDate);
 
   useFocusEffect(useCallback(() => {
-    if (metrics) void refetch();
-  }, [metrics, refetch]));
+    // Keep this callback independent from query data. Depending on `metrics`
+    // makes each successful refetch recreate the focus effect and refetch again.
+    const focusedAt = new Date();
+    if (focusedAt.toDateString() !== reportDateRef.current.toDateString()) {
+      reportDateRef.current = focusedAt;
+      setReportDate(focusedAt);
+      return;
+    }
+    void refetch();
+  }, [refetch]));
 
   useEffect(() => {
     let previous = AppState.currentState;
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active' && previous !== 'active') {
-        setReportDate(new Date());
-        void refetch();
+        const resumedAt = new Date();
+        if (resumedAt.toDateString() !== reportDateRef.current.toDateString()) {
+          reportDateRef.current = resumedAt;
+          setReportDate(resumedAt);
+        } else {
+          void refetch();
+        }
       }
       previous = state;
     });
@@ -123,6 +138,10 @@ export default function DashboardScreen() {
   const hasAccounts = metrics.liquidity.length > 0;
   const visibleNetWorth = metrics.netWorth;
   const emergency = metrics.emergencyFund;
+  const monthlyActivityScale = Math.max(Math.abs(metrics.incomeMinor), Math.abs(metrics.expenseMinor));
+  const monthlyBarWidth = (amountMinor: number): `${number}%` => monthlyActivityScale === 0
+    ? '0%'
+    : `${(Math.abs(amountMinor) / monthlyActivityScale) * 100}%`;
 
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['top']}>
     <GlobalHeader title="Dashboard" description="Your finances at a glance" RightIcon={<Bell size={21} color={PRIMARY_COLOR} />} onRightPress={() => router.push('/obligations')} rightActionLabel="Open upcoming obligations" />
@@ -142,7 +161,7 @@ export default function DashboardScreen() {
       <SectionTitle title="Cash & available funds" action="Accounts" onPress={() => router.push('/accounts')} />
       {hasAccounts ? metrics.liquidity.map((position) => <Surface key={position.currency} className="mb-3">
         <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{position.currency} · active liquid accounts</Text>
-        <Text className="font-heading mt-1 text-2xl font-bold text-gray-900 dark:text-white">{money(position.currentBalanceMinor, position.currency)}</Text>
+        <Text style={strongNumber} className="mt-1 text-2xl text-gray-900 dark:text-white">{money(position.currentBalanceMinor, position.currency)}</Text>
         <View className="mt-3 flex-row flex-wrap border-t border-gray-100 pt-3 dark:border-neutral-800">
           <View className="mr-6"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Reserved for savings</Text><Text className="font-body mt-1 font-semibold text-gray-800 dark:text-neutral-200">{money(position.reservedMinor, position.currency)}</Text></View>
           <View><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Available unreserved</Text><Text className="font-body mt-1 font-semibold text-primary">{money(position.availableMinor, position.currency)}</Text></View>
@@ -153,7 +172,7 @@ export default function DashboardScreen() {
       <SectionTitle title="Net worth" action="Assets & debts" onPress={() => router.push('/assets')} />
       {visibleNetWorth.length ? visibleNetWorth.map((position) => <Pressable key={position.currency} accessibilityRole="button" accessibilityLabel={`Open assets and investments for ${position.currency}`} onPress={() => router.push('/assets')}><Surface className="mb-3">
         <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{position.currency} · known net worth</Text>
-        <Text className="font-heading mt-1 text-2xl font-bold text-gray-900 dark:text-white">{money(position.netWorthMinor, position.currency)}</Text>
+        <Text style={strongNumber} className="mt-1 text-2xl text-gray-900 dark:text-white">{money(position.netWorthMinor, position.currency)}</Text>
         <Text className="font-body mt-2 text-xs text-gray-600 dark:text-neutral-300">Assets {money(position.totalAssetsMinor, position.currency)} · Liabilities {money(position.liabilitiesMinor, position.currency)}</Text>
       </Surface></Pressable>) : <Surface><Text className="font-body text-sm text-gray-600 dark:text-neutral-300">Add accounts, assets or debts to see a net-worth position.</Text></Surface>}
       <Text className="font-body -mt-1 text-xs text-gray-500 dark:text-neutral-400">Currencies are kept separate; no exchange-rate estimate is used. Savings earmarks are already part of account balances.</Text>
@@ -162,11 +181,18 @@ export default function DashboardScreen() {
       <SectionTitle title="This month · ordinary activity" />
       <Surface>
         <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{metrics.monthLabel} · PKR only</Text>
-        <View className="mt-3 flex-row flex-wrap">
-          <View className="mb-3 mr-7"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Ordinary income</Text><Text className="font-heading mt-1 text-lg font-bold text-emerald-700 dark:text-emerald-300">{money(metrics.incomeMinor, 'PKR')}</Text></View>
-          <View className="mb-3"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Ordinary expenses</Text><Text className="font-heading mt-1 text-lg font-bold text-gray-900 dark:text-white">{money(metrics.expenseMinor, 'PKR')}</Text></View>
+        <View className="mt-4">
+          <View className="mb-3">
+            <View className="mb-1 flex-row items-center justify-between"><Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Ordinary income</Text><Text style={strongNumber} className={`text-base ${metrics.incomeMinor < 0 ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}`}>{money(metrics.incomeMinor, 'PKR')}</Text></View>
+            <View accessibilityRole="progressbar" accessibilityLabel={`Ordinary income ${money(metrics.incomeMinor, 'PKR')}; bars share a scale with ordinary expenses`} accessibilityValue={{ min: 0, max: 100, now: monthlyActivityScale === 0 ? 0 : Math.abs(metrics.incomeMinor) / monthlyActivityScale * 100 }} className="h-2 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className={`h-full rounded-full ${metrics.incomeMinor < 0 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: monthlyBarWidth(metrics.incomeMinor) }} /></View>
+          </View>
+          <View className="mb-3">
+            <View className="mb-1 flex-row items-center justify-between"><Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Ordinary expenses</Text><Text style={strongNumber} className={`text-base ${metrics.expenseMinor < 0 ? 'text-amber-600 dark:text-amber-300' : 'text-rose-700 dark:text-rose-300'}`}>{money(metrics.expenseMinor, 'PKR')}</Text></View>
+            <View accessibilityRole="progressbar" accessibilityLabel={`Ordinary expenses ${money(metrics.expenseMinor, 'PKR')}; bars share a scale with ordinary income`} accessibilityValue={{ min: 0, max: 100, now: monthlyActivityScale === 0 ? 0 : Math.abs(metrics.expenseMinor) / monthlyActivityScale * 100 }} className="h-2 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className={`h-full rounded-full ${metrics.expenseMinor < 0 ? 'bg-amber-500' : 'bg-rose-500'}`} style={{ width: monthlyBarWidth(metrics.expenseMinor) }} /></View>
+          </View>
         </View>
-        <View className="border-t border-gray-100 pt-3 dark:border-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Income minus expenses</Text><Text className="font-heading mt-1 text-xl font-bold text-primary">{money(metrics.netMinor, 'PKR')}</Text></View>
+        <View className="border-t border-gray-100 pt-3 dark:border-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Income minus expenses</Text><Text style={strongNumber} className={`mt-1 text-xl ${metrics.netMinor < 0 ? 'text-rose-700 dark:text-rose-300' : 'text-primary'}`}>{money(metrics.netMinor, 'PKR')}</Text></View>
+        {monthlyActivityScale > 0 ? <Text className="font-body mt-2 text-[10px] text-gray-500 dark:text-neutral-400">Bars share one scale; amber indicates a negative net total after corrections or refunds.</Text> : null}
         <Text className="font-body mt-2 text-xs leading-4 text-gray-500 dark:text-neutral-400">Transfers, opening balances, investment purchases and debt principal are not ordinary income or spending.{metrics.excludedCurrencies.length ? ` Excluded currencies: ${metrics.excludedCurrencies.join(', ')}.` : ''}</Text>
       </Surface>
 
