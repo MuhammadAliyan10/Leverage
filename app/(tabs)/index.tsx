@@ -212,15 +212,15 @@ export default function DashboardScreen() {
 
       <SectionTitle title="Quick actions" />
       <View className="flex-row flex-wrap">
-        <QuickAction label="Add transaction" icon={<Plus size={19} color="white" />} onPress={() => router.push('/(tabs)/add')} primary />
-        <QuickAction label="Accounts" icon={<Landmark size={19} color={PRIMARY_COLOR} />} onPress={() => router.push('/accounts')} />
-        <QuickAction label="Transactions" icon={<ArrowLeftRight size={19} color={PRIMARY_COLOR} />} onPress={() => router.push('/transactions')} />
-        <QuickAction label="Assets" icon={<BriefcaseBusiness size={19} color={PRIMARY_COLOR} />} onPress={() => router.push('/assets')} />
+        <QuickAction label="Add transaction" icon={<Plus size={17} color="white" />} onPress={() => router.push('/(tabs)/add')} primary />
+        <QuickAction label="Accounts" icon={<Landmark size={17} color={PRIMARY_COLOR} />} onPress={() => router.push('/accounts')} />
+        <QuickAction label="Transactions" icon={<ArrowLeftRight size={17} color={PRIMARY_COLOR} />} onPress={() => router.push('/transactions')} />
+        <QuickAction label="Assets" icon={<BriefcaseBusiness size={17} color={PRIMARY_COLOR} />} onPress={() => router.push('/assets')} />
       </View>
     </ScrollView>
   </SafeAreaView>;
 }
 
 function QuickAction({ label, icon, onPress, primary = false }: { label: string; icon: React.ReactNode; onPress: () => void; primary?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} className={`${primary ? 'houselog-button' : 'border border-gray-200 bg-white dark:border-neutral-800 dark:bg-neutral-900'} mb-2 mr-2 min-h-12 flex-row items-center px-3`}><View>{icon}</View><Text numberOfLines={1} className={["font-body", (`ml-2 text-sm font-semibold ${primary ? 'text-white' : 'text-gray-800 dark:text-neutral-100'}`)].filter(Boolean).join(' ')}>{label}</Text></Pressable>;
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} className={`${primary ? 'houselog-button' : 'border border-gray-200 bg-white dark:border-neutral-800 dark:bg-neutral-900'} mb-2 mr-2 min-h-11 flex-row items-center px-2.5`}><View>{icon}</View><Text numberOfLines={1} className={["font-body", (`ml-1.5 text-xs font-semibold ${primary ? 'text-white' : 'text-gray-800 dark:text-neutral-100'}`)].filter(Boolean).join(' ')}>{label}</Text></Pressable>;
 }
