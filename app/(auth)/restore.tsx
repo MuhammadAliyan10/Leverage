@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Eye, EyeOff, FileUp } from 'lucide-react-native';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
+import { useAppConfirm } from '../../components/ui/useAppConfirm';
 import { useAuth } from '../../src/context/AuthContext';
 import { localDb } from '../../src/db/local/client';
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
@@ -12,6 +13,7 @@ import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 export default function RestoreBackupScreen() {
   const router = useRouter();
   const { restoreBackup } = useAuth();
+  const { confirm, dialog } = useAppConfirm();
   const [passphrase, setPassphrase] = useState('');
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -23,15 +25,15 @@ export default function RestoreBackupScreen() {
     try {
       const bytes = await localDb.recovery.pickEncryptedBackup();
       if (!bytes) { setBusy(false); return; }
-      Alert.alert('Restore Leverage backup?', 'Leverage will validate the encrypted file, schema, profile, financial data and foreign keys before replacing this device’s local database.', [
-        { text: 'Cancel', style: 'cancel', onPress: () => setBusy(false) },
-        { text: 'Validate and restore', onPress: () => {
-          void restoreBackup(bytes, passphrase).then(() => {
-            Alert.alert('Restore complete', 'Your backup is restored. Sign in with the profile included in the backup.');
-            router.replace('/(auth)');
-          }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'The backup could not be restored.')).finally(() => setBusy(false));
-        } },
-      ]);
+      const confirmed = await confirm({
+        title: 'Restore Leverage backup?',
+        message: 'Leverage will validate the encrypted file, schema, profile, financial data and foreign keys before replacing this device’s local database.',
+        confirmLabel: 'Validate and restore',
+        destructive: true,
+      });
+      if (!confirmed) { setBusy(false); return; }
+      await restoreBackup(bytes, passphrase);
+      router.replace('/(auth)');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'The backup file could not be opened.'); setBusy(false); }
   };
 
@@ -57,5 +59,6 @@ export default function RestoreBackupScreen() {
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
+    {dialog}
   </SafeAreaView>;
 }

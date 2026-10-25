@@ -1,8 +1,9 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { Alert, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { DoneHeader } from '../components/ui/DoneHeader';
+import { useAppConfirm } from '../components/ui/useAppConfirm';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useAuth } from '../src/context/AuthContext';
 import { useAccounts } from '../hooks/queries/useAccounts';
@@ -42,6 +43,7 @@ function Card({ title, children }: {title:string;children:React.ReactNode}) {
 }
 
 export default function ObligationsScreen() {
+  const { confirm, dialog } = useAppConfirm();
   const router = useRouter();
   const { user, profileSettings } = useAuth();
   const client = useQueryClient();
@@ -56,6 +58,10 @@ export default function ObligationsScreen() {
   const [categoryId,setCategoryId] = useState('bills');
   const [scheduleEnd,setScheduleEnd] = useState('');
   const [scheduleStart,setScheduleStart] = useState(today());
+  const [subscriptionName,setSubscriptionName] = useState('');
+  const [subscriptionAmount,setSubscriptionAmount] = useState('');
+  const [subscriptionStart,setSubscriptionStart] = useState(today());
+  const [subscriptionFrequency,setSubscriptionFrequency] = useState<Extract<RecurrenceFrequency,'monthly'|'yearly'>>('monthly');
   const [editingScheduleId,setEditingScheduleId] = useState<string|null>(null);
   const [billName,setBillName] = useState('');
   const [billAmount,setBillAmount] = useState('');
@@ -104,10 +110,7 @@ export default function ObligationsScreen() {
     catch(error) { setFeedback({message:error instanceof Error?error.message:'Please try again.',error:true}); }
     finally { operationInFlight.current = false; setBusy(false); }
   };
-  const confirmAction=(title:string,message:string,actionLabel:string):Promise<boolean>=>{
-    if(Platform.OS==='web') return Promise.resolve(typeof globalThis.confirm==='function'&&globalThis.confirm(`${title}\n\n${message}`));
-    return new Promise((resolve)=>Alert.alert(title,message,[{text:'Keep',style:'cancel',onPress:()=>resolve(false)},{text:actionLabel,style:'destructive',onPress:()=>resolve(true)}],{cancelable:true,onDismiss:()=>resolve(false)}));
-  };
+  const confirmAction=(title:string,message:string,actionLabel:string):Promise<boolean>=>confirm({title,message,confirmLabel:actionLabel,destructive:true});
   const confirmThenRun=(title:string,message:string,actionLabel:string,task:()=>Promise<unknown>,success:string)=>{
     void confirmAction(title,message,actionLabel).then((confirmed)=>{if(confirmed) void run(task,success);});
   };
@@ -118,6 +121,16 @@ export default function ObligationsScreen() {
     const destination=accounts.find((account)=>account.id===destinationId);
     if(type==='transfer'&&destination?.currency!==currentAccount.currency) {setFeedback({message:'Transfers need accounts in the same currency.',error:true});return;}
     void run(()=>localDb.obligations.schedules.save({id:editingScheduleId??makeId(),ownerId:user.id,scheduleType:type,name:scheduleName,amountMinor:parseMinorUnits(scheduleAmount),currency:currentAccount.currency,accountId:currentAccount.id,toAccountId:type==='transfer'?destinationId:null,frequency,startDate:scheduleStart,endDate:scheduleEnd||null,classificationId:type==='transfer'?null:categoryId}), 'Schedule saved. Due dates will remain pending until you approve them.',()=>{setEditingScheduleId(null);setScheduleName('');setScheduleAmount('');});
+  };
+  const saveSubscription=()=>{
+    if(!user||!currentAccount) {setFeedback({message:'Create or select an account before scheduling a subscription.',error:true});return;}
+    void run(()=>localDb.obligations.schedules.save({
+      id:makeId(),ownerId:user.id,scheduleType:'expense',name:subscriptionName,amountMinor:parseMinorUnits(subscriptionAmount),
+      currency:currentAccount.currency,accountId:currentAccount.id,frequency:subscriptionFrequency,startDate:subscriptionStart,
+      classificationId:'bills',
+    }), 'Subscription schedule saved. Leverage will show each due charge for confirmation before it changes your balance.',()=>{
+      setSubscriptionName('');setSubscriptionAmount('');setSubscriptionStart(today());
+    });
   };
   const saveBill=()=>{
     if(!user||!currentAccount) {setFeedback({message:'Create or select an account before adding a bill.',error:true});return;}
@@ -194,6 +207,17 @@ export default function ObligationsScreen() {
       {query.isError?<View className="mb-3 rounded-xl bg-red-50 p-3 dark:bg-red-950"><Text className="font-body text-sm text-red-700 dark:text-red-200">{query.error.message}</Text><Pressable accessibilityRole="button" onPress={()=>void query.refetch()} className="mt-2 self-start"><Text className="font-body font-semibold text-primary">Try again</Text></Pressable></View>:null}
       {accountQuery.error?<View className="mb-3 rounded-xl bg-red-50 p-3 dark:bg-red-950"><Text className="font-body text-sm text-red-700 dark:text-red-200">Accounts could not be loaded: {accountQuery.error.message}</Text><Pressable accessibilityRole="button" onPress={()=>void accountQuery.refetch()} className="mt-2 self-start"><Text className="font-body font-semibold text-primary">Try again</Text></Pressable></View>:null}
       <Text className="font-body mb-3 text-sm text-gray-600 dark:text-neutral-300">Planned entries never change balances. Only a posted occurrence or recorded payment creates a ledger transaction.</Text>
+      <Card title="Subscriptions">
+        <Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">Set the provider, amount, account and next charge date. Leverage tracks each renewal and keeps it pending until you confirm the provider charged you. It records the expense in your ledger; it cannot initiate a JazzCash or bank payment.</Text>
+        <Field value={subscriptionName} onChangeText={setSubscriptionName} placeholder="Subscription name, e.g. Spotify"/>
+        <Field value={subscriptionAmount} onChangeText={setSubscriptionAmount} placeholder={`Charge amount (${currentAccount?.currency??'PKR'})`} numeric amount/>
+        <Text className="font-body mt-3 text-xs text-gray-500 dark:text-neutral-400">Charge account · {currentAccount?.name??'choose an account below'}</Text>
+        <View className="flex-row flex-wrap">{accounts.map((account)=><Choice key={account.id} label={`${account.name} · ${account.currency}`} selected={currentAccount?.id===account.id} onPress={()=>setAccountId(account.id)}/>)}</View>
+        <Text className="font-body mt-3 text-xs font-semibold text-gray-700 dark:text-neutral-200">Renewal frequency</Text>
+        <View className="flex-row"><Choice label="Monthly" selected={subscriptionFrequency==='monthly'} onPress={()=>setSubscriptionFrequency('monthly')}/><Choice label="Yearly" selected={subscriptionFrequency==='yearly'} onPress={()=>setSubscriptionFrequency('yearly')}/></View>
+        <DatePickerField label="Next charge date" value={subscriptionStart} onChangeText={setSubscriptionStart}/>
+        <Pressable disabled={busy} accessibilityRole="button" onPress={saveSubscription} className="houselog-button mt-4 items-center px-4 py-3"><Text className="font-body font-bold text-white">Save subscription</Text></Pressable>
+      </Card>
       <Card title="Create a recurring transaction">
         {editingScheduleId?<Text className="font-body mt-2 text-xs font-semibold text-primary">Editing future dates only. Already posted transactions remain unchanged.</Text>:null}
         <View className="flex-row flex-wrap">{(['income','expense','transfer'] as const).map((item)=><Choice key={item} label={item} selected={type===item} onPress={()=>{setType(item);if(item==='income'&&!['salary','family_gift','other_income'].includes(categoryId))setCategoryId('salary');if(item==='expense'&&['salary','family_gift','other_income'].includes(categoryId))setCategoryId('bills');}}/>)}</View>
@@ -215,7 +239,12 @@ export default function ObligationsScreen() {
       </Card>
       <Card title="Upcoming & missed occurrences">
         {!query.data?.occurrences.filter((item)=>item.status==='pending').length?<Text className="font-body mt-2 text-gray-500">No pending occurrences. Opening this screen catches missed dates while keeping them unposted.</Text>:null}
-        {query.data?.occurrences.filter((item)=>item.status==='pending').map((item)=><View key={item.id} className="mt-3 rounded-xl bg-gray-50 p-3 dark:bg-neutral-800"><Text className="font-body font-semibold text-gray-900 dark:text-white">{item.name} · {item.occurrenceDate}</Text><Text className="font-body mt-1 text-gray-600 dark:text-neutral-300">{item.scheduleType==='bill'?'Bill due':item.scheduleType} · {formatMinorUnits(item.amountMinor,item.currency)} · Pending approval</Text><View className="mt-2 flex-row">{item.scheduleType!=='bill'?<Pressable onPress={()=>void run(()=>localDb.obligations.postOccurrence({ownerId:user!.id,id:item.id,transactionId:makeId()}),'Occurrence posted to account history.')} className="houselog-button mr-2 px-3 py-2"><Text className="font-body text-xs font-bold text-white">Post now</Text></Pressable>:null}<Pressable onPress={()=>void run(()=>localDb.obligations.skipOccurrence(user!.id,item.id),'Occurrence skipped; no balance changed.')} className="rounded-lg bg-gray-200 px-3 py-2 dark:bg-neutral-700"><Text className="font-body text-xs text-gray-800 dark:text-white">Skip</Text></Pressable></View></View>)}
+        {query.data?.occurrences.filter((item)=>item.status==='pending').map((item)=>{
+          const account=accounts.find((candidate)=>candidate.id===item.accountId);
+          const insufficient=account&&account.currency===item.currency&&account.balanceMinor<item.amountMinor;
+          const isSubscriptionExpense=item.scheduleType==='expense'&&item.classificationId==='bills';
+          return <View key={item.id} className="mt-3 rounded-xl bg-gray-50 p-3 dark:bg-neutral-800"><Text className="font-body font-semibold text-gray-900 dark:text-white">{item.name} · {item.occurrenceDate}</Text><Text className="font-body mt-1 text-gray-600 dark:text-neutral-300">{item.scheduleType==='bill'?'Bill due':item.scheduleType} · {formatMinorUnits(item.amountMinor,item.currency)} · Pending approval</Text>{isSubscriptionExpense?<Text className={`font-body mt-2 text-xs ${insufficient?'text-amber-700 dark:text-amber-300':'text-gray-500 dark:text-neutral-400'}`}>{insufficient?`Balance is below the charge (${formatMinorUnits(account.balanceMinor,item.currency)} available). Confirm with the provider before recording.`:'Record only after confirming the provider charged this account. Leverage does not initiate the payment.'}</Text>:null}<View className="mt-2 flex-row">{item.scheduleType!=='bill'?<Pressable onPress={()=>void run(()=>localDb.obligations.postOccurrence({ownerId:user!.id,id:item.id,transactionId:makeId()}),isSubscriptionExpense?'Subscription charge recorded in account history.':'Occurrence posted to account history.')} className="houselog-button mr-2 px-3 py-2"><Text className="font-body text-xs font-bold text-white">{isSubscriptionExpense?'Record after charge':'Post now'}</Text></Pressable>:null}<Pressable onPress={()=>void run(()=>localDb.obligations.skipOccurrence(user!.id,item.id),'Occurrence skipped; no balance changed.')} className="rounded-lg bg-gray-200 px-3 py-2 dark:bg-neutral-700"><Text className="font-body text-xs text-gray-800 dark:text-white">Skip</Text></Pressable></View></View>;
+        })}
       </Card>
       <Card title="One-time bill">
         <Field value={billName} onChangeText={setBillName} placeholder="Bill name"/><Field value={billAmount} onChangeText={setBillAmount} placeholder="Amount" numeric amount/><DatePickerField label="Due date" value={billDue} onChangeText={setBillDue}/>
@@ -246,5 +275,6 @@ export default function ObligationsScreen() {
       </Card>
       {accounts.length===0?<Text className="font-body mb-3 text-amber-700">Create an account before recording scheduled cash movements or debts.</Text>:null}
     </ScrollView>
+    {dialog}
   </SafeAreaView>;
 }

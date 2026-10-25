@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { Alert, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -11,6 +11,7 @@ import { formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, p
 import { CURRENCIES, type CurrencyCode } from '../src/finance/domain';
 import { Button } from '../components/ui/Button';
 import { DoneHeader } from '../components/ui/DoneHeader';
+import { useAppConfirm } from '../components/ui/useAppConfirm';
 
 const requestId = () => `houselog-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 type EventMode = 'planned' | 'allocate' | 'release' | 'transfer_in' | 'transfer_out';
@@ -23,6 +24,7 @@ const isPositiveAmount = (value: string) => {
 export default function SavingsScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const { confirm, dialog } = useAppConfirm();
   const { data, isLoading, error, refetch } = useSavingsOverview();
   const accountsQuery = useAccounts();
   const accounts = accountsQuery.data ?? [];
@@ -110,18 +112,12 @@ export default function SavingsScreen() {
       amountMinor: parseMinorUnits(emergencyAmount), eventDate: new Date().toISOString(), accountId: transfer ? undefined : emergencyAccountId,
       sourceAccountId: transfer ? emergencySourceId : undefined, destinationAccountId: transfer ? emergencyDestinationId : undefined }), () => { setEmergencyAmount(''); setFeedback('Emergency-fund activity recorded.'); setFeedbackIsError(false); });
   };
-  const confirmArchiveGoal = (goalId: string) => {
+  const confirmArchiveGoal = async (goalId: string) => {
     const archive = () => void run(() => writes.goalStatus.mutateAsync({ goalId, status: 'archived' }), () => {
       if (selectedGoal === goalId) setSelectedGoal(null);
       setFeedback('Savings goal archived; its history is preserved.'); setFeedbackIsError(false);
     });
-    if (Platform.OS === 'web') {
-      if (typeof globalThis.confirm === 'function' && globalThis.confirm('Archive this goal? Its contribution history will remain saved.')) archive();
-      return;
-    }
-    Alert.alert('Archive this goal?', 'Its contribution history will remain saved.', [
-      { text: 'Cancel', style: 'cancel' }, { text: 'Archive', style: 'destructive', onPress: archive },
-    ]);
+    if (await confirm({ title: 'Archive this goal?', message: 'Its contribution history will remain saved.', confirmLabel: 'Archive', destructive: true })) archive();
   };
   const closeSavings = () => {
     if (router.canGoBack()) router.back();
@@ -190,5 +186,6 @@ export default function SavingsScreen() {
       {accountsQuery.isLoading ? <Text className="font-body mt-4 text-gray-500">Loading accounts…</Text> : null}
       {accounts.length === 0 && !accountsQuery.isLoading && !accountsQuery.error && <Pressable accessibilityRole="link" onPress={() => router.push('/accounts')} className="mt-4 rounded-xl bg-amber-50 dark:bg-amber-950 p-3"><Text className="font-body text-sm text-amber-800 dark:text-amber-200">Create an account before earmarking or transferring savings. Open accounts →</Text></Pressable>}
     </ScrollView>
+    {dialog}
   </SafeAreaView>;
 }

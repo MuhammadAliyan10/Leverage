@@ -1,11 +1,12 @@
 import { PRIMARY_COLOR } from '../src/constants/themeColors';
-import React, { useMemo, useState } from 'react';
-import { Alert, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useRouter } from 'expo-router';
-import { Archive, Plus, Save } from 'lucide-react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Archive, ChevronRight, Pencil, Plus, Save } from 'lucide-react-native';
 import { DoneHeader } from '../components/ui/DoneHeader';
+import { useAppConfirm } from '../components/ui/useAppConfirm';
 import { useAccounts } from '../hooks/queries/useAccounts';
 import { useAuth } from '../src/context/AuthContext';
 import { localDb } from '../src/db/local/client';
@@ -14,8 +15,10 @@ import { formatGroupedAmountInput, formatMinorUnits, parseMinorUnits } from '../
 
 export default function AccountsScreen() {
   const router = useRouter();
+  const { edit: editParam } = useLocalSearchParams<{ edit?: string }>();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const { confirm, dialog } = useAppConfirm();
   const { data: accounts = [], isLoading, isError, refetch: refetchAccounts } = useAccounts({ includeArchived: true });
   const recordsQuery = useQuery({
     queryKey: ['account-records', user?.id],
@@ -48,10 +51,19 @@ export default function AccountsScreen() {
   const beginCreate = () => {
     setSelectedId(null); setName(''); setType('bank'); setCurrency('PKR'); setOpeningBalance('0.00');
   };
-  const beginEdit = (account: typeof records[number]) => {
+  const beginEdit = useCallback((account: typeof records[number]) => {
     if (account.archivedAt) return;
     setSelectedId(account.id); setName(account.name); setType(account.type as AccountType); setCurrency(account.currency as CurrencyCode); setOpeningBalance(formatGroupedAmountInput((account.balanceMinor / 100).toFixed(2)));
-  };
+  }, []);
+  useEffect(() => {
+    if (!editParam || !recordsQuery.data) return;
+    const account = recordsQuery.data.find((item) => item.id === editParam);
+    const timer = setTimeout(() => {
+      if (account && !account.archivedAt) beginEdit(account);
+      router.setParams({ edit: undefined });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [beginEdit, editParam, recordsQuery.data, router]);
   const refresh = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['accounts', user?.id] }),
@@ -95,16 +107,9 @@ export default function AccountsScreen() {
       setFeedback({ message: error instanceof Error ? error.message : 'Please try again.', isError: true });
     } finally { setBusy(false); }
   };
-  const archive = (accountId: string, accountName: string) => {
+  const archive = async (accountId: string, accountName: string) => {
     const message = `Archive “${accountName}”? Its balance and transaction history will remain available.`;
-    if (Platform.OS === 'web') {
-      if (typeof globalThis.confirm === 'function' && globalThis.confirm(message)) void archiveConfirmed(accountId);
-      return;
-    }
-    Alert.alert('Archive account', message, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Archive', style: 'destructive', onPress: () => { void archiveConfirmed(accountId); } },
-    ]);
+    if (await confirm({ title: 'Archive account?', message, confirmLabel: 'Archive', destructive: true })) await archiveConfirmed(accountId);
   };
   const activeAccounts = accounts.filter((account) => !account.archivedAt);
   const archivedAccounts = accounts.filter((account) => !!account.archivedAt);
@@ -133,13 +138,16 @@ export default function AccountsScreen() {
 
       <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Your accounts</Text><Pressable disabled={busy} accessibilityRole="button" onPress={beginCreate} className="flex-row items-center"><Plus size={18} color={PRIMARY_COLOR} /><Text className="font-body ml-1 font-semibold text-primary">Add</Text></Pressable></View>
       {isLoading || recordsQuery.isLoading ? <Text className="font-body py-5 text-center text-gray-500 dark:text-neutral-400">Loading accounts…</Text> : isError || recordsQuery.isError ? <View className="items-center rounded-2xl bg-white p-5 dark:bg-neutral-900"><Text className="font-body mb-3 text-center text-red-600 dark:text-red-400">Accounts could not be loaded.</Text><Pressable onPress={() => { void refetchAccounts(); void recordsQuery.refetch(); }} className="houselog-button px-4 py-2"><Text className="font-body font-semibold text-white">Try again</Text></Pressable></View> : activeAccounts.length === 0 ? <Text className="font-body rounded-2xl bg-white p-5 text-center text-gray-500 dark:bg-neutral-900 dark:text-neutral-400">No active accounts yet. Add one to start recording money.</Text> : activeAccounts.map((account) => <View key={account.id} className="mb-3 flex-row items-center rounded-2xl border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
-        <Pressable disabled={busy} accessibilityRole="button" accessibilityLabel={`Edit ${account.name}`} onPress={() => { const raw = records.find((item) => item.id === account.id); if (raw) beginEdit(raw); }} className="flex-1"><Text className="font-body font-bold text-gray-900 dark:text-white">{account.name}</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · Opening {formatMinorUnits(records.find((item) => item.id === account.id)?.balanceMinor ?? 0, account.currency)}</Text><Text className="font-heading mt-2 text-lg font-bold text-primary">{formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>
+        <Pressable disabled={busy} accessibilityRole="button" accessibilityLabel={`View ${account.name} balance and history`} onPress={() => router.push({ pathname: '/account/[id]', params: { id: account.id } })} className="flex-1"><Text className="font-body font-bold text-gray-900 dark:text-white">{account.name}</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · Opening {formatMinorUnits(records.find((item) => item.id === account.id)?.balanceMinor ?? 0, account.currency)}</Text><Text className="font-heading mt-2 text-lg font-bold text-primary">{formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>
+        <Pressable disabled={busy} accessibilityRole="button" accessibilityLabel={`Edit ${account.name}`} onPress={() => { const raw = records.find((item) => item.id === account.id); if (raw) beginEdit(raw); }} className="ml-2 rounded-full bg-gray-100 p-3 dark:bg-neutral-800"><Pencil size={17} color={PRIMARY_COLOR} /></Pressable>
         <Pressable disabled={busy} accessibilityRole="button" accessibilityLabel={`Archive ${account.name}`} onPress={() => archive(account.id, account.name)} className="ml-3 rounded-full bg-gray-100 p-3 dark:bg-neutral-800"><Archive size={18} color="#6b7280" /></Pressable>
+        <ChevronRight size={18} color="#9ca3af" />
       </View>)}
       {!isLoading && !isError && !recordsQuery.isLoading && !recordsQuery.isError && archivedAccounts.length > 0 && <View className="mt-5"><Text className="font-heading mb-3 text-lg font-bold text-gray-900 dark:text-white">Archived accounts</Text><Text className="font-body mb-3 text-sm leading-5 text-gray-500 dark:text-neutral-400">Archived accounts stay here for reference. Their balances are excluded from active account totals.</Text>{archivedAccounts.map((account) => {
         const balance = accounts.find((item) => item.id === account.id);
-        return <View key={account.id} className="mb-3 rounded-2xl border border-gray-200 bg-gray-100 p-4 dark:border-neutral-800 dark:bg-neutral-900"><View className="flex-row items-start justify-between"><View className="flex-1"><Text className="font-body font-bold text-gray-700 dark:text-neutral-200">{account.name}</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · Archived</Text></View><Text className="font-heading ml-3 text-base font-bold text-gray-700 dark:text-neutral-200">{formatMinorUnits(balance?.balanceMinor ?? account.balanceMinor, account.currency)}</Text></View></View>;
+        return <Pressable accessibilityRole="button" accessibilityLabel={`View archived ${account.name} history`} onPress={() => router.push({ pathname: '/account/[id]', params: { id: account.id } })} key={account.id} className="mb-3 rounded-2xl border border-gray-200 bg-gray-100 p-4 dark:border-neutral-800 dark:bg-neutral-900"><View className="flex-row items-start justify-between"><View className="flex-1"><Text className="font-body font-bold text-gray-700 dark:text-neutral-200">{account.name}</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · Archived · View history</Text></View><Text className="font-heading ml-3 text-base font-bold text-gray-700 dark:text-neutral-200">{formatMinorUnits(balance?.balanceMinor ?? account.balanceMinor, account.currency)}</Text></View></Pressable>;
       })}</View>}
     </ScrollView>
+    {dialog}
   </SafeAreaView>;
 }

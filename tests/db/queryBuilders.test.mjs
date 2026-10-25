@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { buildAccountBalanceQuery, buildFilteredTransactionPredicate, buildHistoricalAccountBalanceQuery, buildRecentAccountPreferenceQuery, buildTransactionListQuery } from '../../src/db/local/queryBuilders.ts';
+import { buildAccountActivitySummaryQuery, buildAccountBalanceQuery, buildFilteredTransactionPredicate, buildHistoricalAccountBalanceQuery, buildRecentAccountPreferenceQuery, buildTransactionListQuery } from '../../src/db/local/queryBuilders.ts';
 import { calculateAccountBalances } from '../../src/finance/balances.ts';
 
 test('account balance aggregation matches ledger rules without returning transaction history', () => {
@@ -33,6 +33,42 @@ test('account balance aggregation matches ledger rules without returning transac
     assert.deepEqual(query.params, ['u1']);
     assert.ok(query.sql.includes('SUM(events.delta)'));
     assert.ok(!query.sql.includes('SELECT * FROM "Transaction"'));
+  } finally { database.close(); }
+});
+
+test('account activity summary covers full history and classifies transfers, refunds, reversals, and profile scope', () => {
+  const database = new DatabaseSync(':memory:');
+  try {
+    database.exec(`CREATE TABLE Account (id TEXT PRIMARY KEY,ownerId TEXT,name TEXT,type TEXT,balanceMinor INTEGER,currency TEXT,createdAt TEXT,archivedAt TEXT,synced INTEGER);
+      CREATE TABLE "Transaction" (id TEXT PRIMARY KEY,ownerId TEXT,amountMinor INTEGER,type TEXT,accountId TEXT,toAccountId TEXT,reversalOfId TEXT,date TEXT);
+      CREATE INDEX Transaction_owner_account_idx ON "Transaction"(ownerId,accountId,date DESC,id DESC);
+      CREATE INDEX Transaction_owner_destination_idx ON "Transaction"(ownerId,toAccountId,date DESC,id DESC);
+      INSERT INTO Account VALUES ('cash','u1','Cash','cash',10000,'PKR','2026-01-01',NULL,0),('bank','u1','Bank','bank',5000,'PKR','2026-01-01','2026-02-01',0),('other','u2','Other','cash',5000,'PKR','2026-01-01',NULL,0);
+      INSERT INTO "Transaction" VALUES
+        ('income','u1',2000,'Income','cash',NULL,NULL,'2026-01-02'),
+        ('expense','u1',500,'Expense','cash',NULL,NULL,'2026-01-03'),
+        ('transfer','u1',1000,'Transfer','cash','bank',NULL,'2026-01-04'),
+        ('refund','u1',200,'Refund','cash',NULL,'expense','2026-01-05'),
+        ('bank-expense','u1',300,'Expense','bank',NULL,NULL,'2026-01-06'),
+        ('expense-reversal','u1',300,'Reversal','bank',NULL,'bank-expense','2026-01-07'),
+        ('income-reversal','u1',100,'Reversal','cash',NULL,'income','2026-01-08'),
+        ('transfer-reversal','u1',1000,'Reversal','cash','bank','transfer','2026-01-09'),
+        ('foreign-income','u2',999999,'Income','other',NULL,NULL,'2026-01-10');`);
+    // Older records beyond any normal history-page boundary must be included in the aggregate.
+    database.exec('BEGIN');
+    const insert = database.prepare('INSERT INTO "Transaction" VALUES(?,?,?,?,?,?,?,?)');
+    for (let index = 0; index < 1200; index += 1) insert.run(`old-${index}`, 'u1', 1, 'Income', 'cash', null, null, `2025-01-${String(index % 28 + 1).padStart(2, '0')}`);
+    database.exec('COMMIT');
+
+    const cashQuery = buildAccountActivitySummaryQuery('u1', 'cash');
+    const cash = database.prepare(cashQuery.sql).get(...cashQuery.params);
+    assert.deepEqual({ opening: cash.openingBalanceMinor, current: cash.currentBalanceMinor, in: cash.inflowMinor, out: cash.outflowMinor, count: cash.transactionCount }, {
+      opening: 10000, current: 12800, in: 4400, out: 1600, count: 1206,
+    });
+    const bank = database.prepare(buildAccountActivitySummaryQuery('u1', 'bank').sql).get(...buildAccountActivitySummaryQuery('u1', 'bank').params);
+    assert.deepEqual({ current: bank.currentBalanceMinor, in: bank.inflowMinor, out: bank.outflowMinor, count: bank.transactionCount }, { current: 5000, in: 1300, out: 1300, count: 4 });
+    assert.equal(database.prepare(buildAccountActivitySummaryQuery('u1', 'other').sql).get(...buildAccountActivitySummaryQuery('u1', 'other').params), undefined);
+    assert.throws(() => buildAccountActivitySummaryQuery('', 'cash'), /profile and account/);
   } finally { database.close(); }
 });
 

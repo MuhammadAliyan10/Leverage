@@ -65,6 +65,19 @@ export const CLASSIFICATIONS = {
   housing: { label: 'Housing / hostel', type: 'Expense' },
   other_expense: { label: 'Other expense', type: 'Expense' },
   expense_refund: { label: 'Expense refund', type: 'Refund' },
+  // These classifications are reserved for linked debt, asset, and investment
+  // ledger operations. They are intentionally excluded from the manual picker.
+  debt_borrowing: { label: 'Borrowed principal received', type: 'Income' },
+  debt_lending: { label: 'Money lent', type: 'Expense' },
+  debt_principal_repayment: { label: 'Debt principal repayment', type: 'Expense' },
+  debt_receivable_payment: { label: 'Principal repaid to you', type: 'Income' },
+  debt_interest: { label: 'Debt interest', type: 'Expense' },
+  debt_settlement: { label: 'Debt settlement', type: 'Expense' },
+  asset_purchase: { label: 'Asset purchase', type: 'Expense' },
+  asset_sale_proceeds: { label: 'Asset sale proceeds', type: 'Income' },
+  investment_purchase: { label: 'Investment purchase', type: 'Expense' },
+  investment_sale_proceeds: { label: 'Investment sale proceeds', type: 'Income' },
+  investment_dividend: { label: 'Investment dividend', type: 'Income' },
 } as const;
 
 export type ClassificationId = keyof typeof CLASSIFICATIONS;
@@ -113,6 +126,17 @@ const LEGACY_CLASSIFICATION_ALIASES: Readonly<Record<string, ClassificationId>> 
   'other expense': 'other_expense',
   expense_refund: 'expense_refund',
   'expense refund': 'expense_refund',
+  debt_borrowing: 'debt_borrowing',
+  debt_lending: 'debt_lending',
+  debt_principal_repayment: 'debt_principal_repayment',
+  debt_receivable_payment: 'debt_receivable_payment',
+  debt_interest: 'debt_interest',
+  debt_settlement: 'debt_settlement',
+  asset_purchase: 'asset_purchase',
+  asset_sale_proceeds: 'asset_sale_proceeds',
+  investment_purchase: 'investment_purchase',
+  investment_sale_proceeds: 'investment_sale_proceeds',
+  investment_dividend: 'investment_dividend',
 };
 
 export function resolveClassification(value: string): ClassificationId | null {
@@ -128,7 +152,9 @@ export function validateStoredClassification(
   if (value === null) return null;
   const classificationId = resolveClassification(value);
   if (!classificationId) throw new Error('A saved transaction has an unsupported classification.');
-  if (CLASSIFICATIONS[classificationId].type !== transactionType) {
+  // Settlement entries are generated for either direction: paying off a debt
+  // is an expense, while settling a receivable is income.
+  if (CLASSIFICATIONS[classificationId].type !== transactionType && !(classificationId === 'debt_settlement' && (transactionType === 'Income' || transactionType === 'Expense'))) {
     throw new Error('A saved transaction classification does not match its transaction type.');
   }
   return classificationId;

@@ -1,6 +1,6 @@
 import { resolveClassification } from '../../finance/domain.ts';
 
-export const LOCAL_DATABASE_VERSION = 13;
+export const LOCAL_DATABASE_VERSION = 14;
 
 export interface MigrationDatabase {
   execAsync(source: string): Promise<void>;
@@ -1841,6 +1841,7 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
     if (currentVersion < 11) await migrateCloudSavingsSyncV11(database);
     if (currentVersion < 12) await migrateRecurringScheduleSyncV12(database);
     if (currentVersion < 13) await migrateExtendedFinanceSyncV13(database);
+    if (currentVersion < 14) await migrateAccountActivityIndexesV14(database);
     // No server acknowledgement can be verified for the legacy sync flags.
     await database.execAsync('UPDATE Account SET synced = 0 WHERE synced != 0');
     await database.execAsync('UPDATE "Transaction" SET synced = 0 WHERE synced != 0');
@@ -1859,4 +1860,12 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
     }
     await database.execAsync(`PRAGMA user_version = ${LOCAL_DATABASE_VERSION}`);
   });
+}
+
+/** Adds covering indexes for account-specific transaction history and movement summaries. */
+async function migrateAccountActivityIndexesV14(database: MigrationDatabase): Promise<void> {
+  await database.execAsync(`
+    CREATE INDEX IF NOT EXISTS Transaction_owner_account_history_idx ON "Transaction"(ownerId,accountId,date DESC,id DESC);
+    CREATE INDEX IF NOT EXISTS Transaction_owner_destination_history_idx ON "Transaction"(ownerId,toAccountId,date DESC,id DESC);
+  `);
 }

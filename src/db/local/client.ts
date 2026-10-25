@@ -6,8 +6,6 @@ import { getSqliteFile } from './sqliteFile';
 import { Platform, Share } from 'react-native';
 import {
   normalizeAccountDraft,
-  resolveClassification,
-  CLASSIFICATIONS,
   normalizeTransactionDraft,
   createValidatedTransaction,
   validateStoredClassification,
@@ -30,7 +28,7 @@ import { createLocalWriteQueue } from './writeQueue';
 import { archiveAccount as archiveAccountRecord, editAccount } from '../../finance/accountOperations';
 import { assertCorrectionCanPost, resolveRefundAmount } from '../../finance/transactionOperations';
 import { buildFinancialReportQuery, type FinancialReportRow } from '../../finance/reporting';
-import { buildAccountBalanceQuery, buildRecentAccountPreferenceQuery, buildTransactionListQuery, buildTransactionPagePredicate, type TransactionFilters } from './queryBuilders';
+import { buildAccountActivitySummaryQuery, buildAccountBalanceQuery, buildRecentAccountPreferenceQuery, buildTransactionListQuery, buildTransactionPagePredicate, type TransactionFilters } from './queryBuilders';
 import { createBudgetingStore, type BudgetingSql } from './budgetingStore';
 import { createObligationsStore, type ObligationsSql } from './obligationsStore';
 import { createAssetsInvestmentsStore, type AssetSql } from './assetsInvestmentsStore';
@@ -352,6 +350,15 @@ export interface TransactionListFilters {
   accountId?: string;
   categoryId?: string;
   currency?: CurrencyCode;
+}
+
+export interface AccountActivitySummary {
+  accountId: string;
+  openingBalanceMinor: number;
+  currentBalanceMinor: number;
+  inflowMinor: number;
+  outflowMinor: number;
+  transactionCount: number;
 }
 
 function validateAccountRow(row: AccountRow): Omit<AccountRow, 'currency' | 'synced'> & { currency: CurrencyCode; synced: boolean } {
@@ -948,8 +955,8 @@ export const localDb = {
             if (existing && existing.ownerId !== ownerId) throw new Error('A cloud transaction ID collides with another local profile.');
             const categoryId = String(p.classificationId ?? ''); const categoryLabel = String(p.categoryLabel ?? categoryId);
             const toAccountId = typeof p.toAccountId === 'string' ? p.toAccountId : null;
-            const resolvedClassification = resolveClassification(categoryId);
-            if ((type === 'Income' && (!resolvedClassification || CLASSIFICATIONS[resolvedClassification].type !== 'Income')) || (type === 'Expense' && (!resolvedClassification || CLASSIFICATIONS[resolvedClassification].type !== 'Expense')) || (type === 'Transfer' && categoryId !== 'internal_transfer') || (type === 'Refund' && (categoryId !== 'expense_refund' || typeof p.refundOfId !== 'string')) || (type === 'Reversal' && (categoryId !== 'correction_reversal' || typeof p.reversalOfId !== 'string'))) throw new Error('A cloud transaction classification is unsupported.');
+            if ((type === 'Income' || type === 'Expense') && !validateStoredClassification(type, categoryId)) throw new Error('A cloud transaction classification is unsupported.');
+            if ((type === 'Transfer' && categoryId !== 'internal_transfer') || (type === 'Refund' && (categoryId !== 'expense_refund' || typeof p.refundOfId !== 'string')) || (type === 'Reversal' && (categoryId !== 'correction_reversal' || typeof p.reversalOfId !== 'string'))) throw new Error('A cloud transaction classification is unsupported.');
             const sourceAccount = await transaction.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[sourceAccountId,ownerId]);
             const destinationAccount = toAccountId ? await transaction.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[toAccountId,ownerId]) : null;
             const hasTransferDestination=type==='Transfer'||(type==='Reversal'&&toAccountId!==null);
@@ -1622,6 +1629,17 @@ export const localDb = {
   },
 
   transaction: {
+    findAccountSummary: async (ownerId: string, accountId: string): Promise<AccountActivitySummary | null> => {
+      const database = await getDb();
+      const query = buildAccountActivitySummaryQuery(ownerId, accountId);
+      const row = await database.getFirstAsync<AccountActivitySummary>(query.sql, query.params);
+      if (!row) return null;
+      for (const field of ['openingBalanceMinor', 'currentBalanceMinor', 'inflowMinor', 'outflowMinor', 'transactionCount'] as const) {
+        if (!Number.isSafeInteger(row[field]) || row[field] < 0) throw new Error(`Account ${accountId} has an invalid ${field} summary.`);
+      }
+      return row;
+    },
+
     findRecentAccountId: async (ownerId: string, type: 'Expense' | 'Income' | 'Transfer'): Promise<string | null> => {
       const database = await getDb();
       const query = buildRecentAccountPreferenceQuery(ownerId, type);
@@ -1855,12 +1873,6 @@ export const localDb = {
             'SELECT currency,type FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL', [record.accountId,record.ownerId],
           );
           if (!source) throw new Error('The transaction account is unavailable.');
-          const destination = record.toAccountId ? await transaction.getFirstAsync<{ currency: string; type: string }>(
-            'SELECT currency,type FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL', [record.toAccountId,record.ownerId],
-          ) : null;
-          if (cloudUserId && (!['cash','bank','wallet','savings'].includes(source.type) || (destination && !['cash','bank','wallet','savings'].includes(destination.type)))) {
-            throw new Error('This account type is not supported by cloud sync yet. The transaction was not saved.');
-          }
           if (cloudUserId) {
             const type = record.type === 'Income' ? 'income' : record.type === 'Expense' ? 'expense' : 'transfer';
             const payload: CloudTransactionPayload = {

@@ -18,6 +18,12 @@ export interface LiquidityPosition {
   currentBalanceMinor: number;
   reservedMinor: number;
   availableMinor: number;
+  physicalCashBalanceMinor: number;
+  physicalCashReservedMinor: number;
+  physicalCashAvailableMinor: number;
+  bankAndMobileBalanceMinor: number;
+  bankAndMobileReservedMinor: number;
+  bankAndMobileAvailableMinor: number;
 }
 
 function safeMinor(value: bigint, label: string): number {
@@ -45,22 +51,43 @@ export function calculateLiquidityPositions(
 
   const balances = new Map<CurrencyCode, bigint>();
   const reserved = new Map<CurrencyCode, bigint>();
+  const physicalCashBalances = new Map<CurrencyCode, bigint>();
+  const physicalCashReserved = new Map<CurrencyCode, bigint>();
+  const bankAndMobileBalances = new Map<CurrencyCode, bigint>();
+  const bankAndMobileReserved = new Map<CurrencyCode, bigint>();
   for (const account of accounts) {
     if (account.archivedAt !== null || !['cash', 'bank', 'savings', 'wallet'].includes(normalizeAccountType(account.type) ?? '')) continue;
     if (!isCurrencyCode(account.currency)) throw new Error(`Account ${account.id} has an unsupported currency.`);
     const currency = account.currency;
+    const balance = BigInt(account.balanceMinor);
+    const accountReservation = reservationsByAccount.get(account.id) ?? 0n;
     balances.set(currency, (balances.get(currency) ?? 0n) + BigInt(account.balanceMinor));
-    reserved.set(currency, (reserved.get(currency) ?? 0n) + (reservationsByAccount.get(account.id) ?? 0n));
+    reserved.set(currency, (reserved.get(currency) ?? 0n) + accountReservation);
+    const isPhysicalCash = normalizeAccountType(account.type) === 'cash';
+    const balanceByType = isPhysicalCash ? physicalCashBalances : bankAndMobileBalances;
+    const reservedByType = isPhysicalCash ? physicalCashReserved : bankAndMobileReserved;
+    balanceByType.set(currency, (balanceByType.get(currency) ?? 0n) + balance);
+    reservedByType.set(currency, (reservedByType.get(currency) ?? 0n) + accountReservation);
   }
 
   return [...new Set([...balances.keys(), ...reserved.keys()])].sort().map((currency) => {
     const currentBalanceMinor = safeMinor(balances.get(currency) ?? 0n, 'Liquid balance');
     const reservedMinor = safeMinor(reserved.get(currency) ?? 0n, 'Reserved balance');
+    const physicalCashBalanceMinor = safeMinor(physicalCashBalances.get(currency) ?? 0n, 'Physical cash balance');
+    const physicalCashReservedMinor = safeMinor(physicalCashReserved.get(currency) ?? 0n, 'Physical cash reservation');
+    const bankAndMobileBalanceMinor = safeMinor(bankAndMobileBalances.get(currency) ?? 0n, 'Bank and mobile balance');
+    const bankAndMobileReservedMinor = safeMinor(bankAndMobileReserved.get(currency) ?? 0n, 'Bank and mobile reservation');
     return {
       currency,
       currentBalanceMinor,
       reservedMinor,
       availableMinor: safeMinor(BigInt(currentBalanceMinor) - BigInt(reservedMinor), 'Available balance'),
+      physicalCashBalanceMinor,
+      physicalCashReservedMinor,
+      physicalCashAvailableMinor: safeMinor(BigInt(physicalCashBalanceMinor) - BigInt(physicalCashReservedMinor), 'Available physical cash'),
+      bankAndMobileBalanceMinor,
+      bankAndMobileReservedMinor,
+      bankAndMobileAvailableMinor: safeMinor(BigInt(bankAndMobileBalanceMinor) - BigInt(bankAndMobileReservedMinor), 'Available bank and mobile funds'),
     };
   });
 }

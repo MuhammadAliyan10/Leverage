@@ -158,16 +158,18 @@ export default function DashboardScreen() {
         <Pressable accessibilityRole="button" onPress={() => router.replace('/onboarding')} className="houselog-button mt-4 min-h-12 flex-row items-center justify-center px-4"><Plus size={18} color="white" /><Text className="font-body ml-2 font-bold text-white">Create an account</Text></Pressable>
       </Surface> : null}
 
-      <SectionTitle title="Cash & available funds" action="Accounts" onPress={() => router.push('/accounts')} />
+      <SectionTitle title="Liquid funds" action="Accounts" onPress={() => router.push('/accounts')} />
       {hasAccounts ? metrics.liquidity.map((position) => <Surface key={position.currency} className="mb-3">
-        <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{position.currency} · active liquid accounts</Text>
+        <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{position.currency} · active liquid funds</Text>
         <Text style={strongNumber} className="mt-1 text-2xl text-gray-900 dark:text-white">{money(position.currentBalanceMinor, position.currency)}</Text>
         <View className="mt-3 flex-row flex-wrap border-t border-gray-100 pt-3 dark:border-neutral-800">
+          <View className="mb-3 w-1/2 pr-2"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Physical cash</Text><Text className="font-body mt-1 font-semibold text-gray-800 dark:text-neutral-200">{money(position.physicalCashBalanceMinor, position.currency)}</Text></View>
+          <View className="mb-3 w-1/2 pl-2"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Bank, mobile & savings</Text><Text className="font-body mt-1 font-semibold text-gray-800 dark:text-neutral-200">{money(position.bankAndMobileBalanceMinor, position.currency)}</Text></View>
           <View className="mr-6"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Reserved for savings</Text><Text className="font-body mt-1 font-semibold text-gray-800 dark:text-neutral-200">{money(position.reservedMinor, position.currency)}</Text></View>
           <View><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Available unreserved</Text><Text className="font-body mt-1 font-semibold text-primary">{money(position.availableMinor, position.currency)}</Text></View>
         </View>
       </Surface>) : <Surface><Text className="font-body font-semibold text-gray-900 dark:text-white">No active liquid accounts</Text><Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">Archived accounts remain in your financial history and net worth.</Text></Surface>}
-      <Text className="font-body mt-1 text-xs leading-4 text-gray-500 dark:text-neutral-400">Available funds are shown by currency. Liquid includes active cash, bank, savings and wallet accounts; investments and other assets are excluded.</Text>
+      <Text className="font-body mt-1 text-xs leading-4 text-gray-500 dark:text-neutral-400">Physical cash is separate from money held in bank, mobile-wallet and savings accounts. Liquid totals include both; investments and other assets are excluded.</Text>
 
       <SectionTitle title="Net worth" action="Assets & debts" onPress={() => router.push('/assets')} />
       {visibleNetWorth.length ? visibleNetWorth.map((position) => <Pressable key={position.currency} accessibilityRole="button" accessibilityLabel={`Open assets and investments for ${position.currency}`} onPress={() => router.push('/assets')}><Surface className="mb-3">

@@ -84,6 +84,18 @@ test('stored records with invalid transaction types or mismatched classification
   assert.throws(() => validateStoredClassification('Income', 'not-a-category'), /unsupported classification/);
 });
 
+test('linked debt, asset, and investment cash classifications survive cloud change-feed validation', () => {
+  for (const [type, classification] of [
+    ['Income', 'debt_borrowing'], ['Income', 'debt_receivable_payment'], ['Income', 'asset_sale_proceeds'],
+    ['Income', 'investment_sale_proceeds'], ['Income', 'investment_dividend'],
+    ['Expense', 'debt_lending'], ['Expense', 'debt_principal_repayment'], ['Expense', 'debt_interest'],
+    ['Expense', 'asset_purchase'], ['Expense', 'investment_purchase'],
+    ['Income', 'debt_settlement'], ['Expense', 'debt_settlement'],
+  ]) assert.equal(validateStoredClassification(type, classification), classification);
+  assert.throws(() => validateStoredClassification('Expense', 'asset_sale_proceeds'), /does not match/);
+  assert.throws(() => validateStoredClassification('Income', 'investment_purchase'), /does not match/);
+});
+
 test('remittance requires complete provenance and an exactly matching converted PKR amount', () => {
   const remittance = {
     id: 'remit-1', ownerId: 'user-1', amountMinor: 2_801_250, type: 'Income',

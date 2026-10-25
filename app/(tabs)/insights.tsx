@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { BarChart, LineChart, PieChart } from 'react-native-gifted-charts';
-import { ArrowUpRight, Banknote, BriefcaseBusiness, Car, CircleHelp, Coffee, CreditCard, Gift, Heart, Home, PiggyBank, RefreshCw, ShoppingBag, ShoppingCart, Wallet, Zap } from 'lucide-react-native';
+import { PieChart } from 'react-native-gifted-charts';
+import Svg, { Circle, Line, Path, Text as SvgText } from 'react-native-svg';
+import { ArrowUpRight, Banknote, BriefcaseBusiness, Car, CircleHelp, Coffee, CreditCard, Gift, Heart, Home, PiggyBank, RefreshCw, ShoppingBag, ShoppingCart, TrendingDown, TrendingUp, Wallet, Zap } from 'lucide-react-native';
 import type { LucideIcon } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useColorScheme } from 'nativewind';
@@ -12,15 +13,17 @@ import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 import { CLASSIFICATIONS } from '../../src/finance/domain';
 import { formatMinorUnits } from '../../src/finance/ledger';
 import { INSIGHTS_PERIODS, type InsightsPeriod } from '../../src/finance/insights';
+import { transactionDateTimestamp } from '../../src/finance/reporting';
 
 const CATEGORY_STYLE: Record<string, { color: string; icon: LucideIcon }> = {
   food: { color: '#F59E0B', icon: ShoppingCart }, groceries: { color: '#F59E0B', icon: ShoppingCart },
   transport: { color: '#2D8CFF', icon: Car }, bills: { color: '#E59A22', icon: Zap },
   shopping: { color: '#D946EF', icon: ShoppingBag }, health: { color: '#E34D59', icon: Heart },
-  bank_fee: { color: '#64748B', icon: CreditCard }, housing: { color: '#8B5CF6', icon: Home },
-  other_expense: { color: '#94A3B8', icon: CircleHelp }, 'rent & utilities': { color: '#8B5CF6', icon: Home },
+  bank_fee: { color: '#14B8A6', icon: CreditCard }, housing: { color: '#8B5CF6', icon: Home },
+  other_expense: { color: '#22C55E', icon: CircleHelp }, 'rent & utilities': { color: '#8B5CF6', icon: Home },
   entertainment: { color: '#D946EF', icon: Coffee },
 };
+const CATEGORY_FALLBACK_COLORS = ['#06B6D4', '#F43F5E', '#84CC16', '#A855F7', '#0EA5E9', '#F97316'];
 const INCOME_STYLE: Record<string, { color: string; icon: LucideIcon }> = {
   salary: { color: '#15966A', icon: BriefcaseBusiness }, freelance: { color: '#18A999', icon: BriefcaseBusiness },
   business_revenue: { color: '#25A36F', icon: BriefcaseBusiness }, family_gift: { color: '#8B5CF6', icon: Gift },
@@ -32,6 +35,14 @@ const ORANGE = '#EF8B36';
 
 function safeRatio(numerator: number, denominator: number): number {
   return denominator > 0 ? Math.min(1, Math.max(0, numerator / denominator)) : 0;
+}
+
+function categoryStyle(category: string) {
+  const key = category.trim().toLowerCase();
+  const known = CATEGORY_STYLE[key];
+  if (known) return known;
+  const hash = [...key].reduce((value, character) => (value * 31 + character.charCodeAt(0)) >>> 0, 0);
+  return { color: CATEGORY_FALLBACK_COLORS[hash % CATEGORY_FALLBACK_COLORS.length]!, icon: CircleHelp };
 }
 
 function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
@@ -50,21 +61,19 @@ export default function InsightsScreen() {
   const [period, setPeriod] = useState<InsightsPeriod>('This month');
   const [currencyPreference, setCurrencyPreference] = useState<string | null>(null);
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
-  const { width } = useWindowDimensions();
   const { colorScheme } = useColorScheme();
   const router = useRouter();
+  const { width } = useWindowDimensions();
   const dark = colorScheme === 'dark';
-  const axisColor = dark ? '#A3A3A3' : '#737987';
   const dataQuery = useInsightsMetrics(period, currencyPreference);
   const data = dataQuery.data;
-  const chartWidth = Math.max(225, width - 100);
   const selectedPoint = data?.monthReportRows.find((point) => point.id === selectedMonth) ?? data?.monthReportRows.at(-1);
   const selectedLiquidity = data?.liquidity.find((position) => position.currency === data.currency);
   const selectedNetWorth = data?.netWorth.find((position) => position.currency === data.currency);
   const activityScale = data ? Math.max(Math.abs(data.report.incomeMinor), Math.abs(data.report.expenseMinor), 1) : 1;
 
   const pieData = useMemo(() => (data?.categories ?? []).filter((item) => item.amountMinor > 0).map((item) => {
-    const style = CATEGORY_STYLE[item.category.toLowerCase()] ?? { color: '#94A3B8', icon: CircleHelp };
+    const style = categoryStyle(item.category);
     return { value: item.amountMinor / 100, color: style.color, text: CLASSIFICATIONS[item.category as keyof typeof CLASSIFICATIONS]?.label ?? item.category };
   }), [data?.categories]);
 
@@ -72,11 +81,21 @@ export default function InsightsScreen() {
     router.push({ pathname: '/transactions', params: Object.fromEntries(Object.entries(filters).filter(([, value]) => !!value)) });
   };
 
-  const chartData = useMemo(() => (data?.monthReportRows ?? []).flatMap((point) => [
-    { value: point.incomeMinor / 100, label: point.label, frontColor: GREEN, spacing: 3, onPress: () => setSelectedMonth(point.id) },
-    { value: point.expenseMinor / 100, label: '', frontColor: ORANGE, spacing: 17, onPress: () => setSelectedMonth(point.id) },
-  ]), [data?.monthReportRows]);
-  const trendData = useMemo(() => (data?.spendingTrend ?? []).map((point) => ({ value: Math.max(0, point.amountMinor) / 100, label: point.label })), [data?.spendingTrend]);
+  const goExpenseDay = (expense: { category: string; date: string }) => {
+    const occurredAt = new Date(transactionDateTimestamp(expense.date));
+    const start = new Date(occurredAt.getFullYear(), occurredAt.getMonth(), occurredAt.getDate());
+    const end = new Date(occurredAt.getFullYear(), occurredAt.getMonth(), occurredAt.getDate() + 1);
+    const dayKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    goTransactions({ categoryId: expense.category, currency: data?.currency, startDate: dayKey(start), endDate: dayKey(end) });
+  };
+
+  const monthlyMax = Math.max(1, ...(data?.monthReportRows ?? []).flatMap((point) => [point.incomeMinor, point.expenseMinor]));
+  const trendPoints = data?.spendingTrend ?? [];
+  const highestTrend = trendPoints.reduce<(typeof trendPoints)[number] | null>((top, current) => !top || current.amountMinor > top.amountMinor ? current : top, null);
+  const trendFrequency = period === 'This month' || period === 'Last month' ? 'day' : 'month';
+  const spendingShare = data && data.report.incomeMinor > 0 ? data.report.expenseMinor / data.report.incomeMinor : null;
+  const spendingShareLabel = spendingShare === null ? '—' : spendingShare > 1 ? '>100%' : `${Math.round(Math.max(0, spendingShare) * 100)}%`;
+  const trendChartWidth = Math.max(240, width - 64);
 
   return (
     <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['top']}>
@@ -111,13 +130,28 @@ export default function InsightsScreen() {
                 <Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">Net ordinary spending</Text>
               </View>
             </View>
-            <View className={`mt-3 rounded-xl border-l-4 p-3 ${data.report.netMinor >= 0 ? 'border-emerald-600 bg-gray-50 dark:bg-neutral-800' : 'border-red-500 bg-gray-50 dark:bg-neutral-800'}`}>
-              <Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Income minus spending</Text>
-              <Money amount={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? GREEN : '#DC4C4C'} className="mt-1 text-2xl" />
-              <Text className="mt-1 font-body text-xs text-gray-500 dark:text-neutral-400">{data.report.netMinor >= 0 ? 'Recorded income is above ordinary spending.' : 'Ordinary spending is above recorded income.'}</Text>
+            <View className={`mt-3 flex-row items-center rounded-2xl border p-4 ${data.report.netMinor >= 0 ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-900/60 dark:bg-emerald-950/30' : 'border-red-200 bg-red-50 dark:border-red-900/60 dark:bg-red-950/30'}`}>
+              <View className="mr-3 flex-1">
+                <View className="mb-1.5 flex-row items-center">
+                  <View className={`mr-2 h-7 w-7 items-center justify-center rounded-full ${data.report.netMinor >= 0 ? 'bg-emerald-100 dark:bg-emerald-900/60' : 'bg-red-100 dark:bg-red-900/60'}`}>
+                    {data.report.netMinor >= 0 ? <TrendingUp size={15} color={GREEN} /> : <TrendingDown size={15} color="#DC4C4C" />}
+                  </View>
+                  <Text className="font-body text-xs font-bold text-gray-700 dark:text-neutral-200">{data.report.netMinor >= 0 ? 'Surplus' : 'Shortfall'}</Text>
+                </View>
+                <Money amount={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? GREEN : '#DC4C4C'} className="text-2xl" />
+                <Text className="mt-1 font-body text-xs text-gray-600 dark:text-neutral-300">{data.report.netMinor >= 0 ? 'Income is above ordinary spending.' : 'Ordinary spending is above income.'}</Text>
+              </View>
+              <View accessibilityRole="image" accessibilityLabel={spendingShare === null ? 'No recorded income to calculate spending share.' : `${spendingShareLabel} of recorded income used for ordinary spending.`} className="h-[68px] w-[68px] items-center justify-center">
+                <Svg width={68} height={68} viewBox="0 0 68 68">
+                  <Circle cx={34} cy={34} r={27} fill="none" stroke={dark ? '#404040' : '#E5E7EB'} strokeWidth={7} />
+                  <Circle cx={34} cy={34} r={27} fill="none" stroke={spendingShare !== null && spendingShare > 1 ? '#DC4C4C' : ORANGE} strokeWidth={7} strokeDasharray={`${2 * Math.PI * 27}`} strokeDashoffset={`${2 * Math.PI * 27 * (1 - Math.min(1, Math.max(0, spendingShare ?? 0)))}`} strokeLinecap="round" transform="rotate(-90 34 34)" />
+                </Svg>
+                <Text className="absolute font-heading text-xs font-bold text-gray-800 dark:text-white">{spendingShareLabel}</Text>
+              </View>
             </View>
+            <Text className="mt-2 text-right font-body text-[10px] text-gray-500 dark:text-neutral-400">{spendingShare === null ? 'No income recorded' : data.report.expenseMinor < 0 ? 'Net refunds exceeded spending' : 'of income spent'}</Text>
             <View className="mt-3 flex-row gap-3">
-              <View className="min-w-0 flex-1 rounded-xl bg-sky-50 p-3 dark:bg-sky-950/30"><Text className="font-body text-[11px] font-medium text-gray-600 dark:text-neutral-300">Available cash · {data.currency}</Text><Money amount={selectedLiquidity?.availableMinor ?? 0} currency={data.currency} color="#2D8CFF" className="mt-1 text-base"/><Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">After savings reservations</Text></View>
+              <View className="min-w-0 flex-1 rounded-xl bg-sky-50 p-3 dark:bg-sky-950/30"><Text className="font-body text-[11px] font-medium text-gray-600 dark:text-neutral-300">Available liquid funds · {data.currency}</Text><Money amount={selectedLiquidity?.availableMinor ?? 0} currency={data.currency} color="#2D8CFF" className="mt-1 text-base"/><Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">Cash {formatMinorUnits(selectedLiquidity?.physicalCashAvailableMinor ?? 0, data.currency)} · Bank/mobile {formatMinorUnits(selectedLiquidity?.bankAndMobileAvailableMinor ?? 0, data.currency)}</Text></View>
               <View className="min-w-0 flex-1 rounded-xl bg-violet-50 p-3 dark:bg-violet-950/30"><Text className="font-body text-[11px] font-medium text-gray-600 dark:text-neutral-300">Known net worth · {data.currency}</Text>{selectedNetWorth ? <Money amount={selectedNetWorth.netWorthMinor} currency={data.currency} color="#7C4DCE" className="mt-1 text-base"/> : <Text className="mt-1 font-heading text-base font-bold text-gray-500 dark:text-neutral-400">—</Text>}<Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">Includes saved asset estimates</Text></View>
             </View>
             <View className="mt-4 flex-row flex-wrap gap-y-3 border-t border-gray-100 pt-3 dark:border-neutral-800">
@@ -129,10 +163,16 @@ export default function InsightsScreen() {
           </Card>
 
           {data.monthReportRows.some((point) => point.incomeMinor !== 0 || point.expenseMinor !== 0) ? <Card>
-            <SectionTitle title="Income vs expenses" hint="Monthly totals from every eligible transaction in the selected period" />
-            {selectedPoint ? <Pressable accessibilityRole="button" onPress={() => goTransactions({ currency: data.currency, startDate: selectedPoint.startDate, endDate: selectedPoint.endDate })} className="mb-3 flex-row items-center justify-between border-l-2 border-primary pl-3"><View><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{selectedPoint.label} · tap to view transactions</Text><Text className="mt-1 font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">Income {formatMinorUnits(selectedPoint.incomeMinor, data.currency)} · Spending {formatMinorUnits(selectedPoint.expenseMinor, data.currency)}</Text></View><ArrowUpRight size={16} color={PRIMARY_COLOR} /></Pressable> : null}
-            <View accessible accessibilityRole="image" accessibilityLabel={`Grouped bars compare income and expenses by month, denominated in ${data.currency}.`}><ScrollView horizontal showsHorizontalScrollIndicator={false}><BarChart data={chartData} barWidth={11} spacing={5} isAnimated={false} height={150} width={chartWidth} noOfSections={4} yAxisLabelWidth={45} yAxisTextStyle={{ color: axisColor, fontSize: 9 }} xAxisLabelTextStyle={{ color: axisColor, fontSize: 9 }} xAxisThickness={0} yAxisThickness={0} hideRules={false} rulesColor={dark ? '#303030' : '#ECEEF2'} /></ScrollView></View>
-            <View className="mt-2 flex-row justify-center gap-5"><Legend color={GREEN} label="Income" /><Legend color={ORANGE} label="Expenses" /></View>
+            <SectionTitle title="Income vs expenses" hint="Compare the two amounts by month. Longer bars mean more money." />
+            {selectedPoint ? <Pressable accessibilityRole="button" onPress={() => goTransactions({ currency: data.currency, startDate: selectedPoint.startDate, endDate: selectedPoint.endDate })} className="mb-3 flex-row items-center justify-between border-l-2 border-primary pl-3"><View><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{selectedPoint.label} · tap to view transactions</Text><Text className="mt-1 font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">In {formatMinorUnits(selectedPoint.incomeMinor, data.currency)} · Out {formatMinorUnits(selectedPoint.expenseMinor, data.currency)}</Text></View><ArrowUpRight size={16} color={PRIMARY_COLOR} /></Pressable> : null}
+            <View accessibilityRole="image" accessibilityLabel={`Monthly horizontal comparisons of income and expenses in ${data.currency}.`}>
+              {data.monthReportRows.map((point) => <Pressable key={point.id} accessibilityRole="button" accessibilityLabel={`${point.label}: income ${formatMinorUnits(point.incomeMinor, data.currency)}, expenses ${formatMinorUnits(point.expenseMinor, data.currency)}. Select month.`} accessibilityState={{ selected: selectedPoint?.id === point.id }} onPress={() => setSelectedMonth(point.id)} className={`mb-3 rounded-xl px-3 py-2 ${selectedPoint?.id === point.id ? 'bg-primary/5 dark:bg-primary/10' : ''}`}>
+                <View className="mb-2 flex-row items-center justify-between"><Text className="font-body text-xs font-bold text-gray-800 dark:text-neutral-100">{point.label}</Text><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{point.incomeMinor - point.expenseMinor >= 0 ? 'Surplus' : 'Shortfall'} {formatMinorUnits(Math.abs(point.incomeMinor - point.expenseMinor), data.currency)}</Text></View>
+                <View className="mb-1.5 flex-row items-center"><Text className="w-11 font-body text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">In</Text><View className="mr-2 h-2 flex-1 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="h-full rounded-full" style={{ width: `${safeRatio(point.incomeMinor, monthlyMax) * 100}%`, backgroundColor: GREEN }} /></View><Text numberOfLines={1} className="w-[82px] text-right font-body text-[10px] font-semibold text-gray-700 dark:text-neutral-200">{formatMinorUnits(point.incomeMinor, data.currency)}</Text></View>
+                <View className="flex-row items-center"><Text className="w-11 font-body text-[10px] font-semibold text-orange-700 dark:text-orange-300">Out</Text><View className="mr-2 h-2 flex-1 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="h-full rounded-full" style={{ width: `${safeRatio(point.expenseMinor, monthlyMax) * 100}%`, backgroundColor: ORANGE }} /></View><Text numberOfLines={1} className="w-[82px] text-right font-body text-[10px] font-semibold text-gray-700 dark:text-neutral-200">{formatMinorUnits(point.expenseMinor, data.currency)}</Text></View>
+              </Pressable>)}
+            </View>
+            <View className="mt-1 flex-row justify-center gap-5"><Legend color={GREEN} label="Income" /><Legend color={ORANGE} label="Expenses" /></View>
           </Card> : <Card><SectionTitle title="Income vs expenses" hint="Monthly totals from every eligible transaction in the selected period" /><Empty text="No income or spending activity has been recorded for this period." /></Card>}
 
           <Card>
@@ -140,19 +180,31 @@ export default function InsightsScreen() {
             {data.categories.length === 0 ? <Empty text="No ordinary expenses recorded in this period." /> : <>
               {pieData.length > 0 ? <View accessible accessibilityRole="image" accessibilityLabel={`Category donut shows positive net category totals of ${formatMinorUnits(data.positiveCategoryTotalMinor, data.currency)}. Refund adjustments are listed separately.`} className="mb-3 items-center"><PieChart donut radius={90} innerRadius={64} data={pieData} centerLabelComponent={() => <View className="items-center"><Text className="font-body text-[11px] text-gray-500 dark:text-neutral-400">Positive category totals</Text><Text className="font-heading text-base font-bold text-gray-900 dark:text-white">{formatMinorUnits(data.positiveCategoryTotalMinor, data.currency)}</Text></View>} /></View> : null}
               {data.categories.map((category) => {
-                const key = category.category.toLowerCase(); const style = CATEGORY_STYLE[key] ?? { color: '#94A3B8', icon: CircleHelp }; const Icon = style.icon;
+                const style = categoryStyle(category.category); const Icon = style.icon;
                 const label = CLASSIFICATIONS[category.category as keyof typeof CLASSIFICATIONS]?.label ?? category.category.replaceAll('_', ' ');
                 const share = category.amountMinor > 0 && data.positiveCategoryTotalMinor > 0 ? category.amountMinor / data.positiveCategoryTotalMinor : 0;
-                return <Pressable key={category.category} accessibilityRole="button" accessibilityLabel={`Show ${label} transactions, ${formatMinorUnits(category.amountMinor, data.currency)}`} onPress={() => goTransactions({ categoryId: category.category, currency: data.currency, startDate: data.currentRange.startDate, endDate: data.currentRange.endDate })} className="mb-3 flex-row items-center"><View className="mr-3 h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: `${style.color}20` }}><Icon size={17} color={style.color} /></View><View className="mr-3 flex-1"><Text className="font-body text-sm font-semibold capitalize text-gray-800 dark:text-neutral-100" numberOfLines={1}>{label}</Text><View className="mt-1 h-1.5 overflow-hidden bg-gray-100 dark:bg-neutral-800"><View className="h-full" style={{ width: `${share * 100}%`, backgroundColor: style.color }} /></View></View><View className="items-end"><Text className="font-body text-sm font-bold" style={{ color: category.amountMinor < 0 ? GREEN : undefined }}>{formatMinorUnits(category.amountMinor, data.currency)}</Text><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{category.amountMinor < 0 ? 'net refund' : `${(share * 100).toFixed(0)}%`}</Text></View></Pressable>;
+                return <Pressable key={category.category} accessibilityRole="button" accessibilityLabel={`Show ${label} transactions, ${formatMinorUnits(category.amountMinor, data.currency)}`} onPress={() => goTransactions({ categoryId: category.category, currency: data.currency, startDate: data.currentRange.startDate, endDate: data.currentRange.endDate })} className="mb-3 flex-row items-center"><View className="mr-3 h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: `${style.color}24` }}><Icon size={17} color={style.color} /></View><View className="mr-3 flex-1"><Text className="font-body text-sm font-semibold capitalize text-gray-800 dark:text-neutral-100" numberOfLines={1}>{label}</Text><View className="mt-1.5 h-2 overflow-hidden rounded-full" style={{ backgroundColor: dark ? `${style.color}30` : `${style.color}20` }}><View className="h-full rounded-full" style={{ width: `${share * 100}%`, backgroundColor: style.color }} /></View></View><View className="items-end"><Text className="font-body text-sm font-bold" style={{ color: category.amountMinor < 0 ? GREEN : style.color }}>{formatMinorUnits(category.amountMinor, data.currency)}</Text><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{category.amountMinor < 0 ? 'net refund' : `${(share * 100).toFixed(0)}%`}</Text></View></Pressable>;
               })}
               {data.categories.some((item) => item.amountMinor < 0) ? <Text className="mt-1 font-body text-xs leading-4 text-gray-500 dark:text-neutral-400">Refund adjustments are signed and shown separately; donut slices include only positive net category spending.</Text> : null}
             </>}
           </Card>
 
-          {data.spendingTrend.length > 0 && data.report.expenseMinor > 0 ? <Card>
-            <SectionTitle title="Spending trend" hint={period === 'This month' || period === 'Last month' ? 'Daily net spending, including zero-activity days' : 'Monthly net spending'} />
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}><LineChart data={trendData} width={chartWidth} height={140} color={ORANGE} thickness={2} hideDataPoints dataPointsColor={ORANGE} hideRules xAxisThickness={0} yAxisThickness={0} xAxisLabelTextStyle={{ color: axisColor, fontSize: 9 }} yAxisTextStyle={{ color: axisColor, fontSize: 9 }} /></ScrollView>
-            {data.spendingTrend.length > 0 ? <Text className="mt-2 font-body text-xs text-gray-600 dark:text-neutral-300">Highest period: {(() => { const highest = data.spendingTrend.reduce((top, current) => current.amountMinor > top.amountMinor ? current : top); return `${highest.label} · ${formatMinorUnits(highest.amountMinor, data.currency)}`; })()}</Text> : null}
+          {data.report.largestExpenses.length > 0 ? <Card>
+            <SectionTitle title="Largest expenses" hint="Highest remaining amounts after linked refunds and corrections" />
+            {data.report.largestExpenses.map((expense) => {
+              const label = CLASSIFICATIONS[expense.category as keyof typeof CLASSIFICATIONS]?.label ?? expense.category.replaceAll('_', ' ');
+              const dateLabel = new Date(transactionDateTimestamp(expense.date)).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+              return <Pressable key={expense.id} accessibilityRole="button" accessibilityLabel={`View ${label} transactions for ${dateLabel}, ${formatMinorUnits(expense.amountMinor, data.currency)}`} onPress={() => goExpenseDay(expense)} className="mb-3 flex-row items-center justify-between rounded-xl bg-gray-50 px-3 py-2.5 dark:bg-neutral-800">
+                <View className="mr-3 min-w-0 flex-1"><Text numberOfLines={1} className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{expense.note.trim() || label}</Text><Text className="mt-0.5 font-body text-[10px] capitalize text-gray-500 dark:text-neutral-400">{label} · {dateLabel} · view day</Text></View>
+                <Money amount={expense.amountMinor} currency={data.currency} color={ORANGE} className="text-sm" />
+              </Pressable>;
+            })}
+          </Card> : null}
+
+          {trendPoints.length > 0 && data.report.expenseMinor > 0 ? <Card>
+            <SectionTitle title="Spending over time" hint={trendFrequency === 'day' ? 'The filled curve shows your net spending each day.' : 'The filled curve shows your net spending each month.'} />
+            <SpendingAreaChart points={trendPoints} width={trendChartWidth} color={ORANGE} dark={dark} />
+            {highestTrend ? <Text className="mt-1 font-body text-xs text-gray-600 dark:text-neutral-300">Peak {trendFrequency}: {highestTrend.label} · {formatMinorUnits(highestTrend.amountMinor, data.currency)}</Text> : null}
           </Card> : null}
 
           {data.incomeSources.length > 0 ? <Card>
@@ -174,8 +226,8 @@ export default function InsightsScreen() {
           </Card> : null}
 
           {data.liquidity.length || data.netWorth.length ? <Card>
-            <SectionTitle title="Liquidity & net worth" hint="Currency totals remain separate; assets are not cash available to spend" />
-            {data.liquidity.filter((position) => position.currency === data.currency).map((position) => <View key={`liq-${position.currency}`} className="mb-3"><View className="mb-1 flex-row items-center"><Wallet size={15} color="#2D8CFF" /><Text className="ml-2 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Cash & bank · {position.currency}</Text></View><View className="flex-row justify-between"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Account balances</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(position.currentBalanceMinor, position.currency)}</Text></View><View className="mt-1 flex-row justify-between"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Reserved · available</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(position.reservedMinor, position.currency)} · {formatMinorUnits(position.availableMinor, position.currency)}</Text></View></View>)}
+            <SectionTitle title="Liquidity & net worth" hint="Physical cash is separate from bank, mobile-wallet and savings-account money" />
+            {data.liquidity.filter((position) => position.currency === data.currency).map((position) => <View key={`liq-${position.currency}`} className="mb-3"><View className="mb-2 flex-row items-center"><Wallet size={15} color="#2D8CFF" /><Text className="ml-2 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Liquid funds · {position.currency}</Text></View><View className="mb-2 flex-row justify-between"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Physical cash</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(position.physicalCashBalanceMinor, position.currency)} · available {formatMinorUnits(position.physicalCashAvailableMinor, position.currency)}</Text></View><View className="mb-2 flex-row justify-between"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Bank, mobile & savings</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(position.bankAndMobileBalanceMinor, position.currency)} · available {formatMinorUnits(position.bankAndMobileAvailableMinor, position.currency)}</Text></View><View className="mt-2 border-t border-gray-100 pt-2 dark:border-neutral-800"><View className="flex-row justify-between"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Total liquid funds</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(position.currentBalanceMinor, position.currency)}</Text></View><View className="mt-1 flex-row justify-between"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Reserved · available total</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(position.reservedMinor, position.currency)} · {formatMinorUnits(position.availableMinor, position.currency)}</Text></View></View></View>)}
             {data.netWorth.map((position) => <View key={`nw-${position.currency}`} className="mb-3 border-t border-gray-100 pt-3 dark:border-neutral-800"><Text className="mb-2 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Net worth · {position.currency}</Text><View className="flex-row flex-wrap gap-y-2"><Position label="Assets" value={position.totalAssetsMinor} currency={position.currency} /><Position label="Liabilities" value={position.liabilitiesMinor} currency={position.currency} /><Position label="Net worth" value={position.netWorthMinor} currency={position.currency} strong /></View></View>)}
             {data.netWorth.filter((position) => position.currency === data.currency).map((position) => <View key={`mix-${position.currency}`} className="mb-2"><Text className="mb-2 font-body text-xs font-semibold text-gray-700 dark:text-neutral-200">Asset allocation · {position.currency}</Text><AssetComponent label="Cash and accounts" value={position.cashMinor} total={position.totalAssetsMinor} currency={position.currency} color="#2D8CFF" /><AssetComponent label="Investments" value={position.investmentsMinor} total={position.totalAssetsMinor} currency={position.currency} color="#8B5CF6" /><AssetComponent label="Physical assets" value={position.physicalAssetsMinor} total={position.totalAssetsMinor} currency={position.currency} color="#E59A22" /><AssetComponent label="Receivables" value={position.receivablesMinor} total={position.totalAssetsMinor} currency={position.currency} color="#15966A" /></View>)}
             <Text className="mt-1 font-body text-[11px] leading-4 text-gray-500 dark:text-neutral-400">A dated net-worth trend is unavailable in Insights because the existing history repository loads unbounded ledger history and reconstructs each snapshot repeatedly. Current positions use saved valuations; {data.staleAssetValuations ? `${data.staleAssetValuations} asset valuation(s) are older than 180 days or undated.` : 'asset estimates may still be stale.'}</Text>
@@ -198,3 +250,40 @@ function Legend({ color, label }: { color: string; label: string }) { return <Vi
 function Empty({ text }: { text: string }) { return <Text className="py-3 font-body text-sm text-gray-500 dark:text-neutral-400">{text}</Text>; }
 function Position({ label, value, currency, strong = false }: { label: string; value: number; currency: string; strong?: boolean }) { return <View className="w-1/3 pr-1"><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{label}</Text><Text className={`mt-0.5 font-body ${strong ? 'text-sm font-bold text-primary' : 'text-xs font-semibold text-gray-800 dark:text-neutral-100'}`}>{formatMinorUnits(value, currency)}</Text></View>; }
 function AssetComponent({ label, value, total, currency, color }: { label: string; value: number; total: number; currency: string; color: string }) { return <View className="mb-2"><View className="mb-1 flex-row justify-between"><Text className="font-body text-xs text-gray-600 dark:text-neutral-300">{label}</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(value, currency)}</Text></View><View className="h-1.5 overflow-hidden bg-gray-100 dark:bg-neutral-800"><View className="h-full" style={{ width: `${value > 0 ? safeRatio(value, total) * 100 : 0}%`, backgroundColor: color }} /></View></View>; }
+
+function SpendingAreaChart({ points, width, color, dark }: { points: { id: string; label: string; amountMinor: number }[]; width: number; color: string; dark: boolean }) {
+  const height = 142;
+  const left = 8;
+  const right = 8;
+  const top = 10;
+  const bottom = 112;
+  const values = points.map((point) => point.amountMinor);
+  const minValue = Math.min(0, ...values);
+  const maxValue = Math.max(1, ...values);
+  const valueRange = maxValue - minValue || 1;
+  const xAt = (index: number) => points.length < 2 ? (width - left - right) / 2 + left : left + (index / (points.length - 1)) * (width - left - right);
+  const yAt = (value: number) => top + ((maxValue - value) / valueRange) * (bottom - top);
+  const coordinates = points.map((point, index) => ({ x: xAt(index), y: yAt(point.amountMinor), point }));
+  const baseline = yAt(0);
+  const linePath = coordinates.map(({ x, y }, index) => `${index === 0 ? 'M' : 'L'} ${x} ${y}`).join(' ');
+  const areaPath = coordinates.length ? `${linePath} L ${coordinates.at(-1)!.x} ${baseline} L ${coordinates[0]!.x} ${baseline} Z` : '';
+  const tickIndices = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
+  const peakIndex = values.reduce((peak, value, index) => value > values[peak]! ? index : peak, 0);
+  const gridColor = dark ? '#353535' : '#E9ECF2';
+  const labelColor = dark ? '#A3A3A3' : '#737987';
+
+  return <View accessible accessibilityRole="image" accessibilityLabel="Area chart of net daily or monthly spending. Dips below the baseline represent net refunds.">
+    <Svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+      {[0, 0.5, 1].map((fraction) => {
+        const y = top + fraction * (bottom - top);
+        return <Line key={fraction} x1={left} x2={width - right} y1={y} y2={y} stroke={gridColor} strokeWidth={1} />;
+      })}
+      {minValue < 0 ? <Line x1={left} x2={width - right} y1={baseline} y2={baseline} stroke={dark ? '#A3A3A3' : '#737987'} strokeDasharray="3 4" strokeWidth={1.2} /> : null}
+      {areaPath ? <Path d={areaPath} fill={color} fillOpacity={dark ? 0.22 : 0.14} /> : null}
+      {linePath ? <Path d={linePath} fill="none" stroke={color} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" /> : null}
+      {coordinates[peakIndex] ? <Circle cx={coordinates[peakIndex]!.x} cy={coordinates[peakIndex]!.y} r={4} fill={color} stroke={dark ? '#171717' : '#FFFFFF'} strokeWidth={2} /> : null}
+      {tickIndices.map((index) => <SvgText key={index} x={xAt(index)} y={height - 4} fill={labelColor} fontSize={10} textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}>{points[index]!.label}</SvgText>)}
+    </Svg>
+    {minValue < 0 ? <Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">The dashed line is zero; dips below it are net refunds.</Text> : null}
+  </View>;
+}

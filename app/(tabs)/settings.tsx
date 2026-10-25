@@ -11,6 +11,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
+import { useAppConfirm } from '../../components/ui/useAppConfirm';
 import { useAuth } from '../../src/context/AuthContext';
 import type { AppearancePreference } from '../../src/security/settingsPreferences';
 import { localDb, type DbUser } from '../../src/db/local/client';
@@ -322,6 +323,7 @@ function RecoveryModal({ visible, onClose, onExport, onRestore }: {
   onExport: (passphrase: string) => Promise<void>;
   onRestore: (backup: Uint8Array, passphrase: string) => Promise<void>;
 }) {
+  const { confirm, dialog } = useAppConfirm();
   const [passphrase, setPassphrase] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -346,13 +348,18 @@ function RecoveryModal({ visible, onClose, onExport, onRestore }: {
     try {
       const bytes = await localDb.recovery.pickEncryptedBackup();
       if (!bytes) { setBusy(false); return; }
-      Alert.alert('Replace local financial records?', 'Leverage will validate the backup first, then replace the records on this device. The current database is preserved unless the restored database passes verification.', [
-        { text: 'Cancel', style: 'cancel', onPress: () => setBusy(false) },
-        { text: 'Validate and restore', style: 'destructive', onPress: () => { void onRestore(bytes, passphrase).catch((cause) => setError(cause instanceof Error ? cause.message : 'Restore failed.')).finally(() => setBusy(false)); } },
-      ]);
+      const confirmed = await confirm({
+        title: 'Replace local financial records?',
+        message: 'Leverage will validate the backup first, then replace the records on this device. The current database is preserved unless the restored database passes verification.',
+        confirmLabel: 'Validate and restore',
+        destructive: true,
+      });
+      if (!confirmed) { setBusy(false); return; }
+      await onRestore(bytes, passphrase);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Backup file could not be opened.'); setBusy(false); }
+    finally { setBusy(false); }
   };
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+  return <><Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1 justify-end bg-black/40">
       <SafeAreaView edges={['bottom']} className="rounded-t-3xl bg-gray-50 px-5 pt-4 dark:bg-neutral-950" style={{ borderBottomLeftRadius: 0, borderBottomRightRadius: 0 }}>
         <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-xl font-bold text-gray-900 dark:text-white">Encrypted backup</Text><Pressable accessibilityRole="button" accessibilityLabel="Close backup" onPress={onClose} className="min-h-11 min-w-11 items-center justify-center rounded-full bg-white dark:bg-neutral-800"><X size={20} color="#687386" /></Pressable></View>
@@ -365,7 +372,7 @@ function RecoveryModal({ visible, onClose, onExport, onRestore }: {
         <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Restore replaces this device’s local records after integrity, schema, profile, and financial checks. A successful restore signs you out.</Text>
       </SafeAreaView>
     </KeyboardAvoidingView>
-  </Modal>;
+  </Modal>{dialog}</>;
 }
 
 function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSaveName, onChangePassword, loadProfiles, onSwitchProfile }: {

@@ -60,8 +60,8 @@ test('backup candidate rejects metadata mismatch, wrong profile, and future sche
     assert.equal(database.prepare('PRAGMA user_version').get().user_version,8);
     await assert.rejects(prepareBackupCandidate(sql,'other-owner',8),/different profile/);
     assert.equal(database.prepare('PRAGMA user_version').get().user_version,8);
-    database.exec('PRAGMA user_version=14');
-    await assert.rejects(prepareBackupCandidate(sql,'backup-owner',14),/incompatible/);
-    assert.equal(database.prepare('PRAGMA user_version').get().user_version,14);
+    database.exec('PRAGMA user_version=15');
+    await assert.rejects(prepareBackupCandidate(sql,'backup-owner',15),/incompatible/);
+    assert.equal(database.prepare('PRAGMA user_version').get().user_version,15);
   } finally { database.close(); }
 });

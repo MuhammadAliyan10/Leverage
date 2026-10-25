@@ -121,6 +121,7 @@ test('liquidity reserves only the amounts earmarked in each active liquid accoun
   assert.deepEqual(calculateLiquidityPositions([
     { id: 'cash-pkr', currency: 'PKR', type: 'cash', archivedAt: null, balanceMinor: 100000 },
     { id: 'bank-pkr', currency: 'PKR', type: 'bank', archivedAt: null, balanceMinor: 50000 },
+    { id: 'jazzcash-pkr', currency: 'PKR', type: 'wallet', archivedAt: null, balanceMinor: 25000 },
     { id: 'cash-usd', currency: 'USD', type: 'wallet', archivedAt: null, balanceMinor: 10000 },
     { id: 'archived', currency: 'PKR', type: 'bank', archivedAt: '2026-01-01T00:00:00.000Z', balanceMinor: 90000 },
     { id: 'portfolio', currency: 'PKR', type: 'investment', archivedAt: null, balanceMinor: 30000 },
@@ -130,8 +131,8 @@ test('liquidity reserves only the amounts earmarked in each active liquid accoun
     { accountId: 'portfolio', amountMinor: 10000 },
     { accountId: 'cash-usd', amountMinor: 3000 },
   ]), [
-    { currency: 'PKR', currentBalanceMinor: 150000, reservedMinor: 12000, availableMinor: 138000 },
-    { currency: 'USD', currentBalanceMinor: 10000, reservedMinor: 3000, availableMinor: 7000 },
+    { currency: 'PKR', currentBalanceMinor: 175000, reservedMinor: 12000, availableMinor: 163000, physicalCashBalanceMinor: 100000, physicalCashReservedMinor: 12000, physicalCashAvailableMinor: 88000, bankAndMobileBalanceMinor: 75000, bankAndMobileReservedMinor: 0, bankAndMobileAvailableMinor: 75000 },
+    { currency: 'USD', currentBalanceMinor: 10000, reservedMinor: 3000, availableMinor: 7000, physicalCashBalanceMinor: 0, physicalCashReservedMinor: 0, physicalCashAvailableMinor: 0, bankAndMobileBalanceMinor: 10000, bankAndMobileReservedMinor: 3000, bankAndMobileAvailableMinor: 7000 },
   ]);
   assert.throws(() => calculateLiquidityPositions([
     { id: 'cash', currency: 'PKR', type: 'cash', archivedAt: null, balanceMinor: 100 },

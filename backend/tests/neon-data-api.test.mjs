@@ -30,6 +30,11 @@ test('Neon RPC bridge posts accounts and transactions atomically with idempotent
   assert.equal((await rpc('account.create', accountId, account, 'account-create-one')).data.id, accountId);
   await assert.rejects(rpc('account.create', accountId, { ...account, name: 'Changed payload' }, 'account-create-one'), /idempotency key reused/);
 
+  for (const [id,type,key] of [
+    ['12111111-1111-4111-8111-111111111111','investment','investment-account'],
+    ['13111111-1111-4111-8111-111111111111','other','other-account'],
+  ]) assert.equal((await rpc('account.create',id,{id,name:`${type} account`,type,currency:'PKR',openingBalanceMinor:'0'},key)).data.type,type);
+
   const expenseId = '22222222-2222-4222-8222-222222222222';
   const expense = { id: expenseId, type: 'expense', amountMinor: '2500', currency: 'PKR', classificationId: 'food', categoryLabel: 'Food', accountId, occurredAt: '2026-10-24T10:00:00.000Z', taxStatus: 'unreviewed' };
   assert.equal((await rpc('transaction.create', expenseId, expense, 'expense-create-one')).data.id, expenseId);
@@ -41,7 +46,7 @@ test('Neon RPC bridge posts accounts and transactions atomically with idempotent
   await db.query("SELECT set_config('test.neon_user_id','neon-user-2',false)");
   const otherIdentity = (await db.query('SELECT public.mizan_sync_identity() AS result')).rows[0].result;
   assert.equal(otherIdentity.userId, 'neon-user-2');
-  assert.equal((await db.query(`SELECT count(*)::int AS n FROM public."FinanceAccount" WHERE "userId"='neon-user-1'`)).rows[0].n, 1);
+  assert.equal((await db.query(`SELECT count(*)::int AS n FROM public."FinanceAccount" WHERE "userId"='neon-user-1'`)).rows[0].n, 3);
 });
 
 test('Neon transaction RPC preserves transfer, partial-refund, and correction constraints', async () => {
@@ -137,8 +142,30 @@ test('Neon RPC synchronizes obligations, assets and investments with owner-scope
   const holdingId='e6666666-6666-4666-8666-666666666666';
   await rpc('domain.create',holdingId,{entityType:'investment_holding',id:holdingId,parentType:'investment_portfolio',parentId:portfolioId,accountId:null,transactionId:null,scheduleId:null,data:{id:holdingId,portfolioId,symbol:'ABC',name:'Example',category:'stock',currency:'PKR'}},'domain-holding-create');
 
+  const assetCashTx='e8888888-8888-4888-8888-888888888888';
+  await rpc('transaction.create',assetCashTx,{id:assetCashTx,type:'expense',amountMinor:'8000000',currency:'PKR',classificationId:'asset_purchase',categoryLabel:'Asset purchase',accountId,occurredAt:'2026-10-24T01:00:00Z',taxStatus:'not_applicable'},'asset-purchase-cash');
+  const assetActivityId='e9999999-9999-4999-8999-999999999999';
+  const assetActivity={entityType:'asset_activity',id:assetActivityId,parentType:'asset',parentId:assetId,accountId,transactionId:assetCashTx,scheduleId:null,data:{id:assetActivityId,assetId,eventType:'acquisition',ownershipBps:10000,costBasisMinor:'8000000',proceedsMinor:'0',accountId,transactionId:assetCashTx,eventDate:'2026-10-24',idempotencyKey:'laptop-acquisition'}};
+  await rpc('domain.create',assetActivityId,assetActivity,'asset-activity-create');
+  assert.equal((await rpc('domain.create',assetActivityId,assetActivity,'asset-activity-create')).data.id,assetActivityId);
+
+  const investmentCashTx='eaaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  await rpc('transaction.create',investmentCashTx,{id:investmentCashTx,type:'expense',amountMinor:'10200',currency:'PKR',classificationId:'investment_purchase',categoryLabel:'Investment purchase',accountId,occurredAt:'2026-10-24T02:00:00Z',taxStatus:'not_applicable'},'investment-buy-cash');
+  const investmentEventId='ebbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const investmentEvent={entityType:'investment_event',id:investmentEventId,parentType:'investment_holding',parentId:holdingId,accountId:null,transactionId:investmentCashTx,scheduleId:null,data:{id:investmentEventId,holdingId,eventType:'buy',quantityMicros:'1000000',unitPriceMinor:'10000',feeMinor:'200',amountMinor:'10000',splitNumerator:null,splitDenominator:null,transactionId:investmentCashTx,eventDate:'2026-10-24',idempotencyKey:'buy-1'}};
+  await rpc('domain.create',investmentEventId,investmentEvent,'investment-event-create');
+  assert.equal((await rpc('domain.create',investmentEventId,investmentEvent,'investment-event-create')).data.id,investmentEventId);
+  await assert.rejects(rpc('domain.create','eccccccc-cccc-4ccc-8ccc-cccccccccccc',{...investmentEvent,id:'eccccccc-cccc-4ccc-8ccc-cccccccccccc',data:{...investmentEvent.data,id:'eccccccc-cccc-4ccc-8ccc-cccccccccccc',amountMinor:'10001',idempotencyKey:'bad-buy'}},'investment-event-mismatch'),/investment event transaction does not match/);
+
+  const debtId='eddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  await rpc('domain.create',debtId,{entityType:'debt',id:debtId,parentType:null,parentId:null,accountId,transactionId:null,scheduleId:null,data:{id:debtId,direction:'borrowed',counterparty:'Family',principalMinor:'50000',currency:'PKR',accountId,interestRateBps:0,openedAt:'2026-10-24',dueDate:null,status:'open'}},'debt-create-linked');
+  const debtCashTx='eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  await rpc('transaction.create',debtCashTx,{id:debtCashTx,type:'income',amountMinor:'50000',currency:'PKR',classificationId:'debt_borrowing',categoryLabel:'Borrowed principal received',accountId,occurredAt:'2026-10-24T03:00:00Z',taxStatus:'not_applicable'},'debt-borrow-cash');
+  const debtEventId='efffffff-ffff-4fff-8fff-ffffffffffff';
+  await rpc('domain.create',debtEventId,{entityType:'debt_event',id:debtEventId,parentType:'debt',parentId:debtId,accountId,transactionId:debtCashTx,scheduleId:null,data:{id:debtEventId,debtId,eventType:'borrow',principalMinor:'50000',interestMinor:'0',accountId,transactionId:debtCashTx,eventDate:'2026-10-24',idempotencyKey:'borrow-1'}},'debt-event-linked');
+
   const rows=await db.query(`SELECT "entityType",count(*)::int AS n FROM public."FinanceDomainRecord" WHERE "userId"='neon-user-1' GROUP BY "entityType" ORDER BY "entityType"`);
-  assert.deepEqual(rows.rows.map((row)=>[row.entityType,row.n]),[['asset',1],['asset_valuation',1],['bill',1],['bill_payment',1],['investment_holding',1],['investment_portfolio',1]]);
+  assert.deepEqual(rows.rows.map((row)=>[row.entityType,row.n]),[['asset',1],['asset_activity',1],['asset_valuation',1],['bill',1],['bill_payment',1],['debt',1],['debt_event',1],['investment_event',1],['investment_holding',1],['investment_portfolio',1]]);
   await db.query("SELECT set_config('test.neon_user_id','neon-user-2',false)");
   await assert.rejects(rpc('domain.create','cross-owner',{entityType:'asset_valuation',id:'cross-owner',parentType:'asset',parentId:assetId,accountId:null,transactionId:null,scheduleId:null,data:{id:'cross-owner',assetId,valueMinor:'1',valuationDate:'2026-10-24',source:'manual',idempotencyKey:'x'}},'cross-owner-domain'),/foreign key|violates/);
   await db.query("SELECT set_config('test.neon_user_id','neon-user-1',false)");

@@ -56,6 +56,49 @@ export function buildAccountBalanceQuery(ownerId: string, includeArchived = fals
   };
 }
 
+/** Full account-specific movement totals; never depends on the transaction list's page size. */
+export function buildAccountActivitySummaryQuery(ownerId: string, accountId: string): { sql: string; params: string[] } {
+  if (!ownerId.trim() || !accountId.trim()) throw new Error('A profile and account are required to summarize account activity.');
+  return {
+    sql: `WITH movements(accountId,inflowMinor,outflowMinor) AS (
+      SELECT t.accountId,t.amountMinor,0 FROM "Transaction" t
+        WHERE t.ownerId=? AND t.accountId=? AND t.type IN ('Income','Refund')
+      UNION ALL
+      SELECT t.accountId,0,t.amountMinor FROM "Transaction" t
+        WHERE t.ownerId=? AND t.accountId=? AND t.type='Expense'
+      UNION ALL
+      SELECT t.accountId,0,t.amountMinor FROM "Transaction" t
+        WHERE t.ownerId=? AND t.accountId=? AND t.type='Transfer'
+      UNION ALL
+      SELECT t.toAccountId,t.amountMinor,0 FROM "Transaction" t
+        WHERE t.ownerId=? AND t.toAccountId=? AND t.type='Transfer'
+      UNION ALL
+      SELECT t.accountId,CASE original.type WHEN 'Expense' THEN t.amountMinor ELSE 0 END,
+        CASE original.type WHEN 'Income' THEN t.amountMinor ELSE 0 END
+        FROM "Transaction" t JOIN "Transaction" original ON original.id=t.reversalOfId AND original.ownerId=t.ownerId
+        WHERE t.ownerId=? AND t.accountId=? AND t.type='Reversal' AND original.type IN ('Income','Expense')
+      UNION ALL
+      SELECT t.accountId,t.amountMinor,0 FROM "Transaction" t
+        JOIN "Transaction" original ON original.id=t.reversalOfId AND original.ownerId=t.ownerId
+        WHERE t.ownerId=? AND t.accountId=? AND t.type='Reversal' AND original.type='Transfer'
+      UNION ALL
+      SELECT t.toAccountId,0,t.amountMinor FROM "Transaction" t
+        JOIN "Transaction" original ON original.id=t.reversalOfId AND original.ownerId=t.ownerId
+        WHERE t.ownerId=? AND t.toAccountId=? AND t.type='Reversal' AND original.type='Transfer'
+    ), totals AS (
+      SELECT COALESCE(SUM(inflowMinor),0) AS inflowMinor,COALESCE(SUM(outflowMinor),0) AS outflowMinor
+      FROM movements WHERE accountId=?
+    )
+    SELECT a.id AS accountId,a.balanceMinor AS openingBalanceMinor,
+      a.balanceMinor+totals.inflowMinor-totals.outflowMinor AS currentBalanceMinor,
+      totals.inflowMinor,totals.outflowMinor,
+      (SELECT COUNT(*) FROM "Transaction" t WHERE t.ownerId=a.ownerId AND (t.accountId=a.id OR t.toAccountId=a.id)) AS transactionCount
+    FROM Account a CROSS JOIN totals WHERE a.ownerId=? AND a.id=?`,
+    params: [ownerId,accountId, ownerId,accountId, ownerId,accountId, ownerId,accountId,
+      ownerId,accountId, ownerId,accountId, ownerId,accountId, accountId, ownerId,accountId],
+  };
+}
+
 /** Calculates one historical cash snapshot inside SQLite without materializing ledger history in JS. */
 export function buildHistoricalAccountBalanceQuery(ownerId:string,asOfDate:string):{sql:string;params:string[]} {
   if(!ownerId.trim())throw new Error('A profile is required to calculate historical account balances.');

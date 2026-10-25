@@ -127,6 +127,7 @@ function RootNavigator() {
         <Stack.Screen name="budgets" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="savings" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="accounts" options={{ headerShown: false, presentation: 'modal' }} />
+        <Stack.Screen name="account/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="obligations" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="assets" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="native-verification" options={{ headerShown: false, presentation: 'modal' }} />

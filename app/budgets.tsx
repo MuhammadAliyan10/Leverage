@@ -1,12 +1,13 @@
 import { PRIMARY_COLOR } from '../src/constants/themeColors';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { ChevronLeft, ChevronRight } from 'lucide-react-native';
 import { Button } from '../components/ui/Button';
 import { BudgetProgressBar } from '../components/ui/BudgetProgressBar';
 import { DoneHeader } from '../components/ui/DoneHeader';
+import { useAppConfirm } from '../components/ui/useAppConfirm';
 import { useAuth } from '../src/context/AuthContext';
 import { CLASSIFICATIONS, CURRENCIES, EXPENSE_CLASSIFICATION_IDS, type CurrencyCode } from '../src/finance/domain';
 import { formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
@@ -20,6 +21,7 @@ const requestId = () => `houselog-${Date.now()}-${Math.random().toString(36).sli
 export default function BudgetsScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const { confirm, dialog } = useAppConfirm();
   const [month, setMonth] = useState(() => new Date());
   const [currency, setCurrency] = useState<CurrencyCode>('PKR');
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -39,14 +41,6 @@ export default function BudgetsScreen() {
     setErrors({});
   }, [periodStart, currency]);
 
-  const confirmAction = (title: string, message: string): Promise<boolean> => {
-    if (Platform.OS === 'web') return Promise.resolve(typeof globalThis.confirm === 'function' && globalThis.confirm(`${title}\n\n${message}`));
-    return new Promise((resolve) => Alert.alert(title, message, [
-      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-      { text: 'Continue', style: 'destructive', onPress: () => resolve(true) },
-    ], { cancelable: true, onDismiss: () => resolve(false) }));
-  };
-
   const save = async (categoryId: (typeof EXPENSE_CLASSIFICATION_IDS)[number]) => {
     if (!user) return;
     setErrors((current) => ({ ...current, [categoryId]: '' }));
@@ -65,7 +59,7 @@ export default function BudgetsScreen() {
   };
   const archive = async (id: string) => {
     if (isBusy) return;
-    if (!await confirmAction('Archive this budget?', 'Its history will remain available.')) return;
+    if (!await confirm({ title: 'Archive this budget?', message: 'Its history will remain available.', confirmLabel: 'Archive', destructive: true })) return;
     setNotice('');
     writes.archiveBudget.mutate(id, {
       onSuccess: () => setNotice('Budget archived. Its history has been preserved.'),
@@ -113,7 +107,7 @@ export default function BudgetsScreen() {
         const item = existing.get(categoryId);
         const spent = snapshotByCurrency.get(currency)?.categories.find((category) => category.category === categoryId)?.spentMinor ?? 0;
         const remove = async () => {
-          if (!item || isChangingBudget || !await confirmAction('Delete unused budget?', 'Budgets with financial activity or revision history must be archived.')) return;
+          if (!item || isChangingBudget || !await confirm({ title: 'Delete unused budget?', message: 'Budgets with financial activity or revision history must be archived.', confirmLabel: 'Delete', destructive: true })) return;
           setNotice('');
           writes.deleteBudget.mutate(item.id, {
             onSuccess: () => setNotice('Unused budget removed.'),
@@ -148,5 +142,6 @@ export default function BudgetsScreen() {
       <Button title="Carry unused limits to next month" disabled={isChangingBudget || isSaving} isLoading={writes.rollover.isPending} onPress={() => void rollover()} />
       <Pressable accessibilityRole="button" onPress={() => router.push('/savings')} className="mt-4 rounded-2xl border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900"><Text className="font-body font-bold text-primary">Savings goals & emergency fund →</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">View goals and emergency-fund progress</Text></Pressable>
     </ScrollView>
+    {dialog}
   </SafeAreaView>;
 }
