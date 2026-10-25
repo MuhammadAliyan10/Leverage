@@ -6,12 +6,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Archive, ChevronRight, Pencil, Plus, Save } from 'lucide-react-native';
 import { DoneHeader } from '../components/ui/DoneHeader';
+import { SectionHeading } from '../components/ui/SectionHeading';
+import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../components/ui/badgeStyles';
 import { useAppConfirm } from '../components/ui/useAppConfirm';
 import { useAccounts } from '../hooks/queries/useAccounts';
 import { useAuth } from '../src/context/AuthContext';
 import { localDb } from '../src/db/local/client';
 import { ACCOUNT_TYPES, CURRENCIES, type AccountType, type CurrencyCode } from '../src/finance/domain';
-import { formatGroupedAmountInput, formatMinorUnits, parseMinorUnits } from '../src/finance/ledger';
+import { formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
 
 export default function AccountsScreen() {
   const router = useRouter();
@@ -46,14 +48,15 @@ export default function AccountsScreen() {
   const [openingBalance, setOpeningBalance] = useState('0.00');
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; isError: boolean } | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<{ name?: string; openingBalance?: string }>({});
   const currencyOptions = useMemo(() => Object.keys(CURRENCIES) as CurrencyCode[], []);
 
   const beginCreate = () => {
-    setSelectedId(null); setName(''); setType('bank'); setCurrency('PKR'); setOpeningBalance('0.00');
+    setSelectedId(null); setName(''); setType('bank'); setCurrency('PKR'); setOpeningBalance('0.00'); setFieldErrors({});
   };
   const beginEdit = useCallback((account: typeof records[number]) => {
     if (account.archivedAt) return;
-    setSelectedId(account.id); setName(account.name); setType(account.type as AccountType); setCurrency(account.currency as CurrencyCode); setOpeningBalance(formatGroupedAmountInput((account.balanceMinor / 100).toFixed(2)));
+    setSelectedId(account.id); setName(account.name); setType(account.type as AccountType); setCurrency(account.currency as CurrencyCode); setOpeningBalance(formatMinorUnitsForInput(account.balanceMinor)); setFieldErrors({});
   }, []);
   useEffect(() => {
     if (!editParam || !recordsQuery.data) return;
@@ -78,15 +81,27 @@ export default function AccountsScreen() {
     if (!user || busy) return;
     setBusy(true);
     setFeedback(null);
+    setFieldErrors({});
     const wasEditing = selectedId !== null;
     try {
+      const normalizedName = name.trim();
+      if (normalizedName.length < 2 || normalizedName.length > 80) {
+        setFieldErrors({ name: normalizedName.length < 2 ? 'Enter an account name with at least 2 characters.' : 'Account names can be up to 80 characters.' });
+        return;
+      }
       const balanceText = openingBalance.trim();
-      const balanceMinor = /^0(?:\.0{1,2})?$/.test(balanceText) ? 0 : parseMinorUnits(balanceText);
+      let balanceMinor: number;
+      try {
+        balanceMinor = /^0(?:\.0{1,2})?$/.test(balanceText) ? 0 : parseMinorUnits(balanceText);
+      } catch (error) {
+        setFieldErrors({ openingBalance: error instanceof Error ? error.message : 'Enter a valid non-negative opening balance.' });
+        return;
+      }
       if (selectedId) {
-        const changes = financialFieldsLocked ? { name, type } : { name, type, currency, balanceMinor };
+        const changes = financialFieldsLocked ? { name: normalizedName, type } : { name: normalizedName, type, currency, balanceMinor };
         await localDb.account.update({ ownerId: user.id, accountId: selectedId, changes });
       }
-      else await localDb.account.create({ data: { ownerId: user.id, name, type, currency, balanceMinor } });
+      else await localDb.account.create({ data: { ownerId: user.id, name: normalizedName, type, currency, balanceMinor } });
       await refresh();
       beginCreate();
       setFeedback({ message: wasEditing ? 'Account changes saved.' : 'Account created.', isError: false });
@@ -117,17 +132,19 @@ export default function AccountsScreen() {
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Accounts" onDone={() => router.canGoBack() ? router.back() : router.replace('/(tabs)')} />
     <ScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{ paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
-      <View className="mb-6 rounded-3xl border border-gray-100 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
-        <Text className="font-heading mb-4 text-lg font-bold text-gray-900 dark:text-white">{selected ? 'Edit account' : 'Add account'}</Text>
+      <View className="mb-6 rounded-md border border-gray-100 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
+        <SectionHeading title={selected ? 'Edit account' : 'Add account'} className="mb-4" />
         <Text className="font-body mb-1 text-sm font-semibold text-gray-600 dark:text-neutral-300">Account name</Text>
-        <TextInput accessibilityLabel="Account name" value={name} onChangeText={setName} placeholder="e.g. Main bank" placeholderTextColor="#9ca3af" maxLength={80} autoCapitalize="words" editable={!busy} className="font-body mb-4 rounded-xl border border-gray-200 bg-white px-4 py-3 text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white" />
+        <TextInput accessibilityLabel="Account name" value={name} onChangeText={(value) => { setName(value); setFieldErrors((errors) => ({ ...errors, name: undefined })); }} placeholder="e.g. Main bank" placeholderTextColor="#9ca3af" maxLength={80} autoCapitalize="words" editable={!busy} className={`font-body rounded-xl border bg-white px-4 py-3 text-base text-gray-900 dark:bg-neutral-800 dark:text-white ${fieldErrors.name ? 'mb-1 border-red-500 dark:border-red-500' : 'mb-4 border-gray-200 dark:border-neutral-700'}`} />
+        {fieldErrors.name ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" className="font-body mb-4 text-xs text-red-600 dark:text-red-400">{fieldErrors.name}</Text> : null}
         <Text className="font-body mb-2 text-sm font-semibold text-gray-600 dark:text-neutral-300">Account type</Text>
-        <View className="mb-4 flex-row flex-wrap">{ACCOUNT_TYPES.map((option) => <Pressable key={option.id} disabled={busy} accessibilityRole="radio" accessibilityState={{ checked: type === option.id }} onPress={() => setType(option.id)} className={`mb-2 mr-2 rounded-full border px-3 py-2 ${type === option.id ? 'border-primary bg-primary/10' : 'border-gray-200 bg-white dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={["font-body", (type === option.id ? 'font-semibold text-primary' : 'text-gray-600 dark:text-neutral-300')].filter(Boolean).join(' ')}>{option.label}</Text></Pressable>)}</View>
+        <View className="mb-4 flex-row flex-wrap">{ACCOUNT_TYPES.map((option) => <Pressable key={option.id} disabled={busy} accessibilityRole="radio" accessibilityState={{ checked: type === option.id }} onPress={() => setType(option.id)} className={`mb-2 mr-2 rounded-full px-3 py-2 ${type === option.id ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body ${type === option.id ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{option.label}</Text></Pressable>)}</View>
         <Text className="font-body mb-2 text-sm font-semibold text-gray-600 dark:text-neutral-300">Currency</Text>
-        <View className="mb-4 flex-row flex-wrap">{currencyOptions.map((code) => <Pressable key={code} disabled={busy || financialFieldsLocked} accessibilityRole="radio" accessibilityState={{ checked: currency === code, disabled: busy || financialFieldsLocked }} onPress={() => setCurrency(code)} className={`mb-2 mr-2 rounded-full border px-3 py-2 ${currency === code ? 'border-primary bg-primary/10' : 'border-gray-200 bg-white dark:border-neutral-700 dark:bg-neutral-800'} ${financialFieldsLocked ? 'opacity-60' : ''}`}><Text className={["font-body", (currency === code ? 'font-semibold text-primary' : 'text-gray-600 dark:text-neutral-300')].filter(Boolean).join(' ')}>{code}</Text></Pressable>)}</View>
+        <View className="mb-4 flex-row flex-wrap">{currencyOptions.map((code) => <Pressable key={code} disabled={busy || financialFieldsLocked} accessibilityRole="radio" accessibilityState={{ checked: currency === code, disabled: busy || financialFieldsLocked }} onPress={() => setCurrency(code)} className={`mb-2 mr-2 rounded-full px-3 py-2 ${currency === code ? BADGE_PRIMARY : BADGE_NEUTRAL} ${financialFieldsLocked ? 'opacity-60' : ''}`}><Text className={`font-body ${currency === code ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{code}</Text></Pressable>)}</View>
         <Text className="font-body mb-1 text-sm font-semibold text-gray-600 dark:text-neutral-300">Opening balance</Text>
-        <TextInput accessibilityLabel="Opening balance" value={openingBalance} onChangeText={(value) => setOpeningBalance(formatGroupedAmountInput(value))} editable={!busy && !financialFieldsLocked} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#9ca3af" inputMode="decimal" className="font-body mb-4 rounded-xl border border-gray-200 bg-white px-4 py-3 text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white" />
-        {!!selected && <Text className="font-body mb-3 text-xs leading-5 text-gray-500 dark:text-neutral-400">{editConstraintsQuery.isLoading ? 'Checking account history and sync settings…' : editConstraintsQuery.isError ? 'Could not verify edit limits. Try again before changing account details.' : financialFieldsLocked ? 'Opening balance and currency are read-only because history exists or cloud sync is enabled.' : 'Opening balance and currency lock after transactions are recorded so account history stays consistent.'}</Text>}
+        <TextInput accessibilityLabel="Opening balance" value={openingBalance} onChangeText={(value) => { setOpeningBalance(formatGroupedAmountInput(value)); setFieldErrors((errors) => ({ ...errors, openingBalance: undefined })); }} editable={!busy && !financialFieldsLocked} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#9ca3af" inputMode="decimal" className={`font-body rounded-xl border bg-white px-4 py-3 text-base text-gray-900 dark:bg-neutral-800 dark:text-white ${fieldErrors.openingBalance ? 'mb-1 border-red-500 dark:border-red-500' : 'mb-4 border-gray-200 dark:border-neutral-700'}`} />
+        {fieldErrors.openingBalance ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" className="font-body mb-4 text-xs text-red-600 dark:text-red-400">{fieldErrors.openingBalance}</Text> : null}
+        {!!selected && <Text className="font-body mb-3 text-xs leading-5 text-gray-500 dark:text-neutral-400">{editConstraintsQuery.isLoading ? 'Checking account history and sync settings…' : editConstraintsQuery.isError ? 'Could not verify edit limits. Try again before changing account details.' : financialFieldsLocked ? 'You can’t change the starting balance or currency after transactions exist or cloud sync is connected.' : 'After you record a transaction, the starting balance and currency stay fixed to protect the account history.'}</Text>}
         {feedback && <Text accessibilityRole={feedback.isError ? 'alert' : 'text'} accessibilityLiveRegion="polite" className={`font-body mb-3 text-sm ${feedback.isError ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>{feedback.message}</Text>}
         {selected && editConstraintsQuery.isError && <Pressable onPress={() => void editConstraintsQuery.refetch()} className="mb-3 self-start"><Text className="font-body font-semibold text-primary">Retry account checks</Text></Pressable>}
         <View className="flex-row">
@@ -136,16 +153,16 @@ export default function AccountsScreen() {
         </View>
       </View>
 
-      <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Your accounts</Text><Pressable disabled={busy} accessibilityRole="button" onPress={beginCreate} className="flex-row items-center"><Plus size={18} color={PRIMARY_COLOR} /><Text className="font-body ml-1 font-semibold text-primary">Add</Text></Pressable></View>
-      {isLoading || recordsQuery.isLoading ? <Text className="font-body py-5 text-center text-gray-500 dark:text-neutral-400">Loading accounts…</Text> : isError || recordsQuery.isError ? <View className="items-center rounded-2xl bg-white p-5 dark:bg-neutral-900"><Text className="font-body mb-3 text-center text-red-600 dark:text-red-400">Accounts could not be loaded.</Text><Pressable onPress={() => { void refetchAccounts(); void recordsQuery.refetch(); }} className="houselog-button px-4 py-2"><Text className="font-body font-semibold text-white">Try again</Text></Pressable></View> : activeAccounts.length === 0 ? <Text className="font-body rounded-2xl bg-white p-5 text-center text-gray-500 dark:bg-neutral-900 dark:text-neutral-400">No active accounts yet. Add one to start recording money.</Text> : activeAccounts.map((account) => <View key={account.id} className="mb-3 flex-row items-center rounded-2xl border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+      <View className="mb-3 flex-row items-center justify-between"><SectionHeading title="Your accounts" className="flex-1"/><Pressable disabled={busy} accessibilityRole="button" onPress={beginCreate} className="ml-2 flex-row items-center"><Plus size={18} color={PRIMARY_COLOR} /><Text className="font-body ml-1 font-semibold text-primary">Add</Text></Pressable></View>
+      {isLoading || recordsQuery.isLoading ? <Text className="font-body py-5 text-center text-gray-500 dark:text-neutral-400">Loading accounts…</Text> : isError || recordsQuery.isError ? <View className="items-center rounded-md bg-white p-5 dark:bg-neutral-900"><Text className="font-body mb-3 text-center text-red-600 dark:text-red-400">Accounts could not be loaded.</Text><Pressable onPress={() => { void refetchAccounts(); void recordsQuery.refetch(); }} className="houselog-button px-4 py-2"><Text className="font-body font-semibold text-white">Try again</Text></Pressable></View> : activeAccounts.length === 0 ? <Text className="font-body rounded-md bg-white p-5 text-center text-gray-500 dark:bg-neutral-900 dark:text-neutral-400">No active accounts yet. Add one to start recording money.</Text> : activeAccounts.map((account) => <View key={account.id} className="mb-3 flex-row items-center rounded-md border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
         <Pressable disabled={busy} accessibilityRole="button" accessibilityLabel={`View ${account.name} balance and history`} onPress={() => router.push({ pathname: '/account/[id]', params: { id: account.id } })} className="flex-1"><Text className="font-body font-bold text-gray-900 dark:text-white">{account.name}</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · Opening {formatMinorUnits(records.find((item) => item.id === account.id)?.balanceMinor ?? 0, account.currency)}</Text><Text className="font-heading mt-2 text-lg font-bold text-primary">{formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>
         <Pressable disabled={busy} accessibilityRole="button" accessibilityLabel={`Edit ${account.name}`} onPress={() => { const raw = records.find((item) => item.id === account.id); if (raw) beginEdit(raw); }} className="ml-2 rounded-full bg-gray-100 p-3 dark:bg-neutral-800"><Pencil size={17} color={PRIMARY_COLOR} /></Pressable>
         <Pressable disabled={busy} accessibilityRole="button" accessibilityLabel={`Archive ${account.name}`} onPress={() => archive(account.id, account.name)} className="ml-3 rounded-full bg-gray-100 p-3 dark:bg-neutral-800"><Archive size={18} color="#6b7280" /></Pressable>
         <ChevronRight size={18} color="#9ca3af" />
       </View>)}
-      {!isLoading && !isError && !recordsQuery.isLoading && !recordsQuery.isError && archivedAccounts.length > 0 && <View className="mt-5"><Text className="font-heading mb-3 text-lg font-bold text-gray-900 dark:text-white">Archived accounts</Text><Text className="font-body mb-3 text-sm leading-5 text-gray-500 dark:text-neutral-400">Archived accounts stay here for reference. Their balances are excluded from active account totals.</Text>{archivedAccounts.map((account) => {
+      {!isLoading && !isError && !recordsQuery.isLoading && !recordsQuery.isError && archivedAccounts.length > 0 && <View className="mt-5"><SectionHeading title="Archived accounts" className="mb-3"/><Text className="font-body mb-3 text-sm leading-5 text-gray-500 dark:text-neutral-400">Archived accounts stay here for reference. Their balances are excluded from active account totals.</Text>{archivedAccounts.map((account) => {
         const balance = accounts.find((item) => item.id === account.id);
-        return <Pressable accessibilityRole="button" accessibilityLabel={`View archived ${account.name} history`} onPress={() => router.push({ pathname: '/account/[id]', params: { id: account.id } })} key={account.id} className="mb-3 rounded-2xl border border-gray-200 bg-gray-100 p-4 dark:border-neutral-800 dark:bg-neutral-900"><View className="flex-row items-start justify-between"><View className="flex-1"><Text className="font-body font-bold text-gray-700 dark:text-neutral-200">{account.name}</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · Archived · View history</Text></View><Text className="font-heading ml-3 text-base font-bold text-gray-700 dark:text-neutral-200">{formatMinorUnits(balance?.balanceMinor ?? account.balanceMinor, account.currency)}</Text></View></Pressable>;
+        return <Pressable accessibilityRole="button" accessibilityLabel={`View archived ${account.name} history`} onPress={() => router.push({ pathname: '/account/[id]', params: { id: account.id } })} key={account.id} className="mb-3 rounded-md border border-gray-200 bg-gray-100 p-4 dark:border-neutral-800 dark:bg-neutral-900"><View className="flex-row items-start justify-between"><View className="flex-1"><Text className="font-body font-bold text-gray-700 dark:text-neutral-200">{account.name}</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · Archived · View history</Text></View><Text className="font-heading ml-3 text-base font-bold text-gray-700 dark:text-neutral-200">{formatMinorUnits(balance?.balanceMinor ?? account.balanceMinor, account.currency)}</Text></View></Pressable>;
       })}</View>}
     </ScrollView>
     {dialog}

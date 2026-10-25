@@ -6,6 +6,7 @@ import {
   calculateIncomeExpense,
   convertForeignMinorToPkr,
   formatMinorUnitsForInput,
+  formatGroupedAmountInput,
   parseExchangeRate,
   parseMinorUnits,
 } from '../../src/finance/ledger.ts';
@@ -16,7 +17,7 @@ import {
   resolveClassification,
   validateStoredClassification,
 } from '../../src/finance/domain.ts';
-import { calculateAccountBalances } from '../../src/finance/balances.ts';
+import { calculateAccountBalances, hasSufficientFunds } from '../../src/finance/balances.ts';
 import { transactionsInCurrency } from '../../src/finance/reporting.ts';
 
 const pkrAccount = { id: 'bank-main', ownerId: 'user-1', currency: 'PKR', type: 'bank' };
@@ -29,6 +30,16 @@ test('minor-unit parsing rejects precision loss, signs, and unsafe values', () =
   assert.throws(() => parseMinorUnits('90071992547409.92'), /supported range/);
 });
 
+test('cash outflows require a verified balance that covers the full integer amount', () => {
+  assert.equal(hasSufficientFunds(0, 1), false, 'zero balance cannot fund even one minor unit');
+  assert.equal(hasSufficientFunds(999, 1_000), false, 'short balance is rejected');
+  assert.equal(hasSufficientFunds(1_000, 1_000), true, 'exact balance is allowed');
+  assert.equal(hasSufficientFunds(1_001, 1_000), true, 'balance above amount is allowed');
+  assert.equal(hasSufficientFunds(-1, 1), false, 'an already overdrawn account cannot fund a new outflow');
+  assert.throws(() => hasSufficientFunds(Number.MAX_SAFE_INTEGER + 1, 1), /verified account balance/);
+  assert.throws(() => hasSufficientFunds(1_000, 0), /positive integer amount/);
+});
+
 test('editable amount formatting avoids floating-point round trips', () => {
   assert.equal(formatMinorUnitsForInput(2_000_000), '20,000');
   assert.equal(formatMinorUnitsForInput(5), '0.05');
@@ -38,6 +49,18 @@ test('editable amount formatting avoids floating-point round trips', () => {
   assert.equal(formatMinorUnitsForInput(-5), '-0.05');
   assert.throws(() => formatMinorUnitsForInput(Number.MAX_SAFE_INTEGER + 1), /supported range/);
   assert.throws(() => formatMinorUnitsForInput(10, 7), /fractionDigits/);
+});
+
+test('amount entry formatting groups valid values without sanitizing malformed input', () => {
+  assert.equal(formatGroupedAmountInput('10000'), '10,000');
+  assert.equal(formatGroupedAmountInput('10000.50'), '10,000.50');
+  assert.equal(formatGroupedAmountInput('.5'), '0.5');
+  assert.equal(formatGroupedAmountInput('1,000'), '1,000');
+  assert.equal(formatGroupedAmountInput('1,2'), '1,2');
+  assert.equal(formatGroupedAmountInput('10.2.3'), '10.2.3');
+  assert.equal(formatGroupedAmountInput('Rs 1,000'), 'Rs 1,000');
+  assert.throws(() => parseMinorUnits(formatGroupedAmountInput('1,2')), /positive amount/);
+  assert.throws(() => parseMinorUnits(formatGroupedAmountInput('10.2.3')), /positive amount/);
 });
 
 test('foreign remittance conversion uses exact scaled rate and half-up rounding', () => {

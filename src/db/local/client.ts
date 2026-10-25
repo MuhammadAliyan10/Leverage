@@ -28,6 +28,8 @@ import { createLocalWriteQueue } from './writeQueue';
 import { archiveAccount as archiveAccountRecord, editAccount } from '../../finance/accountOperations';
 import { assertCorrectionCanPost, resolveRefundAmount } from '../../finance/transactionOperations';
 import { buildFinancialReportQuery, type FinancialReportRow } from '../../finance/reporting';
+import { formatMinorUnits } from '../../finance/ledger';
+import { hasSufficientFunds } from '../../finance/balances';
 import { buildAccountActivitySummaryQuery, buildAccountBalanceQuery, buildRecentAccountPreferenceQuery, buildTransactionListQuery, buildTransactionPagePredicate, type TransactionFilters } from './queryBuilders';
 import { createBudgetingStore, type BudgetingSql } from './budgetingStore';
 import { createObligationsStore, type ObligationsSql } from './obligationsStore';
@@ -213,7 +215,26 @@ async function insertObligationCashTransaction(
     if (existing.ownerId!==input.ownerId||existing.amountMinor!==input.amountMinor||existing.type!==input.type||existing.categoryId!==input.categoryId||existing.accountId!==input.accountId||existing.date!==date.toISOString()) throw new Error('Transaction ID was already used for different financial details.');
     return;
   }
+  if (input.type === 'Expense') await assertAccountCanFund(sql, input.ownerId, input.accountId, input.amountMinor, account.currency);
   await sql.runAsync('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,classificationId,accountId,toAccountId,date,note,taxStatus,taxYear,synced) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,0)',[input.id,input.ownerId,input.amountMinor/100,input.amountMinor,input.type,input.categoryId,input.categoryId,null,input.accountId,date.toISOString(),input.note.slice(0,2000),input.taxStatus ?? 'unreviewed',null]);
+}
+
+/** Enforces no-overdraft posting against the full ledger while the caller holds its write transaction. */
+async function assertAccountCanFund(
+  sql: Pick<ObligationsSql, 'getFirstAsync'>,
+  ownerId: string,
+  accountId: string,
+  amountMinor: number,
+  knownCurrency?: string,
+): Promise<void> {
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) throw new Error('Amount must be a positive integer in minor units.');
+  const query = buildAccountActivitySummaryQuery(ownerId, accountId);
+  const balance = await sql.getFirstAsync<{ currentBalanceMinor: number; currency?: string }>(query.sql, query.params);
+  if (!balance || !Number.isSafeInteger(balance.currentBalanceMinor)) throw new Error('The account balance could not be verified. Nothing was posted.');
+  if (!hasSufficientFunds(balance.currentBalanceMinor, amountMinor)) {
+    const currency = knownCurrency ?? balance.currency ?? 'PKR';
+    throw new Error(`Insufficient funds. Available: ${formatMinorUnits(balance.currentBalanceMinor, currency)}; required: ${formatMinorUnits(amountMinor, currency)}.`);
+  }
 }
 
 async function insertObligationReversal(sql: ObligationsSql, input: { id: string; ownerId: string; originalTransactionId: string; amountMinor: number; accountId: string; date: string; note: string }): Promise<void> {
@@ -223,6 +244,11 @@ async function insertObligationReversal(sql: ObligationsSql, input: { id: string
   if(!original||original.amountMinor!==input.amountMinor||original.accountId!==input.accountId||!['Income','Expense'].includes(original.type)) throw new Error('The original obligation transaction cannot be reversed with these details.');
   const existing=await sql.getFirstAsync<{type:string;ownerId:string;reversalOfId:string|null;amountMinor:number}>('SELECT type,ownerId,reversalOfId,amountMinor FROM "Transaction" WHERE id=?',[input.id]);
   if(existing){if(existing.type!=='Reversal'||existing.ownerId!==input.ownerId||existing.reversalOfId!==input.originalTransactionId||existing.amountMinor!==input.amountMinor) throw new Error('Reversal ID was already used for different details.');return;}
+  if(original.type==='Income') {
+    const account=await sql.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=?',[input.accountId,input.ownerId]);
+    if(!account) throw new Error('The original income account is unavailable.');
+    await assertAccountCanFund(sql,input.ownerId,input.accountId,input.amountMinor,account.currency);
+  }
   await sql.runAsync('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,accountId,toAccountId,date,note,taxStatus,synced,reversalOfId) VALUES(?,?,?,?,?,?,?,?,NULL,?,?,\'unreviewed\',0,?)',[input.id,input.ownerId,input.amountMinor/100,input.amountMinor,'Reversal','Obligation correction','correction_reversal',input.accountId,at.toISOString(),input.note.slice(0,2000),input.originalTransactionId]);
 }
 
@@ -1228,6 +1254,7 @@ export const localDb = {
         const source=await sql.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[schedule.accountId,ownerId]);
         const destination=await sql.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[schedule.toAccountId!,ownerId]);
         if(!source||!destination||source.currency!==destination.currency||source.currency!==schedule.currency) throw new Error('Transfer schedule accounts must be active, profile-owned and in the same currency.');
+        await assertAccountCanFund(sql,ownerId,schedule.accountId,schedule.amountMinor,source.currency);
         const date=new Date(`${occurrence.occurrenceDate}T12:00:00.000Z`).toISOString();
         await sql.runAsync('INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,classificationId,accountId,toAccountId,date,note,taxStatus,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)',[transactionId,ownerId,schedule.amountMinor/100,schedule.amountMinor,'Transfer','Scheduled transfer','scheduled_transfer',null,schedule.accountId,schedule.toAccountId!,date,schedule.name,'unreviewed']);
         return;
@@ -1873,6 +1900,9 @@ export const localDb = {
             'SELECT currency,type FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL', [record.accountId,record.ownerId],
           );
           if (!source) throw new Error('The transaction account is unavailable.');
+          if (record.type === 'Expense' || record.type === 'Transfer') {
+            await assertAccountCanFund(asObligationsSql(transaction), record.ownerId, record.accountId, record.amountMinor, source.currency);
+          }
           if (cloudUserId) {
             const type = record.type === 'Income' ? 'income' : record.type === 'Expense' ? 'expense' : 'transfer';
             const payload: CloudTransactionPayload = {
@@ -1983,6 +2013,15 @@ export const localDb = {
         if (accounts.some((account) => !account)) throw new Error('Original transaction refers to a missing account.');
         const existingReversalById = await transaction.getFirstAsync<{ type: string; ownerId: string; reversalOfId: string | null }>('SELECT type, ownerId, reversalOfId FROM "Transaction" WHERE id = ?', [reversalId]);
         if (existingReversalById && (existingReversalById.type !== 'Reversal' || existingReversalById.ownerId !== ownerId || existingReversalById.reversalOfId !== originalTransactionId)) throw new Error('Correction ID conflicts with an existing financial record.');
+        if (original.type === 'Income') {
+          const account = accounts.find((candidate) => candidate?.id === original.accountId);
+          if (!account) throw new Error('The original income account is unavailable.');
+          await assertAccountCanFund(asObligationsSql(transaction), ownerId, original.accountId, original.amountMinor, account.currency);
+        } else if (original.type === 'Transfer' && original.toAccountId) {
+          const destination = accounts.find((candidate) => candidate?.id === original.toAccountId);
+          if (!destination) throw new Error('The original transfer destination is unavailable.');
+          await assertAccountCanFund(asObligationsSql(transaction), ownerId, original.toAccountId, original.amountMinor, destination.currency);
+        }
         const cloudUserId = await activeCloudUser(transaction,ownerId);
         if (cloudUserId) {
           const currency=accounts.find((account)=>account?.id===original.accountId)?.currency;
@@ -2008,6 +2047,11 @@ export const localDb = {
             return normalizeTransactionDraft({ id: row.id, ownerId: row.ownerId, amountMinor: row.amountMinor, type: row.type as TransactionType, classificationId: row.classificationId ?? undefined, accountId: row.accountId!, toAccountId: row.toAccountId ?? undefined, date: row.date, note: row.note, sourceName: row.sourceName ?? undefined, paymentMethod: row.paymentMethod ?? undefined, sourceAmountMinor: row.sourceAmountMinor ?? undefined, sourceCurrency: row.sourceCurrency ?? undefined, exchangeRate: row.exchangeRate ?? undefined, referenceNumber: row.referenceNumber ?? undefined, taxStatus: row.taxStatus, taxYear: row.taxYear ?? undefined }, account, destination ?? undefined);
           },
           insertTransaction: async (record) => {
+            const accountForPosting = await transaction.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[record.accountId,ownerId]);
+            if (!accountForPosting) throw new Error('The correction account is unavailable.');
+            if (record.type === 'Expense' || record.type === 'Transfer') {
+              await assertAccountCanFund(asObligationsSql(transaction), ownerId, record.accountId, record.amountMinor, accountForPosting.currency);
+            }
             if (cloudUserId) {
               const source=await transaction.getFirstAsync<{currency:string;type:string}>('SELECT currency,type FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[record.accountId,ownerId]);
               const destination=record.toAccountId?await transaction.getFirstAsync<{type:string}>('SELECT type FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[record.toAccountId,ownerId]):null;

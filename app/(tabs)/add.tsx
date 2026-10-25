@@ -11,6 +11,7 @@ import { DatePickerModal, TimePickerModal, en, registerTranslation } from 'react
 import { MD3DarkTheme, MD3LightTheme, PaperProvider } from 'react-native-paper';
 import { CalendarDays, ChevronLeft, ChevronRight, CircleHelp, Clock3, Keyboard, Pencil, Search, X } from 'lucide-react-native';
 import { Button } from '../../components/ui/Button';
+import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../../components/ui/badgeStyles';
 import { useAddTransaction } from '../../hooks/mutations/useAddTransaction';
 import { convertForeignMinorToPkr, formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseExchangeRate, parseMinorUnits } from '../../src/finance/ledger';
 import { useAccounts } from '../../hooks/queries/useAccounts';
@@ -163,6 +164,7 @@ export default function AddTransactionScreen() {
   });
 
   const transactionType = useWatch({ control, name: 'type' });
+  const watchedAmount = useWatch({ control, name: 'amount' }) ?? '';
   const selectedDate = useWatch({ control, name: 'date' });
   const selectedCategoryId = useWatch({ control, name: 'categoryId' });
   const selectedAccountId = useWatch({ control, name: 'accountId' });
@@ -173,6 +175,18 @@ export default function AddTransactionScreen() {
   const correctionReady = Boolean(correctionOf) && correctionLoadedId === correctionOf;
   const correctionLoadFailed = Boolean(correctionOf) && correctionLoadFailedId === correctionOf;
   const correctionLoading = Boolean(correctionOf) && !correctionReady && !correctionLoadFailed;
+  const insufficientFundsMessage = useMemo(() => {
+    if (correctionOf || !selectedAccount || (transactionType !== 'Expense' && transactionType !== 'Transfer')) return null;
+    try {
+      const amountMinor = parseMinorUnits(watchedAmount);
+      if (amountMinor > selectedAccount.balanceMinor) {
+        return `Not enough money in this account. Available: ${formatMinorUnits(selectedAccount.balanceMinor, selectedAccount.currency)}.`;
+      }
+    } catch {
+      // The form validation below explains empty or malformed amounts.
+    }
+    return null;
+  }, [correctionOf, selectedAccount, transactionType, watchedAmount]);
   const categories = transactionType === 'Income' ? INCOME_SOURCES : EXPENSE_CATEGORIES;
   const visibleCategories = categories;
   const normalizedAccountSearch = accountSearch.trim().toLocaleLowerCase('en-US');
@@ -460,10 +474,11 @@ export default function AddTransactionScreen() {
               />
             </View>
             {errors.amount && <Text className="font-body mt-2 text-sm text-red-500">{errors.amount.message}</Text>}
+            {insufficientFundsMessage && <Text accessibilityRole="alert" className="font-body mt-2 text-sm text-red-500">{insufficientFundsMessage}</Text>}
           </View>
 
           {/* Details Section */}
-          <View className="w-full space-y-5 rounded-2xl border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+          <View className="w-full space-y-5 rounded-md border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
             
             {/* Account selection */}
             <View className="border-b border-gray-100 pb-4">
@@ -487,9 +502,9 @@ export default function AddTransactionScreen() {
                         accessibilityState={{ selected }}
                         accessibilityLabel={`${account.name}, ${account.type}, ${account.currency}, balance ${formatMinorUnits(account.balanceMinor, account.currency)}`}
                         onPress={() => setValue('accountId', account.id, { shouldValidate: true })}
-                        className={`mr-2 min-h-12 justify-center rounded-xl border px-3 py-2 ${selected ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
+                        className={`mr-2 min-h-12 justify-center rounded-xl border px-3 py-2 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL}`}
                       >
-                        <Text className={`font-body font-semibold ${selected ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text>
+                        <Text className={`font-body font-semibold ${selected ? BADGE_PRIMARY_TEXT : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text>
                         <Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text>
                       </Pressable>
                     );
@@ -506,7 +521,7 @@ export default function AddTransactionScreen() {
                   <ScrollView horizontal style={{ width: '100%', flexGrow: 0, flexShrink: 1 }} className="mt-3" showsHorizontalScrollIndicator={false}>
                     {visibleDestinationAccounts.map((account) => {
                       const selected = account.id === selectedToAccountId;
-                      return <Pressable key={account.id} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => setValue('toAccountId', account.id, { shouldValidate: true })} className={`mr-2 min-h-12 justify-center border px-3 py-2 ${selected ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={`font-body font-semibold ${selected ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text><Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>;
+                      return <Pressable key={account.id} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => setValue('toAccountId', account.id, { shouldValidate: true })} className={`mr-2 min-h-12 justify-center border px-3 py-2 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body font-semibold ${selected ? BADGE_PRIMARY_TEXT : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text><Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>;
                     })}
                   </ScrollView>
                   {!accounts.some((account) => account.id !== selectedAccountId && account.currency === selectedAccount?.currency) && <Text className="font-body mt-2 text-sm text-gray-500">No other active account uses {selectedAccount?.currency ?? 'the selected currency'}. Cross-currency transfers are not supported.</Text>}
@@ -528,9 +543,9 @@ export default function AddTransactionScreen() {
                       accessibilityRole="button"
                       accessibilityState={{ selected: isSelected }}
                       onPress={() => setValue('categoryId', cat.id, { shouldValidate: true })}
-                      className={`mr-2 min-h-11 flex-row items-center rounded-full border px-3 py-2 ${isSelected ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
+                      className={`mr-2 min-h-11 flex-row items-center rounded-full border px-3 py-2 ${isSelected ? BADGE_PRIMARY : BADGE_NEUTRAL}`}
                     >
-                      <Text className={`font-body text-sm font-semibold ${isSelected ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-600 dark:text-neutral-300'}`}>{cat.name}</Text>
+                      <Text className={`font-body text-sm font-semibold ${isSelected ? BADGE_PRIMARY_TEXT : 'text-gray-600 dark:text-neutral-300'}`}>{cat.name}</Text>
                     </Pressable>
                   );
                 })}
@@ -574,9 +589,9 @@ export default function AddTransactionScreen() {
                       }}
                       accessibilityRole="radio"
                       accessibilityState={{ selected: selectedPaymentMethod === method }}
-                      className={`rounded-full border px-3 py-2 ${selectedPaymentMethod === method ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}
+                      className={`rounded-full border px-3 py-2 ${selectedPaymentMethod === method ? BADGE_PRIMARY : BADGE_NEUTRAL}`}
                     >
-                      <Text className={`font-body text-xs font-semibold ${selectedPaymentMethod === method ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-600 dark:text-neutral-200'}`}>{method}</Text>
+                      <Text className={`font-body text-xs font-semibold ${selectedPaymentMethod === method ? BADGE_PRIMARY_TEXT : 'text-gray-600 dark:text-neutral-200'}`}>{method}</Text>
                     </Pressable>
                   ))}
                 </View>
@@ -589,7 +604,7 @@ export default function AddTransactionScreen() {
                   <Text className="font-body text-sm font-semibold text-gray-700 dark:text-neutral-100">Original remittance details</Text>
                   <Controller control={control} name="sourceAmount" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="Amount in original currency" keyboardType="decimal-pad" value={value} onChangeText={(text) => onChange(formatGroupedAmountInput(text))} />} />
                   {errors.sourceAmount && <Text className="font-body text-sm text-red-500">{errors.sourceAmount.message}</Text>}
-                  <View className="flex-row gap-2">{['USD', 'GBP', 'EUR', 'AED', 'SAR'].map((currency) => <Pressable key={currency} accessibilityRole="radio" accessibilityState={{ selected: sourceCurrency === currency }} onPress={() => setValue('sourceCurrency', currency)} className={`rounded-full border px-3 py-2 ${sourceCurrency === currency ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={`font-body text-xs font-semibold ${sourceCurrency === currency ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-200'}`}>{currency}</Text></Pressable>)}</View>
+                  <View className="flex-row gap-2">{['USD', 'GBP', 'EUR', 'AED', 'SAR'].map((currency) => <Pressable key={currency} accessibilityRole="radio" accessibilityState={{ selected: sourceCurrency === currency }} onPress={() => setValue('sourceCurrency', currency)} className={`rounded-full border px-3 py-2 ${sourceCurrency === currency ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${sourceCurrency === currency ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{currency}</Text></Pressable>)}</View>
                   <Controller control={control} name="exchangeRate" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="PKR per 1 unit (provider rate)" keyboardType="decimal-pad" value={value} onChangeText={onChange} />} />
                   {errors.exchangeRate && <Text className="font-body text-sm text-red-500">{errors.exchangeRate.message}</Text>}
                   {remittancePreview ? <Text className="font-body font-semibold text-primary">Converted amount: {remittancePreview}</Text> : null}
@@ -598,7 +613,7 @@ export default function AddTransactionScreen() {
                 </View>}
                 <Text className="font-body mt-4 text-sm font-semibold text-gray-700 dark:text-neutral-100">Tax record</Text>
                 <Text className="font-body mt-1 text-xs text-gray-500">Your record only; Leverage does not decide the legal tax treatment.</Text>
-                <View className="mt-2 flex-row flex-wrap gap-2">{([['unreviewed', 'Not reviewed'], ['taxable', 'Taxable'], ['non_taxable', 'Non-taxable']] as const).map(([value, label]) => <Pressable key={value} accessibilityRole="radio" accessibilityState={{ selected: selectedTaxStatus === value }} onPress={() => setValue('taxStatus', value)} className={`rounded-full border px-3 py-2 ${selectedTaxStatus === value ? 'border-primary bg-primary/10 dark:bg-primary/20' : 'border-gray-200 bg-gray-50 dark:border-neutral-700 dark:bg-neutral-800'}`}><Text className={`font-body text-xs font-semibold ${selectedTaxStatus === value ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-200'}`}>{label}</Text></Pressable>)}</View>
+                <View className="mt-2 flex-row flex-wrap gap-2">{([['unreviewed', 'Not reviewed'], ['taxable', 'Taxable'], ['non_taxable', 'Non-taxable']] as const).map(([value, label]) => <Pressable key={value} accessibilityRole="radio" accessibilityState={{ selected: selectedTaxStatus === value }} onPress={() => setValue('taxStatus', value)} className={`rounded-full border px-3 py-2 ${selectedTaxStatus === value ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${selectedTaxStatus === value ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{label}</Text></Pressable>)}</View>
               </View>
             )}
 
@@ -680,9 +695,9 @@ export default function AddTransactionScreen() {
             title={correctionLoading ? 'Loading original…' : correctionOf ? 'Save correction' : `Save ${transactionType.toLocaleLowerCase('en-US')}`}
             onPress={() => saveTransaction(false)}
             isLoading={isSubmitting || addTransaction.isPending}
-            disabled={accounts.length === 0 || accountsLoading || accountsError || correctionLoading || correctionLoadFailed || Boolean(correctionRestriction) || profileChanged || !user}
+            disabled={accounts.length === 0 || accountsLoading || accountsError || correctionLoading || correctionLoadFailed || Boolean(correctionRestriction) || profileChanged || !user || Boolean(insufficientFundsMessage)}
           />
-          {!correctionOf && <Pressable accessibilityRole="button" disabled={isSubmitting || addTransaction.isPending || accounts.length === 0 || accountsLoading || accountsError || profileChanged} onPress={() => saveTransaction(true)} className="mt-2 min-h-11 items-center justify-center"><Text className="font-body text-sm font-semibold text-primary">Save and add another</Text></Pressable>}
+          {!correctionOf && <Pressable accessibilityRole="button" accessibilityState={{ disabled: isSubmitting || addTransaction.isPending || accounts.length === 0 || accountsLoading || accountsError || profileChanged || Boolean(insufficientFundsMessage), busy: isSubmitting || addTransaction.isPending }} disabled={isSubmitting || addTransaction.isPending || accounts.length === 0 || accountsLoading || accountsError || profileChanged || Boolean(insufficientFundsMessage)} onPress={() => saveTransaction(true)} className="mt-2 min-h-11 flex-row items-center justify-center">{isSubmitting || addTransaction.isPending ? <><ActivityIndicator size="small" color={PRIMARY_COLOR} /><Text className="font-body ml-2 text-sm font-semibold text-primary">Saving…</Text></> : <Text className="font-body text-sm font-semibold text-primary">Save and add another</Text>}</Pressable>}
         </View>
 
       </KeyboardAvoidingView>

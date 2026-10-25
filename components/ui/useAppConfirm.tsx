@@ -30,7 +30,7 @@ export function useAppConfirm() {
   const dialog = <Modal visible={options !== null} transparent animationType="fade" onRequestClose={() => settle(false)}>
     <View className="flex-1 items-center justify-center px-6">
       <Pressable accessibilityRole="button" accessibilityLabel="Dismiss confirmation" onPress={() => settle(false)} className="absolute inset-0 bg-black/50" />
-      {options && <View accessibilityViewIsModal className="w-full max-w-[420px] rounded-2xl border border-gray-100 bg-white p-5 shadow-xl dark:border-neutral-800 dark:bg-neutral-900">
+      {options && <View accessibilityViewIsModal className="w-full max-w-[420px] rounded-md border border-gray-100 bg-white p-5 shadow-xl dark:border-neutral-800 dark:bg-neutral-900">
         <Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">{options.title}</Text>
         <Text className="font-body mt-2 text-sm leading-5 text-gray-600 dark:text-neutral-300">{options.message}</Text>
         <View className="mt-5 flex-row justify-end gap-3">

@@ -49,7 +49,7 @@ export function LockScreen({ onUnlockPassword, onUnlockBiometric, checkBiometric
 
   return (
     <SafeAreaView className="absolute inset-0 z-50 flex-1 items-center justify-center bg-[#f8f9fc] px-6 dark:bg-neutral-950">
-      <View className="w-full max-w-[420px] rounded-3xl bg-white p-6 dark:bg-neutral-900">
+      <View className="w-full max-w-[420px] rounded-md bg-white p-6 dark:bg-neutral-900">
         <View className="mb-5 h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
           <LockKeyhole size={27} color={PRIMARY_COLOR} />
         </View>

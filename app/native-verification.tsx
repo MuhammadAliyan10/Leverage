@@ -81,7 +81,7 @@ export default function NativeVerificationScreen() {
           Runs only in this disposable verification app. It creates a random, encrypted test database and never opens or changes your financial records.
         </Text>
 
-        <View className="mt-6 rounded-xl border border-slate-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+        <View className="mt-6 rounded-md border border-slate-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
           <Text className="font-heading text-base font-semibold text-slate-900 dark:text-white">Checks performed</Text>
           {[
             'SQLCipher is present in the installed native binary',

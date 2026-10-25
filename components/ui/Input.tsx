@@ -47,7 +47,7 @@ export const Input: React.FC<InputProps> = ({ label, error, helperText, leadingI
         {trailingAction}
       </View>
       {!error && helperText && <Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">{helperText}</Text>}
-      {error && <Text className="font-body mt-1 text-sm text-red-500">{error}</Text>}
+      {error && <Text accessibilityRole="alert" accessibilityLiveRegion="polite" className="font-body mt-1 text-sm text-red-600 dark:text-red-400">{error}</Text>}
     </View>
   );
 };

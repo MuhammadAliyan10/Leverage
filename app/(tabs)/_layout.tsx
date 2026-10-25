@@ -19,7 +19,8 @@ export default function TabsLayout() {
       ? systemColorScheme === 'dark'
       : appearance === 'dark';
   const palette = Colors[isDark ? 'dark' : 'light'];
-  const tabBarSurface = isDark ? '#000000' : '#ffffff';
+  // Match the header's light brand-tinted surface while keeping cards white.
+  const tabBarSurface = isDark ? '#171717' : '#f3f2ff';
 
   return (
     <Tabs
@@ -53,7 +54,8 @@ export default function TabsLayout() {
           // Keep the controls compact while reserving the device safe-area inset.
           height: 64 + insets.bottom,
           backgroundColor: tabBarSurface,
-          borderTopWidth: 0,
+          borderTopWidth: isDark ? 0 : StyleSheet.hairlineWidth,
+          borderTopColor: isDark ? 'transparent' : '#e5e7eb',
           elevation: 0,
         },
       }}

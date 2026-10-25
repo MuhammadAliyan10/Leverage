@@ -4,10 +4,11 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } fro
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { ArrowRight, Banknote, Building2, Check, CircleEllipsis, PiggyBank, Smartphone, TrendingUp, Wallet } from 'lucide-react-native';
+import { ArrowRight, Banknote, Check, CircleEllipsis, Landmark, PiggyBank, Smartphone, TrendingUp, Wallet } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { Input } from '../components/ui/Input';
 import { Button } from '../components/ui/Button';
+import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../components/ui/badgeStyles';
 import { localDb } from '../src/db/local/client';
 import { formatGroupedAmountInput, parseMinorUnits } from '../src/finance/ledger';
 import { CURRENCIES } from '../src/finance/domain';
@@ -16,7 +17,7 @@ import { onboardingSchema, type OnboardingFormData } from '../utils/validations/
 
 const ACCOUNT_OPTIONS = [
   { value: 'cash', label: 'Cash', description: 'Money on hand', Icon: Banknote },
-  { value: 'bank', label: 'Bank', description: 'Current account', Icon: Building2 },
+  { value: 'bank', label: 'Bank', description: 'Current account', Icon: Landmark },
   { value: 'savings', label: 'Savings', description: 'Savings account', Icon: PiggyBank },
   { value: 'wallet', label: 'Mobile wallet', description: 'Wallet or payment app', Icon: Smartphone },
   { value: 'investment', label: 'Investment', description: 'Investment account', Icon: TrendingUp },
@@ -77,7 +78,7 @@ export default function OnboardingScreen() {
         >
           <View className="w-full max-w-[560px] self-center">
             {createdAccountName ? (
-              <View className="rounded-3xl border border-gray-100 bg-white p-6 dark:border-neutral-800 dark:bg-neutral-900">
+              <View className="rounded-md border border-gray-100 bg-white p-6 dark:border-neutral-800 dark:bg-neutral-900">
                 <View className="mb-5 h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 dark:bg-emerald-950">
                   <Check size={28} color="#059669" />
                 </View>
@@ -122,7 +123,7 @@ export default function OnboardingScreen() {
               </Text>
             </View>
 
-            <View className="mb-5 rounded-3xl border border-gray-100 bg-white p-5 shadow-sm">
+            <View className="mb-5 rounded-md border border-gray-100 bg-white p-5 shadow-sm">
               <View className="mb-4">
                 <Text className="font-body text-base font-bold text-gray-900">Name your account</Text>
                 <Text className="font-body mt-1 text-sm leading-5 text-gray-500">Use a name you will recognize, like “Main bank” or “Wallet cash”.</Text>
@@ -148,7 +149,7 @@ export default function OnboardingScreen() {
               />
             </View>
 
-            <View className="mb-5 rounded-3xl border border-gray-100 bg-white p-5 shadow-sm">
+            <View className="mb-5 rounded-md border border-gray-100 bg-white p-5 shadow-sm">
               <View className="mb-4">
                 <Text className="font-body text-base font-bold text-gray-900">Choose the account type</Text>
                 <Text className="font-body mt-1 text-sm leading-5 text-gray-500">This helps Leverage organize your balances.</Text>
@@ -168,9 +169,9 @@ export default function OnboardingScreen() {
                             accessibilityState={{ selected }}
                             accessibilityLabel={`${label}: ${description}`}
                             onPress={() => onChange(option)}
-                            className={`mb-3 min-h-[84px] w-[48.5%] flex-row items-center rounded-2xl border p-3 ${selected ? 'border-primary bg-primary/5' : 'border-gray-200 bg-white'}`}
+                            className={`mb-3 min-h-[84px] w-[48.5%] flex-row items-center rounded-md border p-3 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL}`}
                           >
-                            <View className={`mr-2.5 h-10 w-10 items-center justify-center rounded-xl ${selected ? 'bg-primary/10' : 'bg-gray-100'}`}>
+                            <View className={`mr-2.5 h-10 w-10 items-center justify-center rounded-xl ${selected ? 'bg-primary/10 dark:bg-primary/20' : 'bg-gray-100 dark:bg-neutral-800'}`}>
                               <Icon size={20} color={selected ? PRIMARY_COLOR : '#748092'} />
                             </View>
                             <View className="min-w-0 flex-1">
@@ -190,21 +191,21 @@ export default function OnboardingScreen() {
               />
             </View>
 
-            <View className="mb-5 rounded-3xl border border-gray-100 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+            <View className="mb-5 rounded-md border border-gray-100 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
               <Text className="font-body mb-1 text-base font-bold text-gray-900 dark:text-white">Account currency</Text>
               <Text className="font-body mb-4 text-sm leading-5 text-gray-500 dark:text-neutral-400">PKR is selected by default. Choose the currency this account actually uses.</Text>
               <Controller control={control} name="currency" render={({ field: { onChange, value } }) => (
                 <View className="flex-row flex-wrap">
                   {Object.entries(CURRENCIES).map(([code, currency]) => {
                     const selected = value === code;
-                    return <Pressable key={code} accessibilityRole="radio" accessibilityState={{ selected }} accessibilityLabel={`${code}, ${currency.label}`} onPress={() => onChange(code)} className={`mb-2 mr-2 min-h-11 justify-center rounded-full border px-4 ${selected ? 'border-primary bg-primary/10' : 'border-gray-200 dark:border-neutral-700'}`}><Text className={["font-body", (`text-sm font-semibold ${selected ? 'text-primary' : 'text-gray-700 dark:text-neutral-200'}`)].filter(Boolean).join(' ')}>{code}</Text></Pressable>;
+                    return <Pressable key={code} accessibilityRole="radio" accessibilityState={{ selected }} accessibilityLabel={`${code}, ${currency.label}`} onPress={() => onChange(code)} className={`mb-2 mr-2 min-h-11 justify-center rounded-full px-4 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-sm font-semibold ${selected ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{code}</Text></Pressable>;
                   })}
                 </View>
               )} />
               {errors.currency?.message ? <Text accessibilityRole="alert" className="font-body mt-1 text-sm text-red-600">{errors.currency.message}</Text> : null}
             </View>
 
-            <View className="mb-5 rounded-3xl border border-gray-100 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+            <View className="mb-5 rounded-md border border-gray-100 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
               <View className="mb-4">
                 <Text className="font-body text-base font-bold text-gray-900 dark:text-white">Opening balance</Text>
                 <Text className="font-body mt-1 text-sm leading-5 text-gray-500">

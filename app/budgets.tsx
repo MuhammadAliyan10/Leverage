@@ -7,6 +7,8 @@ import { ChevronLeft, ChevronRight } from 'lucide-react-native';
 import { Button } from '../components/ui/Button';
 import { BudgetProgressBar } from '../components/ui/BudgetProgressBar';
 import { DoneHeader } from '../components/ui/DoneHeader';
+import { SectionHeading } from '../components/ui/SectionHeading';
+import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../components/ui/badgeStyles';
 import { useAppConfirm } from '../components/ui/useAppConfirm';
 import { useAuth } from '../src/context/AuthContext';
 import { CLASSIFICATIONS, CURRENCIES, EXPENSE_CLASSIFICATION_IDS, type CurrencyCode } from '../src/finance/domain';
@@ -80,7 +82,7 @@ export default function BudgetsScreen() {
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Monthly Budgets" onDone={() => router.canGoBack() ? router.back() : router.replace('/(tabs)')} />
     <ScrollView className="flex-1 px-5 pt-5" contentContainerStyle={{ paddingBottom: 28 }}>
-      <View className="mb-4 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-2 dark:border-neutral-800 dark:bg-neutral-900">
+      <View className="mb-4 flex-row items-center justify-between rounded-md border border-gray-100 bg-white p-2 dark:border-neutral-800 dark:bg-neutral-900">
         <Pressable accessibilityRole="button" accessibilityLabel="Previous month" onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} className="min-h-11 min-w-11 items-center justify-center rounded-xl bg-gray-50 dark:bg-neutral-800"><ChevronLeft color={PRIMARY_COLOR} /></Pressable>
         <View className="items-center"><Text className="font-body text-[10px] font-semibold uppercase tracking-wider text-gray-500 dark:text-neutral-400">Budget period</Text><Text className="font-heading mt-0.5 font-bold text-gray-900 dark:text-white">{monthLabel}</Text></View>
         <Pressable accessibilityRole="button" accessibilityLabel="Next month" onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} className="min-h-11 min-w-11 items-center justify-center rounded-xl bg-gray-50 dark:bg-neutral-800"><ChevronRight color={PRIMARY_COLOR} /></Pressable>
@@ -91,18 +93,18 @@ export default function BudgetsScreen() {
       </View>}
       {!!notice && <Text accessibilityRole="text" accessibilityLiveRegion="polite" className="font-body mb-4 rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm text-primary dark:bg-primary/10">{notice}</Text>}
       {isLoading ? <Text className="font-body py-6 text-gray-500 dark:text-neutral-400">Loading budgets…</Text> : null}
-      {[...(data?.snapshots ?? [])].map((snapshot) => <View key={snapshot.currency} className="mb-3 rounded-2xl border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
-        <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading font-bold text-gray-900 dark:text-white">{snapshot.currency} overview</Text><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{monthLabel}</Text></View>
+      {[...(data?.snapshots ?? [])].map((snapshot) => <View key={snapshot.currency} className="mb-3 rounded-md border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+        <View className="mb-3 flex-row items-center justify-between"><SectionHeading title={`${snapshot.currency} overview`} size="compact" className="flex-1"/><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{monthLabel}</Text></View>
         <View className="flex-row">
-          <View className="mr-2 flex-1 rounded-xl bg-gray-50 p-3 dark:bg-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Spent</Text><Text className="font-body mt-1 text-sm font-bold text-gray-900 dark:text-white">{formatMinorUnits(snapshot.spentMinor, snapshot.currency)}</Text></View>
-          <View className="ml-2 flex-1 rounded-xl bg-gray-50 p-3 dark:bg-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Budgeted</Text><Text className="font-body mt-1 text-sm font-bold text-gray-900 dark:text-white">{formatMinorUnits(snapshot.allocatedMinor, snapshot.currency)}</Text></View>
+          <View className="mr-2 flex-1 rounded-md bg-gray-50 p-3 dark:bg-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Spent</Text><Text className="font-body mt-1 text-sm font-bold text-gray-900 dark:text-white">{formatMinorUnits(snapshot.spentMinor, snapshot.currency)}</Text></View>
+          <View className="ml-2 flex-1 rounded-md bg-gray-50 p-3 dark:bg-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Budgeted</Text><Text className="font-body mt-1 text-sm font-bold text-gray-900 dark:text-white">{formatMinorUnits(snapshot.allocatedMinor, snapshot.currency)}</Text></View>
         </View>
         <View className="mt-3 flex-row items-center justify-between"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{snapshot.remainingMinor < 0 ? 'Over budget' : 'Remaining'}</Text><Text className={`font-body text-sm font-bold ${snapshot.remainingMinor < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>{formatMinorUnits(Math.abs(snapshot.remainingMinor), snapshot.currency)}</Text></View>
       </View>)}
-      {data?.excludedCurrencies.length ? <Text className="font-body mb-4 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-800 dark:bg-amber-950 dark:text-amber-200">Currencies are kept separate; no exchange-rate conversion is applied. Activity in { [...new Set(data.excludedCurrencies)].join(', ') } is shown only in its own currency summary.</Text> : null}
-      <Text className="font-body mb-4 text-sm leading-5 text-gray-600 dark:text-neutral-300">Set a monthly limit for each category. Spent amounts use the full selected month; transfers and opening balances are excluded. Refunds reduce category spending.</Text>
+      {data?.excludedCurrencies.length ? <Text className="font-body mb-4 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-800 dark:bg-amber-950 dark:text-amber-200">Amounts in different currencies aren’t combined. Activity in { [...new Set(data.excludedCurrencies)].join(', ') } appears in its own currency summary.</Text> : null}
+      <Text className="font-body mb-4 text-sm leading-5 text-gray-600 dark:text-neutral-300">Set a monthly limit for each category. Spending covers the whole selected month, and refunds reduce it. Transfers and starting balances don’t count.</Text>
       <Text className="font-body mb-2 text-sm font-semibold text-gray-700 dark:text-neutral-300">Budget currency</Text>
-      <View className="mb-4 flex-row flex-wrap">{(Object.keys(CURRENCIES) as CurrencyCode[]).map((code) => <Pressable key={code} accessibilityRole="radio" accessibilityState={{ checked: currency === code }} accessibilityLabel={`${CURRENCIES[code].label}, ${code}`} onPress={() => setCurrency(code)} className={`mr-2 mb-2 rounded-full px-3 py-2 ${currency === code ? 'bg-primary' : 'bg-white dark:bg-neutral-900'}`}><Text className={["font-body", (currency === code ? 'text-white text-xs font-bold' : 'text-gray-700 dark:text-neutral-200 text-xs')].filter(Boolean).join(' ')}>{code}</Text></Pressable>)}</View>
+      <View className="mb-4 flex-row flex-wrap">{(Object.keys(CURRENCIES) as CurrencyCode[]).map((code) => <Pressable key={code} accessibilityRole="radio" accessibilityState={{ checked: currency === code }} accessibilityLabel={`${CURRENCIES[code].label}, ${code}`} onPress={() => setCurrency(code)} className={`mr-2 mb-2 rounded-full px-3 py-2 ${currency === code ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs ${currency === code ? `font-bold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{code}</Text></Pressable>)}</View>
       {EXPENSE_CLASSIFICATION_IDS.map((categoryId) => {
         const item = existing.get(categoryId);
         const spent = snapshotByCurrency.get(currency)?.categories.find((category) => category.category === categoryId)?.spentMinor ?? 0;
@@ -114,13 +116,14 @@ export default function BudgetsScreen() {
             onError: (e) => setNotice(`Could not delete this budget: ${e.message}`),
           });
         };
-        return <View key={categoryId} className="mb-3 rounded-2xl border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+        return <View key={categoryId} className="mb-3 rounded-md border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
           <View className="flex-row items-center justify-between">
             <Text className="font-body flex-1 font-semibold text-gray-900 dark:text-white">{CLASSIFICATIONS[categoryId].label}</Text>
             {item ? <View className="flex-row"><Pressable accessibilityRole="button" accessibilityLabel={`Delete unused ${CLASSIFICATIONS[categoryId].label} budget`} disabled={isChangingBudget || isSaving} onPress={remove} className="mr-2 min-h-10 justify-center rounded-lg px-2"><Text className="font-body text-xs font-semibold text-gray-500 dark:text-neutral-400">Delete</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel={`Archive ${CLASSIFICATIONS[categoryId].label} budget`} disabled={isChangingBudget || isSaving} onPress={() => archive(item.id)} className="min-h-10 justify-center rounded-lg px-2"><Text className="font-body text-xs font-semibold text-red-600 dark:text-red-400">Archive</Text></Pressable></View> : null}
           </View>
           <Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">Spent {formatMinorUnits(spent, item?.currency ?? currency)}{item ? ` of ${formatMinorUnits(item.amountMinor, item.currency)}` : ' · No limit set'}</Text>
           {item ? <View className="mt-3"><BudgetProgressBar spent={Math.max(0, spent) / 100} limit={item.amountMinor / 100} /></View> : null}
+          <Text className="font-body mt-3 text-xs font-semibold text-gray-600 dark:text-neutral-300">Monthly limit · {currency}</Text>
           <View className="flex-row items-center mt-3">
             <TextInput accessibilityLabel={`${CLASSIFICATIONS[categoryId].label} monthly budget amount in ${currency}`}
               editable={!isSaving}
@@ -140,7 +143,7 @@ export default function BudgetsScreen() {
         </View>;
       })}
       <Button title="Carry unused limits to next month" disabled={isChangingBudget || isSaving} isLoading={writes.rollover.isPending} onPress={() => void rollover()} />
-      <Pressable accessibilityRole="button" onPress={() => router.push('/savings')} className="mt-4 rounded-2xl border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900"><Text className="font-body font-bold text-primary">Savings goals & emergency fund →</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">View goals and emergency-fund progress</Text></Pressable>
+      <Pressable accessibilityRole="button" onPress={() => router.push('/savings')} className="mt-4 rounded-md border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900"><Text className="font-body font-bold text-primary">Savings goals & emergency fund →</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">View goals and emergency-fund progress</Text></Pressable>
     </ScrollView>
     {dialog}
   </SafeAreaView>;

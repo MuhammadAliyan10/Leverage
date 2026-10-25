@@ -21,6 +21,14 @@ export interface BalanceAccountResult extends BalanceAccountInput {
   balanceMinor: number;
 }
 
+/** True only when a safe integer balance covers a positive minor-unit cash outflow. */
+export function hasSufficientFunds(currentBalanceMinor: number, requiredMinor: number): boolean {
+  if (!Number.isSafeInteger(currentBalanceMinor) || !Number.isSafeInteger(requiredMinor) || requiredMinor <= 0) {
+    throw new Error('A verified account balance and positive integer amount are required.');
+  }
+  return currentBalanceMinor >= requiredMinor;
+}
+
 /** Derives each account balance from its opening amount and persisted transactions. */
 export function calculateAccountBalances(
   accounts: readonly BalanceAccountInput[],

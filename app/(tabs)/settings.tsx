@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
 import { useRouter, type Href } from 'expo-router';
-import { Activity, Bell, Building2, CalendarClock, ChevronRight, Cloud, Coins, Eye, EyeOff, Fingerprint, KeyRound, LockKeyhole, LogOut, Moon, PiggyBank, ShieldCheck, TrendingUp, UserRound, UsersRound, X } from 'lucide-react-native';
+import { Bell, CalendarClock, ChartNoAxesColumnIncreasing, ChevronRight, Cloud, Coins, Database, DatabaseBackup, DatabaseCheck, Eye, EyeOff, Fingerprint, Info, KeyRound, Landmark, LockKeyhole, LogOut, Moon, PiggyBank, ShieldCheck, TrendingUp, UserRound, UsersRound, WalletCards, X } from 'lucide-react-native';
 import type { LucideIcon } from 'lucide-react-native';
 import { Controller, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -60,7 +60,7 @@ function SettingRow({ icon: Icon, title, onPress, value, right, danger = false, 
 
 function Section({ title, children, description }: { title: string; children: React.ReactNode; description?: string }) {
   return (
-    <View className="mb-4 rounded-2xl bg-white px-4 dark:bg-neutral-900">
+    <View className="mb-4 rounded-md bg-white px-4 dark:bg-neutral-900">
       <Text className="font-body pb-2 pt-4 text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-neutral-400">{title}</Text>
       {children}
       {description ? <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">{description}</Text> : null}
@@ -204,7 +204,7 @@ export default function SettingsScreen() {
           <Pressable accessibilityRole="button" accessibilityLabel="Dismiss message" onPress={() => setFeedback(null)} className="ml-2 min-h-8 min-w-8 items-center justify-center"><X size={16} color={feedback.kind === 'error' ? '#b91c1c' : PRIMARY_COLOR} /></Pressable>
         </View> : null}
 
-        <View className="mb-4 flex-row items-center rounded-2xl bg-white p-4 dark:bg-neutral-900">
+        <View className="mb-4 flex-row items-center rounded-md bg-white p-4 dark:bg-neutral-900">
           <View className="h-12 w-12 items-center justify-center rounded-full bg-primary"><Text className="font-heading text-lg font-bold text-white">{initials}</Text></View>
           <View className="ml-3 flex-1">
             <Text className="font-heading text-base font-bold text-gray-900 dark:text-white">{user?.fullName ?? '—'}</Text>
@@ -212,7 +212,7 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        <Section title="Profile" description="Profiles and financial records stay on this device. Switching profiles requires that profile’s password.">
+        <Section title="Profile" description="Profiles stay separate on this device. Enter a profile’s password to switch to it.">
           <SettingRow icon={UserRound} title="Edit display name" onPress={() => setPanel('name')} />
           <SettingRow icon={KeyRound} title="Change password" onPress={() => setPanel('password')} />
           <SettingRow icon={UsersRound} title="Switch local profile" onPress={() => setPanel('switch')} />
@@ -226,13 +226,13 @@ export default function SettingsScreen() {
             </View>
           </View>
           <SettingRow icon={Coins} title="Account currencies" value="Set per account" onPress={() => router.push('/accounts')} />
-          <SettingRow icon={Building2} title="Quick transaction account" value="Recent account by type" onPress={() => router.push('/add')} />
-          <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">The Add screen already remembers the most recent account separately for income, expenses and transfers. Amounts in different currencies remain separate.</Text>
+          <SettingRow icon={WalletCards} title="Quick transaction account" value="Recent account by type" onPress={() => router.push('/add')} />
+          <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Add remembers your last-used account for money in, spending and transfers. Different currencies stay separate.</Text>
         </Section>
 
         <Section title="Financial management">
-          <SettingRow icon={Building2} title="Accounts" onPress={() => router.push('/accounts')} />
-          <SettingRow icon={Activity} title="Monthly budgets" onPress={() => router.push('/budgets')} />
+          <SettingRow icon={Landmark} title="Accounts" onPress={() => router.push('/accounts')} />
+          <SettingRow icon={ChartNoAxesColumnIncreasing} title="Monthly budgets" onPress={() => router.push('/budgets')} />
           <SettingRow icon={PiggyBank} title="Savings & emergency fund" onPress={() => router.push('/savings')} />
           <SettingRow icon={CalendarClock} title="Recurring, bills & debt" onPress={() => router.push('/obligations')} />
           <SettingRow icon={TrendingUp} title="Assets, investments & net worth" onPress={() => router.push('/assets')} />
@@ -250,14 +250,14 @@ export default function SettingsScreen() {
           <SettingRow icon={CalendarClock} title="Manage bill reminders" onPress={() => router.push('/obligations')} />
         </Section>
 
-        <Section title="Data & privacy" description="Profiles are stored separately on each device. The app saves to its local database first, then queues supported records for Neon cloud sync when connected; offline changes stay on this device until confirmed. Connecting queues supported existing history for import. Check Cloud Sync for pending or rejected changes before relying on another device. SQLCipher is configured for native builds, but encryption and recovery still require Android runtime verification. Encrypted backups include all local profiles on this device; keep the backup file and its separate passphrase safe. Leverage cannot recover a forgotten passphrase. Android automatic device backup is disabled.">
-          <SettingRow icon={ShieldCheck} title="Storage" value="Local database + optional cloud sync" />
-          {disposableVerificationBuild ? <SettingRow icon={ShieldCheck} title="Native storage verification" value="Disposable test only" onPress={() => router.push('/native-verification' as Href)} /> : null}
-          <SettingRow icon={Activity} title="Encrypted backup & restore" value={Platform.OS === 'web' ? 'Unavailable in browser' : 'Available'} onPress={Platform.OS === 'web' ? undefined : () => setRecoveryOpen(true)} />
+        <Section title="Data & privacy" description="Each device keeps its own profiles and records. Leverage saves changes on this device first, then sends supported records to Neon when connected. Offline changes wait here until they sync. Cloud Sync shows items still waiting or needing attention; check it before using another device. Backups include every profile on this device. Keep the backup file and its passphrase safe; a forgotten passphrase cannot be recovered. Android device backup is off. Native encryption and restore still need Android testing.">
+          <SettingRow icon={Database} title="Storage" value="Local database + optional cloud sync" />
+          {disposableVerificationBuild ? <SettingRow icon={DatabaseCheck} title="Native storage verification" value="Disposable test only" onPress={() => router.push('/native-verification' as Href)} /> : null}
+          <SettingRow icon={DatabaseBackup} title="Encrypted backup & restore" value={Platform.OS === 'web' ? 'Unavailable in browser' : 'Available'} onPress={Platform.OS === 'web' ? undefined : () => setRecoveryOpen(true)} />
         </Section>
 
         <Section title="About" description="Personal finance tracking designed to work offline. Leverage does not connect to banks or provide live investment prices.">
-          <SettingRow icon={Activity} title="Leverage version" value={version} />
+          <SettingRow icon={Info} title="Leverage version" value={version} />
           <SettingRow icon={Cloud} title="Cloud sync" value={Platform.OS === 'web' ? 'Unavailable in browser' : cloudApiConfigured ? 'Connect account' : 'Not configured'} onPress={Platform.OS === 'web' ? undefined : () => setCloudSyncOpen(true)} />
         </Section>
 
@@ -301,7 +301,7 @@ function SignOutDialog({ visible, busy, onCancel, onConfirm }: { visible: boolea
   return <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
     <View className="flex-1 items-center justify-center px-6">
       <Pressable accessibilityRole="button" accessibilityLabel="Dismiss sign out confirmation" disabled={busy} onPress={onCancel} className="absolute inset-0 bg-black/50" />
-      <View accessibilityViewIsModal className="w-full max-w-[420px] rounded-2xl bg-white p-5 shadow-xl dark:bg-neutral-900">
+      <View accessibilityViewIsModal className="w-full max-w-[420px] rounded-md bg-white p-5 shadow-xl dark:bg-neutral-900">
         <View className="mb-3 h-11 w-11 items-center justify-center rounded-full bg-red-50 dark:bg-red-500/15"><LogOut size={20} color="#dc2626" /></View>
         <Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Sign out of Leverage?</Text>
         <Text className="font-body mt-2 text-sm leading-5 text-gray-600 dark:text-neutral-300">Your local financial records will stay on this device. Pending bill reminders for this profile will be removed.</Text>
@@ -363,13 +363,13 @@ function RecoveryModal({ visible, onClose, onExport, onRestore }: {
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1 justify-end bg-black/40">
       <SafeAreaView edges={['bottom']} className="rounded-t-3xl bg-gray-50 px-5 pt-4 dark:bg-neutral-950" style={{ borderBottomLeftRadius: 0, borderBottomRightRadius: 0 }}>
         <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-xl font-bold text-gray-900 dark:text-white">Encrypted backup</Text><Pressable accessibilityRole="button" accessibilityLabel="Close backup" onPress={onClose} className="min-h-11 min-w-11 items-center justify-center rounded-full bg-white dark:bg-neutral-800"><X size={20} color="#687386" /></Pressable></View>
-        <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">This file contains all local profiles on this device. Use a unique passphrase with at least 12 characters. A random salt and PBKDF2 protect the encrypted backup.</Text>
+        <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">This backup includes every profile saved on this device. Choose a unique passphrase with at least 12 characters and keep it safe; you will need it to restore the file.</Text>
         <Input label="Backup passphrase" value={passphrase} onChangeText={setPassphrase} secureTextEntry={!showPassword} autoCapitalize="none" autoCorrect={false} error={undefined} trailingAction={<Pressable accessibilityRole="button" accessibilityLabel={showPassword ? 'Hide passphrase' : 'Show passphrase'} onPress={() => setShowPassword((shown) => !shown)}>{showPassword ? <EyeOff size={19} color="#737d8d" /> : <Eye size={19} color="#737d8d" />}</Pressable>} />
         <Input label="Confirm passphrase" value={confirmation} onChangeText={setConfirmation} secureTextEntry={!showPassword} autoCapitalize="none" autoCorrect={false} error={undefined} />
         {error ? <Text accessibilityRole="alert" className="font-body mb-3 text-sm text-red-600">{error}</Text> : null}
         <Button title="Create encrypted backup" onPress={() => void exportBackup()} isLoading={busy} />
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => void restoreBackup()} className="mt-3 min-h-12 items-center justify-center"><Text className="font-body font-semibold text-primary">Choose backup file and restore</Text></Pressable>
-        <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Restore replaces this device’s local records after integrity, schema, profile, and financial checks. A successful restore signs you out.</Text>
+        <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Restore replaces the profiles and records saved on this device. You will be signed out when it finishes. If the backup fails its checks, your current records stay in place.</Text>
       </SafeAreaView>
     </KeyboardAvoidingView>
   </Modal>{dialog}</>;
@@ -464,7 +464,7 @@ function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSav
             {loadingProfiles ? <View className="items-center py-6"><ActivityIndicator color={PRIMARY_COLOR} /><Text className="font-body mt-2 text-sm text-gray-500">Loading profiles…</Text></View> : null}
             {profileError ? <View className="py-2"><Text accessibilityRole="alert" className="font-body text-sm text-red-600">{profileError}</Text><Pressable accessibilityRole="button" onPress={() => setRetry((value) => value + 1)} className="mt-3 min-h-11 justify-center"><Text className="font-body font-semibold text-primary">Retry</Text></Pressable></View> : null}
             {!loadingProfiles && !profileError ? <ScrollView keyboardShouldPersistTaps="handled">
-              {profiles.filter((profile) => profile.id !== currentProfileId).map((profile) => <Pressable key={profile.id} accessibilityRole="button" accessibilityLabel={`Sign in to ${profile.fullName}`} disabled={switchingProfile !== null} onPress={() => void chooseProfile(profile)} className="mb-2 min-h-14 flex-row items-center justify-between rounded-xl bg-white px-4 dark:bg-neutral-900"><View><Text className="font-body font-semibold text-gray-900 dark:text-white">{profile.fullName}</Text><Text className="font-body mt-1 text-sm text-gray-500 dark:text-neutral-400">{profile.email}</Text></View>{switchingProfile === profile.id ? <ActivityIndicator color={PRIMARY_COLOR} /> : <ChevronRight size={18} color="#9ca3af" />}</Pressable>)}
+              {profiles.filter((profile) => profile.id !== currentProfileId).map((profile) => <Pressable key={profile.id} accessibilityRole="button" accessibilityLabel={`Sign in to ${profile.fullName}`} disabled={switchingProfile !== null} onPress={() => void chooseProfile(profile)} className="mb-2 min-h-14 flex-row items-center justify-between rounded-md bg-white px-4 dark:bg-neutral-900"><View><Text className="font-body font-semibold text-gray-900 dark:text-white">{profile.fullName}</Text><Text className="font-body mt-1 text-sm text-gray-500 dark:text-neutral-400">{profile.email}</Text></View>{switchingProfile === profile.id ? <ActivityIndicator color={PRIMARY_COLOR} /> : <ChevronRight size={18} color="#9ca3af" />}</Pressable>)}
               {profiles.length > 0 && profiles.every((profile) => profile.id === currentProfileId) ? <Text className="font-body py-3 text-sm text-gray-500 dark:text-neutral-400">No other local profiles are available.</Text> : null}
               {profiles.length === 0 ? <Text className="font-body py-3 text-sm text-gray-500 dark:text-neutral-400">No local profiles are available.</Text> : null}
             </ScrollView> : null}

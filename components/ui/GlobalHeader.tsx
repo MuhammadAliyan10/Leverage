@@ -21,7 +21,7 @@ export const GlobalHeader: React.FC<GlobalHeaderProps> = ({
   const isOffline = networkState.isConnected === false || networkState.isInternetReachable === false;
 
   return (
-    <View className="flex-row items-center justify-between px-6 pt-3 pb-3 bg-white dark:bg-neutral-900 border-b border-gray-100 dark:border-neutral-800">
+    <View className="flex-row items-center justify-between border-b border-gray-200 bg-[#f3f2ff] px-6 pt-3 pb-3 dark:border-neutral-800 dark:bg-neutral-900">
       <View className="flex-1 mr-4">
         <View className="flex-row items-center">
           <Text style={{ fontFamily: 'InterBlack' }} className="text-xl leading-6 text-black dark:text-white">{title}</Text>

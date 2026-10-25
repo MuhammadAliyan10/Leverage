@@ -86,12 +86,21 @@ export function parseMinorUnits(input: string, fractionDigits = 2): number {
 
 /** Groups the integer portion of an editable money value without changing its decimal text. */
 export function formatGroupedAmountInput(input: string): string {
-  let cleaned = input.replaceAll(',', '').replace(/[^\d.]/g, '');
-  if (cleaned.startsWith('.')) cleaned = `0${cleaned}`;
-  const separator = cleaned.indexOf('.');
-  const whole = (separator < 0 ? cleaned : cleaned.slice(0, separator)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  const fraction = separator < 0 ? '' : `.${cleaned.slice(separator + 1).replaceAll('.', '')}`;
-  return `${whole}${fraction}`;
+  // Formatting must never "repair" a malformed value into a different valid
+  // amount (for example, `1,2` must not silently become `12`). Keep invalid
+  // text visible so parseMinorUnits can reject it with a useful form error.
+  if (!/^[\d.,]*$/.test(input)) return input;
+  const parts = input.split('.');
+  if (parts.length > 2) return input;
+
+  const wholeInput = parts[0];
+  const fraction = parts[1];
+  if (wholeInput.includes(',') && !/^\d{1,3}(?:,\d{3})+$/.test(wholeInput)) return input;
+
+  let whole = wholeInput.replaceAll(',', '');
+  if (!whole && fraction !== undefined) whole = '0';
+  whole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return fraction === undefined ? whole : `${whole}.${fraction}`;
 }
 
 /** Formats integer minor units for display. Keep calculations in minor units. */
