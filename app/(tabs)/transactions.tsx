@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, SectionList, TextInput, Pressable, Alert, ScrollView, ActivityIndicator, Modal } from 'react-native';
+import { View, Text, SectionList, TextInput, Pressable, Alert, ScrollView, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { DatePickerField } from '../../components/ui/DatePickerField';
 import { Filter, Search, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, X, Edit } from 'lucide-react-native';
-import BottomSheet, { BottomSheetBackdrop, type BottomSheetBackdropProps } from '@gorhom/bottom-sheet';
+import BottomSheet, { BottomSheetBackdrop, BottomSheetScrollView, type BottomSheetBackdropProps } from '@gorhom/bottom-sheet';
 import { useTransactions, type TransactionSection } from '../../hooks/queries/useTransactions';
 import type { LocalTransaction, TransactionListFilters } from '../../src/db/local/client';
 import { localDb } from '../../src/db/local/client';
@@ -79,9 +79,16 @@ export default function TransactionsScreen() {
   const [isFocused, setIsFocused] = useState(false);
   const [filterError, setFilterError] = useState('');
   const detailSheetRef = useRef<BottomSheet>(null);
+  const filterSheetRef = useRef<BottomSheet>(null);
   const selectedIdRef = useRef<string | null>(null);
   const [filtersVisible, setFiltersVisible] = useState(false);
   const sheetPoints = useMemo(() => ['78%'], []);
+  const filterSheetPoints = useMemo(() => ['80%'], []);
+
+  useEffect(() => {
+    if (filtersVisible) filterSheetRef.current?.expand();
+    else filterSheetRef.current?.close();
+  }, [filtersVisible]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 250);
@@ -295,13 +302,22 @@ export default function TransactionsScreen() {
         />
       )}
 
-      <Modal visible={filtersVisible} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setFiltersVisible(false)}>
-        <View className="flex-1 justify-end">
-          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss transaction filters" onPress={() => setFiltersVisible(false)} className="absolute inset-0 bg-black/50" />
-          <View style={{ maxHeight: '82%' }} className="w-full rounded-t-2xl border-t border-gray-200 bg-white px-5 pt-3 dark:border-neutral-700 dark:bg-neutral-900">
-            <View className="mb-3 h-1 w-10 self-center rounded-full bg-gray-300 dark:bg-neutral-600" />
-            <ScrollView className="flex-1" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 28 }}>
+      <BottomSheet
+        ref={filterSheetRef}
+        index={-1}
+        snapPoints={filterSheetPoints}
+        enableDynamicSizing={false}
+        enablePanDownToClose
+        backdropComponent={backdrop}
+        onChange={(index) => { if (index < 0) setFiltersVisible(false); }}
+        keyboardBehavior="interactive"
+        keyboardBlurBehavior="restore"
+        handleIndicatorStyle={{ backgroundColor: '#9ca3af', width: 40 }}
+        backgroundStyle={{ backgroundColor: 'transparent' }}
+      >
+        <View className="flex-1 border-t border-gray-200 bg-white px-5 pt-3 dark:border-neutral-700 dark:bg-neutral-900">
           <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Filter transactions</Text><Pressable accessibilityRole="button" accessibilityLabel="Close filters" onPress={() => setFiltersVisible(false)}><X size={22} color="#777" /></Pressable></View>
+          <BottomSheetScrollView className="flex-1" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 28 }}>
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Type</Text><View className="mb-4 flex-row flex-wrap">{FILTER_TYPES.map((type) => { const selected = draftTypes.length === 0 || draftTypes.includes(type); return <Pressable key={type} accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => setDraftTypes((current) => { const effective = current.length ? current : [...FILTER_TYPES]; return effective.includes(type) ? effective.filter((item) => item !== type) : [...effective, type]; })} className={`mb-2 mr-2 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL} px-3 py-2`}><Text className={`font-body text-xs ${selected ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{type}</Text></Pressable>; })}</View>
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Account</Text>{accountsQuery.isError ? <Pressable accessibilityRole="button" className="mb-3 py-2" onPress={() => void accountsQuery.refetch()}><Text className="font-body text-sm text-red-600">Accounts unavailable · tap to retry</Text></Pressable> : <View className="mb-4 flex-row flex-wrap"><Choice label="All accounts" selected={!draftAccountId} onPress={() => setDraftAccountId('')} />{(accountsQuery.data ?? []).map((account) => <Choice key={account.id} label={`${account.name}${account.archivedAt ? ' · archived' : ''}`} selected={draftAccountId === account.id} onPress={() => setDraftAccountId(account.id)} />)}</View>}
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Category</Text><View className="mb-4 flex-row flex-wrap"><Choice label="All categories" selected={!draftCategoryId} onPress={() => setDraftCategoryId('')} />{Object.entries(CLASSIFICATIONS).map(([id, value]) => <Choice key={id} label={value.label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}{EVENT_CATEGORIES.map(([id, label]) => <Choice key={id} label={label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}</View>
@@ -309,10 +325,9 @@ export default function TransactionsScreen() {
           <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Date range</Text><View className="flex-row"><View className="mr-2 flex-1"><DatePickerField label="From date" accessibilityLabel="Start date" value={draftDates.startDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, startDate: value || undefined }))} clearable/></View><View className="flex-1"><DatePickerField label="Through date" accessibilityLabel="End date" value={draftDates.endDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, endDate: value || undefined }))} clearable/></View></View>
           {!!filterError && <Text accessibilityRole="alert" className="mb-3 font-body text-sm text-red-600">{filterError}</Text>}
           <View className="flex-row"><Pressable accessibilityRole="button" className="mr-2 h-12 flex-1 items-center justify-center border border-gray-300 dark:border-neutral-700" onPress={clearFilters}><Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Clear</Text></Pressable><Pressable accessibilityRole="button" className="houselog-button h-12 flex-1 items-center justify-center" onPress={applyFilters}><Text className="font-body font-semibold text-white">Apply filters</Text></Pressable></View>
-            </ScrollView>
-          </View>
+          </BottomSheetScrollView>
         </View>
-      </Modal>
+      </BottomSheet>
 
       <BottomSheet ref={detailSheetRef} index={-1} snapPoints={sheetPoints} enablePanDownToClose backdropComponent={backdrop} onChange={onDetailsChange} keyboardBehavior="interactive" keyboardBlurBehavior="restore" handleIndicatorStyle={{ backgroundColor: '#9ca3af', width: 40 }}>
         {selectedTx && selectedActivity ? <ScrollView className="flex-1 px-5" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 32 }}>
