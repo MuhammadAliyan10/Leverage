@@ -449,8 +449,8 @@ export default function AddTransactionScreen() {
 
           {/* Amount Hero Input */}
           <View className="w-full items-center justify-center py-6">
-            <Text className="font-body mb-2 font-semibold text-gray-500 dark:text-neutral-400">{isRemittance ? 'Converted amount (PKR)' : transactionType === 'Transfer' ? 'Transfer amount' : 'Amount'}</Text>
-            <View className="relative h-16 w-full items-center justify-center">
+            <Text className="font-body mb-3 font-semibold text-gray-500 dark:text-neutral-400">{isRemittance ? 'Converted amount (PKR)' : transactionType === 'Transfer' ? 'Transfer amount' : 'Amount'}</Text>
+            <View className="relative h-20 w-full items-center justify-center">
               <Text className="font-heading absolute left-[12%] text-lg font-bold text-gray-500 dark:text-neutral-400">{isRemittance ? 'PKR' : selectedAccount?.currency ?? 'Select account'}</Text>
               <Controller
                 control={control}
@@ -459,7 +459,7 @@ export default function AddTransactionScreen() {
                   <TextInput
                     accessibilityLabel={`${transactionType} amount${selectedAccount ? ` in ${selectedAccount.currency}` : ''}`}
                     className="font-heading h-full w-full text-center text-5xl font-bold text-gray-950 dark:text-white"
-                    style={{ width: '100%', textAlign: 'center' }}
+                    style={{ width: '100%', textAlign: 'center', textAlignVertical: 'center', paddingVertical: 0, lineHeight: 60, includeFontPadding: false }}
                     keyboardType="decimal-pad"
                     autoFocus={Platform.OS !== 'web'}
                     placeholder="0"
@@ -627,11 +627,11 @@ export default function AddTransactionScreen() {
               <Text className="font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Date and time</Text>
               <View className="flex-row gap-2">
                 <Pressable accessibilityRole="button" accessibilityLabel="Choose transaction date" onPress={() => setDatePickerVisible(true)} className="min-h-11 flex-1 flex-row items-center border border-gray-200 bg-gray-50 px-3 py-1.5 dark:border-neutral-700 dark:bg-neutral-800">
-                  <CalendarDays size={18} color={PRIMARY_COLOR} className="mr-2" />
+                  <CalendarDays size={18} color={PRIMARY_COLOR} style={{ marginRight: 8 }} />
                   <Text className="font-body text-sm font-semibold text-gray-900 dark:text-white">{selectedDate.toLocaleDateString('en-PK', { day: '2-digit', month: 'short', year: 'numeric' })}</Text>
                 </Pressable>
                 <Pressable accessibilityRole="button" accessibilityLabel="Choose transaction time" onPress={() => setTimePickerVisible(true)} className="min-h-11 flex-1 flex-row items-center border border-gray-200 bg-gray-50 px-3 py-1.5 dark:border-neutral-700 dark:bg-neutral-800">
-                  <Clock3 size={18} color={PRIMARY_COLOR} className="mr-2" />
+                  <Clock3 size={18} color={PRIMARY_COLOR} style={{ marginRight: 8 }} />
                   <Text className="font-body text-sm font-semibold text-gray-900 dark:text-white">{selectedDate.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</Text>
                 </Pressable>
               </View>
