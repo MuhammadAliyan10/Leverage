@@ -63,6 +63,7 @@
   },
   "scripts": {
     "start": "expo start",
+    "postinstall": "node scripts/patch-css-interop-warning.mjs",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo run:android",
     "ios": "expo run:ios",
