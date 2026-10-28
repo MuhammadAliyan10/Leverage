@@ -10,12 +10,13 @@ import { useColorScheme } from 'nativewind';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../../components/ui/badgeStyles';
 import { SectionHeading } from '../../components/ui/SectionHeading';
+import { DatePickerField } from '../../components/ui/DatePickerField';
 import { useInsightsMetrics } from '../../hooks/queries/useInsightsMetrics';
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 import { CLASSIFICATIONS } from '../../src/finance/domain';
 import { formatMinorUnits } from '../../src/finance/ledger';
 import { INSIGHTS_PERIODS, type InsightsPeriod } from '../../src/finance/insights';
-import { transactionDateTimestamp } from '../../src/finance/reporting';
+import { calculateCashFlowSections, transactionDateTimestamp } from '../../src/finance/reporting';
 
 const CATEGORY_STYLE: Record<string, { color: string; icon: LucideIcon }> = {
   food: { color: '#F59E0B', icon: ShoppingCart }, groceries: { color: '#F59E0B', icon: ShoppingCart },
@@ -37,6 +38,17 @@ const ORANGE = '#EF8B36';
 
 function safeRatio(numerator: number, denominator: number): number {
   return denominator > 0 ? Math.min(1, Math.max(0, numerator / denominator)) : 0;
+}
+
+function dateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function parseDateKey(value: string): Date | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return undefined;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12);
+  return date.getFullYear() === Number(match[1]) && date.getMonth() === Number(match[2]) - 1 && date.getDate() === Number(match[3]) ? date : undefined;
 }
 
 function categoryStyle(category: string) {
@@ -61,18 +73,37 @@ function Money({ amount, currency, color, className = 'text-xl' }: { amount: num
 
 export default function InsightsScreen() {
   const [period, setPeriod] = useState<InsightsPeriod>('This month');
+  const [customStartDate, setCustomStartDate] = useState(() => dateKey(new Date(new Date().getFullYear(), new Date().getMonth(), 1)));
+  const [customEndDate, setCustomEndDate] = useState(() => dateKey(new Date()));
+  const [reportView, setReportView] = useState<'review' | 'overview' | 'income' | 'cashflow' | 'balance'>('review');
   const [currencyPreference, setCurrencyPreference] = useState<string | null>(null);
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
   const { colorScheme } = useColorScheme();
   const router = useRouter();
   const { width } = useWindowDimensions();
   const dark = colorScheme === 'dark';
-  const dataQuery = useInsightsMetrics(period, currencyPreference);
+  const customDates = { startDate: customStartDate, endDate: customEndDate };
+  const dataQuery = useInsightsMetrics(period, currencyPreference, customDates);
   const data = dataQuery.data;
+  const periodLabel = period === 'Custom' ? `${formatDateOnly(customStartDate)} – ${formatDateOnly(customEndDate)}` : period;
   const selectedPoint = data?.monthReportRows.find((point) => point.id === selectedMonth) ?? data?.monthReportRows.at(-1);
   const selectedLiquidity = data?.liquidity.find((position) => position.currency === data.currency);
   const selectedNetWorth = data?.netWorth.find((position) => position.currency === data.currency);
+  const cashFlowSections = useMemo(() => data ? calculateCashFlowSections(data.reportRows, data.currency, data.currentRange) : [], [data]);
+  const cashFlowNet = cashFlowSections.reduce((sum, section) => sum + BigInt(section.netMinor), 0n);
+  const cashFlowNetMinor = cashFlowNet <= BigInt(Number.MAX_SAFE_INTEGER) && cashFlowNet >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(cashFlowNet) : null;
   const activityScale = data ? Math.max(Math.abs(data.report.incomeMinor), Math.abs(data.report.expenseMinor), 1) : 1;
+  const categoryIncrease = useMemo(() => {
+    if (!data) return null;
+    const previous = new Map(data.previousReport.categoryTotals.map((item) => [item.category, BigInt(item.amountMinor)]));
+    let largest: { category: string; amountMinor: number } | null = null;
+    for (const item of data.report.categoryTotals) {
+      const increase = BigInt(item.amountMinor) - (previous.get(item.category) ?? 0n);
+      if (increase <= 0n || increase > BigInt(Number.MAX_SAFE_INTEGER)) continue;
+      if (!largest || increase > BigInt(largest.amountMinor)) largest = { category: item.category, amountMinor: Number(increase) };
+    }
+    return largest;
+  }, [data]);
 
   const pieData = useMemo(() => (data?.categories ?? []).filter((item) => item.amountMinor > 0).map((item) => {
     const style = categoryStyle(item.category);
@@ -100,22 +131,83 @@ export default function InsightsScreen() {
   const trendChartWidth = Math.max(240, width - 64);
 
   return (
-    <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['top']}>
+    <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
       <GlobalHeader title="Insights" description="See the patterns behind your money" />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 14, paddingBottom: 36 }} showsVerticalScrollIndicator={false}>
         <View className="mb-4">
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
             {INSIGHTS_PERIODS.map((item) => <Pressable key={item} accessibilityRole="button" accessibilityState={{ selected: period === item }} onPress={() => { setPeriod(item); setSelectedMonth(null); }} className={`min-h-10 justify-center px-3 ${period === item ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${period === item ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{item}</Text></Pressable>)}
           </ScrollView>
+          {period === 'Custom' ? <>
+            <View className="mt-3 flex-row">
+              <View className="mr-2 flex-1"><DatePickerField label="Start date" value={customStartDate} maxDate={parseDateKey(customEndDate) ?? new Date()} onChangeText={setCustomStartDate} /></View>
+              <View className="flex-1"><DatePickerField label="End date" value={customEndDate} minDate={parseDateKey(customStartDate)} maxDate={new Date()} onChangeText={setCustomEndDate} /></View>
+            </View>
+            {dataQuery.customRangeError ? <Text accessibilityLiveRegion="polite" className="-mt-2 mb-2 font-body text-xs text-rose-700 dark:text-rose-300">{dataQuery.customRangeError}</Text> : null}
+          </> : null}
           {data && data.currencies.length > 1 ? <ScrollView horizontal className="mt-2" showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>{data.currencies.map((currency) => <Pressable key={currency} accessibilityRole="button" accessibilityState={{ selected: data.currency === currency }} onPress={() => setCurrencyPreference(currency)} className={`min-h-9 justify-center px-3 ${data.currency === currency ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${data.currency === currency ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{currency}</Text></Pressable>)}</ScrollView> : null}
         </View>
 
-            {dataQuery.isLoading ? <View accessibilityLabel="Loading financial insights" className="gap-3">{[0, 1, 2].map((item) => <View key={item} className="mb-2 h-32 border border-gray-100 bg-white dark:border-neutral-800 dark:bg-neutral-900" />)}<ActivityIndicator color={PRIMARY_COLOR} /></View> : dataQuery.isError ? <Card className="items-center py-8"><RefreshCw size={22} color={PRIMARY_COLOR} /><Text className="mt-3 font-heading font-semibold text-gray-900 dark:text-white">Insights could not be loaded</Text><Text className="mt-1 text-center font-body text-sm text-gray-500 dark:text-neutral-400">{dataQuery.error instanceof Error ? dataQuery.error.message : 'Your saved records are unchanged.'}</Text><Pressable accessibilityRole="button" onPress={() => void dataQuery.refetch()} className="houselog-button mt-4 px-5 py-3"><Text className="font-body font-semibold text-white">Retry</Text></Pressable></Card> : data ? <>
-          <Text className="mb-2 font-body text-[11px] text-gray-500 dark:text-neutral-400">{period} · {data.currency} only · {data.excludedCurrencies.length ? `excludes ${data.excludedCurrencies.join(', ')}` : 'no other recorded currencies excluded'}</Text>
+        <ScrollView accessibilityRole="tablist" horizontal showsHorizontalScrollIndicator={false} className="mb-3" contentContainerStyle={{ gap: 8 }}>
+          {([
+            ['review', 'Review'], ['overview', 'Overview'], ['income', 'Income statement'], ['cashflow', 'Cash flow'], ['balance', 'Balance sheet'],
+          ] as const).map(([key, label]) => <Pressable key={key} accessibilityRole="tab" accessibilityState={{ selected: reportView === key }} onPress={() => setReportView(key)} className={`min-h-10 shrink-0 items-center justify-center px-3 ${reportView === key ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${reportView === key ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{label}</Text></Pressable>)}
+        </ScrollView>
 
+          {dataQuery.customRangeError ? <Card><Empty text="Choose a valid date range to load this report." /></Card> : dataQuery.isLoading ? <View accessibilityLabel="Loading financial insights" className="gap-3">{[0, 1, 2].map((item) => <View key={item} className="mb-2 h-32 border border-gray-100 bg-white dark:border-neutral-800 dark:bg-neutral-900" />)}<ActivityIndicator color={PRIMARY_COLOR} /></View> : dataQuery.isError ? <Card className="items-center py-8"><RefreshCw size={22} color={PRIMARY_COLOR} /><Text className="mt-3 font-heading font-semibold text-gray-900 dark:text-white">Insights could not be loaded</Text><Text className="mt-1 text-center font-body text-sm text-gray-500 dark:text-neutral-400">{dataQuery.error instanceof Error ? dataQuery.error.message : 'Your saved records are unchanged.'}</Text><Pressable accessibilityRole="button" onPress={() => void dataQuery.refetch()} className="houselog-button mt-4 px-5 py-3"><Text className="font-body font-semibold text-white">Retry</Text></Pressable></Card> : data ? <>
+          <Text className="mb-2 font-body text-[11px] text-gray-500 dark:text-neutral-400">{periodLabel} · {data.currency} only · {data.excludedCurrencies.length ? `excludes ${data.excludedCurrencies.join(', ')}` : 'no other recorded currencies excluded'}</Text>
+
+          {reportView === 'review' ? <>
+            <Card>
+              <SectionTitle title="Money review" hint={`${periodLabel} · ${data.currency}. A quick summary of what came in, what went out, and what may need a look.`} />
+              <View className={`mb-3 rounded-md border p-4 ${data.report.netMinor >= 0 ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-900/60 dark:bg-emerald-950/30' : 'border-red-200 bg-red-50 dark:border-red-900/60 dark:bg-red-950/30'}`}>
+                <Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">{data.report.netMinor >= 0 ? 'Income left after recorded spending' : 'Spending above recorded income'}</Text>
+                <Money amount={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? GREEN : '#DC4C4C'} className="mt-1 text-2xl" />
+                <Text className="mt-1 font-body text-xs leading-5 text-gray-600 dark:text-neutral-300">This is a period total, not your current account balance or a forecast.</Text>
+              </View>
+              <View className="flex-row gap-3">
+                <View className="min-w-0 flex-1 rounded-md bg-emerald-50 p-3 dark:bg-emerald-950/30"><Text className="font-body text-xs font-medium text-gray-600 dark:text-neutral-300">Money in</Text><Money amount={data.report.incomeMinor} currency={data.currency} color={GREEN} className="mt-1 text-base" /></View>
+                <View className="min-w-0 flex-1 rounded-md bg-orange-50 p-3 dark:bg-orange-950/30"><Text className="font-body text-xs font-medium text-gray-600 dark:text-neutral-300">Spending after refunds</Text><Money amount={data.report.expenseMinor} currency={data.currency} color={ORANGE} className="mt-1 text-base" /></View>
+              </View>
+            </Card>
+
+            <Card>
+              <SectionTitle title="Compared with the previous period" hint="A simple change in recorded income and spending. No comparison appears when there is no usable earlier activity." />
+              <ReviewChange label="Income" value={data.incomeChangePercent} detail="More income is shown as up." />
+              <View className="my-2 border-t border-gray-100 dark:border-neutral-800" />
+              <ReviewChange label="Spending" value={data.expenseChangePercent} detail="More spending is shown as up." />
+              {categoryIncrease ? <View className="mt-3 rounded-md bg-orange-50 p-3 dark:bg-orange-950/30"><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">Biggest category increase</Text><Text className="mt-1 font-body text-xs text-gray-600 dark:text-neutral-300">{CLASSIFICATIONS[categoryIncrease.category as keyof typeof CLASSIFICATIONS]?.label ?? categoryIncrease.category.replaceAll('_', ' ')} · up {formatMinorUnits(categoryIncrease.amountMinor, data.currency)} from the previous period.</Text></View> : null}
+            </Card>
+
+            {data.report.netMinor < 0 ? <ReviewNotice title="Spending was higher than income" detail={`The difference is ${formatMinorUnits(Math.abs(data.report.netMinor), data.currency)} for this period. Check the transactions and categories to see what drove it.`} action="Review transactions" onPress={() => goTransactions({ currency: data.currency, startDate: data.currentRange.startDate.slice(0, 10), endDate: data.currentRange.endDate.slice(0, 10) })} tone="red" /> : null}
+            {data.expenseChangePercent !== null && data.expenseChangePercent >= 15 ? <ReviewNotice title="Spending increased" detail={`Recorded spending is up ${data.expenseChangePercent.toFixed(0)}% versus the previous period. Check whether this came from one category or several.`} action="See spending" onPress={() => goTransactions({ currency: data.currency, startDate: data.currentRange.startDate.slice(0, 10), endDate: data.currentRange.endDate.slice(0, 10) })} tone="orange" /> : null}
+
+            {data.budgets.some((item) => item.remainingMinor < 0) ? <Card>
+              <SectionTitle title="Budget limits to check" hint="These categories have recorded spending above their budget for the selected period." />
+              {data.budgets.filter((item) => item.remainingMinor < 0).map((item) => <View key={item.category} className="mb-2 flex-row items-center justify-between gap-3"><Text className="flex-1 font-body text-sm text-gray-700 dark:text-neutral-200">{CLASSIFICATIONS[item.category as keyof typeof CLASSIFICATIONS]?.label ?? item.category.replaceAll('_', ' ')}</Text><Money amount={Math.abs(item.remainingMinor)} currency={data.currency} color="#DC4C4C" className="text-sm" /></View>)}
+              <Pressable accessibilityRole="link" onPress={() => router.push('/budgets')} className="mt-2 self-start border-b border-primary pb-0.5"><Text className="font-body text-xs font-semibold text-primary">Review budgets</Text></Pressable>
+            </Card> : null}
+
+            {period === 'This month' && data.currentMonthBudgets.length === 0 ? <ReviewNotice title="No monthly budget is set" detail="Add limits for the categories you want to keep an eye on. You can change them any time." action="Set a budget" onPress={() => router.push('/budgets')} tone="primary" /> : null}
+            {data.report.netMinor > 0 ? <ReviewNotice title="You have a period surplus" detail="If some of this money is meant for a goal, you can reserve it on the Savings page. This summary does not move money." action="View savings" onPress={() => router.push('/savings')} tone="primary" /> : null}
+
+            <Card>
+              <SectionTitle title="Coming up" hint={`Known bills and schedule reminders in ${data.currency}. These are reminders, not automatic payments.`} />
+              {data.bills.length === 0 && data.scheduledItems.length === 0 ? <Empty text="No upcoming bills or active schedule reminders are recorded." /> : <>
+                {data.bills.map((bill) => <View key={`bill-${bill.id}`} className="mb-3 flex-row items-center justify-between gap-3"><View className="min-w-0 flex-1"><Text numberOfLines={1} className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{bill.name}</Text><Text className="mt-0.5 font-body text-xs capitalize text-gray-500 dark:text-neutral-400">Bill · {bill.status} · {formatDateOnly(bill.dueDate)}</Text></View><Money amount={Math.max(0, bill.amountMinor - bill.paidMinor)} currency={bill.currency} className="text-sm" /></View>)}
+                {data.scheduledItems.map((item) => <View key={`schedule-${item.id}`} className="mb-3 flex-row items-center justify-between gap-3"><View className="min-w-0 flex-1"><Text numberOfLines={1} className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{item.name}</Text><Text className="mt-0.5 font-body text-xs capitalize text-gray-500 dark:text-neutral-400">{item.scheduleType} reminder · {formatDateOnly(item.nextDueDate)}</Text></View><Money amount={item.amountMinor} currency={item.currency} className="text-sm" /></View>)}
+              </>}
+              <Text className="mt-1 font-body text-[11px] leading-4 text-gray-500 dark:text-neutral-400">Leverage does not charge your bank or wallet. Record a payment only after it actually happens.</Text>
+              <Pressable accessibilityRole="link" onPress={() => router.push('/obligations')} className="mt-3 self-start border-b border-primary pb-0.5"><Text className="font-body text-xs font-semibold text-primary">Manage bills and reminders</Text></Pressable>
+            </Card>
+
+            <Text className="mb-3 font-body text-[11px] leading-4 text-gray-500 dark:text-neutral-400">This review uses records you entered, in one currency at a time. It is a spending summary, not personalized investment or borrowing advice.</Text>
+          </> : null}
+
+          {reportView === 'overview' ? <>
           <Card>
             <View className="mb-4 flex-row items-start justify-between">
-              <SectionHeading title="Your money at a glance" description={`${period} · ${data.currency}`} size="compact" className="flex-1" />
+              <SectionHeading title="Your money at a glance" description={`${periodLabel} · ${data.currency}`} size="compact" className="flex-1" />
               <View className={`rounded-full px-2.5 py-1 ${BADGE_PRIMARY}`}><Text className={`font-body text-[10px] font-bold ${BADGE_PRIMARY_TEXT}`}>OVERVIEW</Text></View>
             </View>
             <View className="flex-row gap-3">
@@ -242,6 +334,63 @@ export default function InsightsScreen() {
             {data.bills.map((bill) => <View key={bill.id} className="mb-2 flex-row justify-between"><Text className="flex-1 font-body text-xs text-gray-700 dark:text-neutral-200" numberOfLines={1}>{bill.name} · {bill.status}</Text><Text className="ml-2 font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(bill.amountMinor, bill.currency)}</Text></View>)}
             <Pressable accessibilityRole="link" onPress={() => router.push('/obligations')} className="mt-2 self-start border-b border-primary pb-0.5"><Text className="font-body text-xs font-semibold text-primary">View assets and obligations</Text></Pressable>
           </Card> : null}
+          </> : null}
+
+          {reportView === 'income' ? <>
+            <Card>
+              <SectionTitle title="Income statement" hint={`${periodLabel} · ${data.currency}. A cash-basis summary of recorded income and everyday spending.`} />
+              <StatementLine label="Income received" value={data.report.incomeMinor} currency={data.currency} color={GREEN} />
+              <StatementLine label="Spending after refunds" value={-data.report.expenseMinor} currency={data.currency} color={ORANGE} />
+              <View className="my-2 border-t border-gray-100 dark:border-neutral-800" />
+              <StatementLine label={data.report.netMinor >= 0 ? 'Surplus' : 'Shortfall'} value={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? GREEN : '#DC4C4C'} strong />
+              <Text className="mt-3 font-body text-xs leading-5 text-gray-500 dark:text-neutral-400">Transfers between your accounts, starting balances, borrowed or repaid principal, and asset or investment purchases are excluded. They change balances but are not income or everyday spending.</Text>
+            </Card>
+            <Card>
+              <SectionTitle title="Income sources" hint="Where recorded income came from during this period." />
+              {data.incomeSources.length ? data.incomeSources.map((item) => <StatementLine key={item.source} label={CLASSIFICATIONS[item.source as keyof typeof CLASSIFICATIONS]?.label ?? item.source.replaceAll('_', ' ')} value={item.amountMinor} currency={data.currency} color={GREEN} />) : <Empty text="No income was recorded for this period." />}
+            </Card>
+            <Card>
+              <SectionTitle title="Spending categories" hint="Net spending after refunds and corrections." />
+              {data.categories.length ? data.categories.map((item) => <StatementLine key={item.category} label={CLASSIFICATIONS[item.category as keyof typeof CLASSIFICATIONS]?.label ?? item.category.replaceAll('_', ' ')} value={-item.amountMinor} currency={data.currency} color={item.amountMinor < 0 ? GREEN : ORANGE} />) : <Empty text="No everyday spending was recorded for this period." />}
+            </Card>
+          </> : null}
+
+          {reportView === 'cashflow' ? <>
+            <Card>
+              <SectionTitle title="Cash flow" hint={`${periodLabel} · ${data.currency}. Money entering and leaving your recorded accounts.`} />
+              <View className={`mb-3 rounded-md p-4 ${cashFlowNetMinor !== null && cashFlowNetMinor >= 0 ? 'bg-emerald-50 dark:bg-emerald-950/30' : 'bg-red-50 dark:bg-red-950/30'}`}>
+                <Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Net cash movement</Text>
+                {cashFlowNetMinor === null ? <Text className="mt-1 font-heading text-xl font-bold text-gray-900 dark:text-white">Outside supported range</Text> : <Money amount={cashFlowNetMinor} currency={data.currency} color={cashFlowNetMinor >= 0 ? GREEN : '#DC4C4C'} className="mt-1 text-2xl" />}
+                <Text className="mt-1 font-body text-xs text-gray-500 dark:text-neutral-400">All three sections combined, in this currency.</Text>
+              </View>
+              {cashFlowSections.map((section) => <View key={section.section} className="mb-3 border-t border-gray-100 pt-3 dark:border-neutral-800">
+                <View className="mb-2 flex-row items-center justify-between"><Text className="font-heading text-sm font-bold capitalize text-gray-900 dark:text-white">{section.section}</Text><Money amount={section.netMinor} currency={data.currency} color={section.netMinor >= 0 ? GREEN : '#DC4C4C'} className="text-sm" /></View>
+                <StatementLine label="Money in" value={section.inflowsMinor} currency={data.currency} color={GREEN} />
+                <StatementLine label="Money out" value={-section.outflowsMinor} currency={data.currency} color={ORANGE} />
+              </View>)}
+              <Text className="mt-1 font-body text-xs leading-5 text-gray-500 dark:text-neutral-400">Operating covers income and everyday costs. Investing covers asset and investment purchases or proceeds. Financing covers borrowing, lending, and principal repayments. Transfers between your own accounts are excluded; currencies are never combined.</Text>
+            </Card>
+          </> : null}
+
+          {reportView === 'balance' ? <>
+            <Card>
+              <SectionTitle title="Balance sheet" hint={`Your recorded financial position as of ${new Date(data.asOf).toLocaleDateString()}. This is a current snapshot, not a historical statement.`} />
+              {selectedNetWorth ? <>
+                <View className="mb-3 rounded-md bg-violet-50 p-4 dark:bg-violet-950/30"><Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Net worth · {data.currency}</Text><Money amount={selectedNetWorth.netWorthMinor} currency={data.currency} color="#7C4DCE" className="mt-1 text-2xl" /><Text className="mt-1 font-body text-xs text-gray-500 dark:text-neutral-400">Assets minus liabilities</Text></View>
+                <SectionTitle title="Assets" />
+                <StatementLine label="Cash and account balances" value={selectedNetWorth.cashMinor} currency={data.currency} color="#2D8CFF" />
+                <StatementLine label="Investments at saved prices" value={selectedNetWorth.investmentsMinor} currency={data.currency} color="#7C4DCE" />
+                <StatementLine label="Your share of physical assets" value={selectedNetWorth.physicalAssetsMinor} currency={data.currency} color="#D99028" />
+                <StatementLine label="Money owed to you" value={selectedNetWorth.receivablesMinor} currency={data.currency} color={GREEN} />
+                <View className="my-2 border-t border-gray-100 dark:border-neutral-800" />
+                <StatementLine label="Total assets" value={selectedNetWorth.totalAssetsMinor} currency={data.currency} color="#2D8CFF" strong />
+                <SectionTitle title="Liabilities" />
+                <StatementLine label="Outstanding debts" value={-selectedNetWorth.liabilitiesMinor} currency={data.currency} color="#DC4C4C" />
+              </> : <Empty text={`No balance sheet data is available for ${data.currency}.`} />}
+              <Text className="mt-3 font-body text-xs leading-5 text-gray-500 dark:text-neutral-400">Account balances use your saved ledger. Asset and investment values are estimates you entered and may be out of date. Savings goals are not added again because reserved money is already part of account balances. Each currency has its own statement.</Text>
+              {data.staleAssetValuations > 0 || data.investmentPriceInfo.some((price) => price.stale) ? <Text className="mt-2 font-body text-xs font-semibold text-orange-700 dark:text-orange-300">Some asset or investment values are older than 180 days. Update them for a more current estimate.</Text> : null}
+            </Card>
+          </> : null}
         </> : null}
       </ScrollView>
     </SafeAreaView>
@@ -250,6 +399,20 @@ export default function InsightsScreen() {
 
 function Legend({ color, label }: { color: string; label: string }) { return <View className="flex-row items-center"><View className="mr-1.5 h-2.5 w-2.5" style={{ backgroundColor: color }} /><Text className="font-body text-xs text-gray-600 dark:text-neutral-300">{label}</Text></View>; }
 function Empty({ text }: { text: string }) { return <Text className="py-3 font-body text-sm text-gray-500 dark:text-neutral-400">{text}</Text>; }
+function ReviewChange({ label, value, detail }: { label: string; value: number | null; detail: string }) {
+  const trend = value === null ? 'No comparison' : `${value >= 0 ? '↑' : '↓'} ${Math.abs(value).toFixed(0)}%`;
+  return <View className="flex-row items-center justify-between gap-3"><View className="min-w-0 flex-1"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{label}</Text><Text className="mt-0.5 font-body text-[11px] text-gray-500 dark:text-neutral-400">{detail}</Text></View><Text className="font-heading text-sm font-bold text-gray-800 dark:text-neutral-100">{trend}</Text></View>;
+}
+function ReviewNotice({ title, detail, action, onPress, tone }: { title: string; detail: string; action: string; onPress: () => void; tone: 'red' | 'orange' | 'primary' }) {
+  const toneClass = tone === 'red' ? 'border-red-200 bg-red-50 dark:border-red-900/60 dark:bg-red-950/30' : tone === 'orange' ? 'border-orange-200 bg-orange-50 dark:border-orange-900/60 dark:bg-orange-950/30' : 'border-primary/20 bg-primary/5 dark:border-primary/30 dark:bg-primary/10';
+  return <Card className={toneClass}><Text className="font-heading text-sm font-bold text-gray-900 dark:text-white">{title}</Text><Text className="mt-1 font-body text-xs leading-5 text-gray-600 dark:text-neutral-300">{detail}</Text><Pressable accessibilityRole="link" onPress={onPress} className="mt-3 self-start border-b border-primary pb-0.5"><Text className="font-body text-xs font-semibold text-primary">{action}</Text></Pressable></Card>;
+}
+function formatDateOnly(value: string): string {
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  const date = dateOnly ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12) : new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+function StatementLine({ label, value, currency, color, strong = false }: { label: string; value: number; currency: string; color: string; strong?: boolean }) { return <View className="mb-2 flex-row items-center justify-between gap-3"><Text className={`flex-1 font-body ${strong ? 'text-sm font-bold text-gray-900 dark:text-white' : 'text-xs text-gray-600 dark:text-neutral-300'}`}>{label}</Text><Money amount={value} currency={currency} color={color} className={strong ? 'text-base' : 'text-sm'} /></View>; }
 function Position({ label, value, currency, strong = false }: { label: string; value: number; currency: string; strong?: boolean }) { return <View className="w-1/3 pr-1"><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{label}</Text><Text className={`mt-0.5 font-body ${strong ? 'text-sm font-bold text-primary' : 'text-xs font-semibold text-gray-800 dark:text-neutral-100'}`}>{formatMinorUnits(value, currency)}</Text></View>; }
 function AssetComponent({ label, value, total, currency, color }: { label: string; value: number; total: number; currency: string; color: string }) { return <View className="mb-2"><View className="mb-1 flex-row justify-between"><Text className="font-body text-xs text-gray-600 dark:text-neutral-300">{label}</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(value, currency)}</Text></View><View className="h-1.5 overflow-hidden bg-gray-100 dark:bg-neutral-800"><View className="h-full" style={{ width: `${value > 0 ? safeRatio(value, total) * 100 : 0}%`, backgroundColor: color }} /></View></View>; }
 

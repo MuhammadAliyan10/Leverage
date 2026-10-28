@@ -13,7 +13,7 @@ import { calculateDebtPositions } from '../../src/finance/debtPosition';
 import { calculateNetWorthPositions, type NetWorthPosition } from '../../src/finance/assetsInvestments';
 import { calculateBudgetSnapshot, type BudgetSnapshot } from '../../src/finance/budgeting';
 import { isCurrencyCode, type CurrencyCode } from '../../src/finance/domain';
-import { calculateLiquidityPositions, type LiquidityPosition } from '../../src/finance/liquidity';
+import { calculateAvailableToSpend, calculateLiquidityPositions, type AvailableToSpendPosition, type LiquidityPosition } from '../../src/finance/liquidity';
 import type { TransactionActivity } from '../../src/finance/transactionDisplay';
 
 export type DashboardFilter = 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
@@ -45,6 +45,7 @@ export interface DashboardMetrics {
   chartData: Record<DashboardFilter, DashboardChartPoint[]>;
   activities: TransactionActivity[];
   liquidity: DashboardLiquidityPosition[];
+  availableToSpend: AvailableToSpendPosition[];
   netWorth: NetWorthPosition[];
   unpricedHoldingCurrencies: string[];
   budgets: BudgetSnapshot[];
@@ -185,6 +186,7 @@ export function useDashboardMetrics(reportDate: Date) {
       const chartEnd = new Date(today.getFullYear() + 1, 0, 1);
       const monthReportStart = new Date(monthRange.startDate);
       const monthReportEnd = new Date(monthRange.endDate);
+      const periodEndDate = localDateKey(new Date(today.getFullYear(), today.getMonth() + 1, 0));
       const reportQueryStart = chartStart < monthReportStart ? chartStart : monthReportStart;
       const reportQueryEnd = chartEnd > monthReportEnd ? chartEnd : monthReportEnd;
       // Budget periods use the same local civil month boundaries as the activity
@@ -192,7 +194,7 @@ export function useDashboardMetrics(reportDate: Date) {
       const budgetRangeStart = monthReportStart;
       const budgetRangeEnd = monthReportEnd;
       const queryEnd = reportQueryEnd > budgetRangeEnd ? reportQueryEnd : budgetRangeEnd;
-      const [accountBalances, reportRows, activities, assets, holdings, debts, budgetRows, goals, emergencyFund, bills, reservations] = await Promise.all([
+      const [accountBalances, reportRows, activities, assets, holdings, debts, budgetRows, goals, emergencyFund, bills, billsDueThroughMonthEnd, reservations] = await Promise.all([
         localDb.account.findManyWithBalances(user.id, { includeArchived: true }),
         localDb.transaction.findReportRows({ ownerId: user.id, startDate: reportQueryStart.toISOString(), endDate: queryEnd.toISOString() }),
         localDb.transaction.findRecentActivity(user.id, 5),
@@ -203,6 +205,7 @@ export function useDashboardMetrics(reportDate: Date) {
         localDb.savings.goals(user.id),
         localDb.emergencyFund.get(user.id),
         localDb.obligations.bills.upcoming(user.id, dayKey),
+        localDb.obligations.bills.unpaidDueThrough(user.id, periodEndDate, dayKey),
         localDb.savings.reservationsByAccount(user.id),
       ]);
       const balancesById = new Map(accountBalances.map((balance) => [balance.id, balance]));
@@ -225,6 +228,7 @@ export function useDashboardMetrics(reportDate: Date) {
       };
       const savings = summarizeSavings(goals);
       const liquidity = calculateLiquidityPositions(liquidityAccounts, reservations);
+      const availableToSpend = calculateAvailableToSpend(liquidity, billsDueThroughMonthEnd, periodEndDate);
       const netWorth = summarizeNetWorth(accountBalances, assets, holdings, debts);
       const unpricedHoldingCurrencies = [...new Set(holdings
         .filter((holding) => holding.quantityMicros > 0 && holding.currentPriceMinor === null)
@@ -249,7 +253,7 @@ export function useDashboardMetrics(reportDate: Date) {
         incomeMinor: monthReport.incomeMinor, expenseMinor: monthReport.expenseMinor,
         netMinor: monthReport.netMinor, excludedCurrencies: monthReport.excludedCurrencies,
         monthLabel: reportDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }),
-        chartData, activities, liquidity, netWorth, unpricedHoldingCurrencies, budgets, savings, emergencyFund,
+        chartData, activities, liquidity, availableToSpend, netWorth, unpricedHoldingCurrencies, budgets, savings, emergencyFund,
         upcomingBills, hasAnyFinancialRecords,
       };
     },

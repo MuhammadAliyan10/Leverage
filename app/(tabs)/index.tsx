@@ -10,9 +10,14 @@ import { useDashboardMetrics, type DashboardChartPoint, type DashboardFilter } f
 import { formatMinorUnits } from '../../src/finance/ledger';
 import type { CurrencyCode } from '../../src/finance/domain';
 import type { TransactionActivity } from '../../src/finance/transactionDisplay';
+import { authTraceEvent, finishAuthTrace, getActiveAuthTraceId } from '../../src/security/authDiagnostics';
 
 const FILTERS: readonly DashboardFilter[] = ['Daily', 'Weekly', 'Monthly', 'Yearly'];
 const money = (minor: number, currency: CurrencyCode | string) => formatMinorUnits(minor, currency);
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
 const strongNumber = { fontFamily: 'InterBlack' } as const;
 
 function SectionTitle({ title, action, onPress }: { title: string; action?: string; onPress?: () => void }) {
@@ -28,7 +33,7 @@ function Skeleton({ height = 18, width = '100%' }: { height?: number; width?: `$
 }
 
 function DashboardSkeleton() {
-  return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['top']}>
+  return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
     <GlobalHeader title="Dashboard" description="Your finances at a glance" />
     <ScrollView className="px-5" contentContainerStyle={{ paddingBottom: 32 }}>
       <Surface className="mt-5"><Skeleton width="45%" /><View className="mt-4"><Skeleton height={32} width="65%" /></View><View className="mt-3"><Skeleton width="80%" /></View></Surface>
@@ -99,6 +104,14 @@ export default function DashboardScreen() {
   const reportDateRef = useRef(reportDate);
   const { data: metrics, isLoading, isError, isFetching, refetch } = useDashboardMetrics(reportDate);
 
+  useEffect(() => {
+    const traceId = getActiveAuthTraceId();
+    if (!traceId) return;
+    authTraceEvent('NAVIGATION_COMPLETE', { route: 'tabs' }, traceId);
+    authTraceEvent('DASHBOARD_VISIBLE', {}, traceId);
+    finishAuthTrace(true, 'dashboard_visible', traceId);
+  }, []);
+
   useFocusEffect(useCallback(() => {
     // Keep this callback independent from query data. Depending on `metrics`
     // makes each successful refetch recreate the focus effect and refetch again.
@@ -129,7 +142,7 @@ export default function DashboardScreen() {
   }, [refetch]);
 
   if (isLoading && !metrics) return <DashboardSkeleton />;
-  if (isError && !metrics) return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['top']}>
+  if (isError && !metrics) return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
     <GlobalHeader title="Dashboard" description="Your finances at a glance" />
     <View className="flex-1 items-center justify-center px-8">
       <RefreshCw size={30} color={PRIMARY_COLOR} />
@@ -145,12 +158,24 @@ export default function DashboardScreen() {
   const hasAccounts = metrics.liquidity.length > 0;
   const visibleNetWorth = metrics.netWorth;
   const emergency = metrics.emergencyFund;
+  const monthEnd = new Date(reportDate.getFullYear(), reportDate.getMonth() + 1, 0);
+  const periodEndLabel = monthEnd.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  const nextWeekKey = localDateKey(new Date(reportDate.getFullYear(), reportDate.getMonth(), reportDate.getDate() + 7));
+  const overBudget = metrics.budgets.flatMap((budget) => budget.categories
+    .filter((category) => category.amountMinor > 0 && category.remainingMinor < 0)
+    .map((category) => ({ budget, category, over: -category.remainingMinor })))
+    .sort((a, b) => b.over - a.over)[0];
+  const approachingBudget = overBudget ? undefined : metrics.budgets.flatMap((budget) => budget.categories
+    .filter((category) => category.amountMinor > 0 && category.percentUsed >= 80)
+    .map((category) => ({ budget, category })))
+    .sort((a, b) => b.category.percentUsed - a.category.percentUsed)[0];
+  const billNeedingAttention = metrics.upcomingBills.find((bill) => bill.status === 'overdue' || bill.dueDate <= nextWeekKey);
   const monthlyActivityScale = Math.max(Math.abs(metrics.incomeMinor), Math.abs(metrics.expenseMinor));
   const monthlyBarWidth = (amountMinor: number): `${number}%` => monthlyActivityScale === 0
     ? '0%'
     : `${(Math.abs(amountMinor) / monthlyActivityScale) * 100}%`;
 
-  return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['top']}>
+  return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
     <GlobalHeader title="Dashboard" description="Your finances at a glance" RightIcon={<Bell size={21} color={PRIMARY_COLOR} />} onRightPress={() => router.push('/obligations')} rightActionLabel="Open upcoming obligations" />
     <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
       {isFetching ? <Text accessibilityLiveRegion="polite" className="font-body mt-2 text-right text-xs text-gray-500 dark:text-neutral-400">Updating…</Text> : null}
@@ -162,7 +187,7 @@ export default function DashboardScreen() {
         <View className="h-12 w-12 items-center justify-center rounded-2xl bg-primary/10"><Wallet size={23} color={PRIMARY_COLOR} /></View>
         <Text className="font-heading mt-4 text-xl font-bold text-gray-900 dark:text-white">Start with your first account</Text>
         <Text className="font-body mt-2 text-sm leading-5 text-gray-600 dark:text-neutral-300">Add the accounts where you keep money. Then record income, expenses, transfers, savings and debts as they happen.</Text>
-        <Pressable accessibilityRole="button" onPress={() => router.replace('/onboarding')} className="houselog-button mt-4 min-h-12 flex-row items-center justify-center px-4"><Plus size={18} color="white" /><Text className="font-body ml-2 font-bold text-white">Create an account</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/onboarding', params: { manual: '1' } })} className="houselog-button mt-4 min-h-12 flex-row items-center justify-center px-4"><Plus size={18} color="white" /><Text className="font-body ml-2 font-bold text-white">Create an account</Text></Pressable>
       </Surface> : null}
 
       <SectionTitle title="Liquid funds" action="Accounts" onPress={() => router.push('/accounts')} />
@@ -177,6 +202,18 @@ export default function DashboardScreen() {
         </View>
       </Surface>) : <Surface><Text className="font-body font-semibold text-gray-900 dark:text-white">No active liquid accounts</Text><Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">Archived accounts remain in your financial history and net worth.</Text></Surface>}
       <Text className="font-body mt-1 text-xs leading-4 text-gray-500 dark:text-neutral-400">This total adds physical cash to balances in active bank accounts, savings accounts and mobile wallets. Set-aside money is shown below. Upcoming bills are not deducted; investments and other assets are not included.</Text>
+
+      <SectionTitle title="Available to spend" />
+      {metrics.availableToSpend.length ? metrics.availableToSpend.map((position) => <Surface key={position.currency} className="mb-3">
+        <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{position.currency} · through {periodEndLabel}</Text>
+        <Text style={strongNumber} className={`mt-1 text-2xl ${position.availableToSpendMinor < 0 ? 'text-rose-700 dark:text-rose-300' : 'text-gray-900 dark:text-white'}`}>{money(position.availableToSpendMinor, position.currency)}</Text>
+        <View className="mt-3 border-t border-gray-100 pt-3 dark:border-neutral-800">
+          <View className="mb-2 flex-row items-center justify-between gap-3"><Text className="flex-1 font-body text-xs text-gray-500 dark:text-neutral-400">Unreserved liquid balance</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{money(position.unreservedMinor, position.currency)}</Text></View>
+          <View className="flex-row items-center justify-between gap-3"><Text className="flex-1 font-body text-xs text-gray-500 dark:text-neutral-400">Unpaid bills due by {periodEndLabel}</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{position.unpaidBillsDueMinor > 0 ? '−' : ''}{money(position.unpaidBillsDueMinor, position.currency)}</Text></View>
+        </View>
+        <Text className="font-body mt-3 text-xs leading-4 text-gray-500 dark:text-neutral-400">Estimate through month-end: unreserved balances minus recorded unpaid bills due by then. Savings reservations are already removed. No minimum cash buffer or essential-bill label is set.</Text>
+        {position.availableToSpendMinor < 0 ? <Text className="font-body mt-2 text-xs font-semibold text-rose-700 dark:text-rose-300">Recorded bills are higher than the unreserved balance by {money(-position.availableToSpendMinor, position.currency)}.</Text> : null}
+      </Surface>) : <Surface><Text className="font-body text-sm text-gray-600 dark:text-neutral-300">Add an active liquid account to estimate available spending money.</Text></Surface>}
 
       <SectionTitle title="Net worth" action="Assets & debts" onPress={() => router.push('/assets')} />
       {visibleNetWorth.length ? visibleNetWorth.map((position) => <Pressable key={position.currency} accessibilityRole="button" accessibilityLabel={`Open assets and investments for ${position.currency}`} onPress={() => router.push('/assets')}><Surface className="mb-3">
@@ -224,6 +261,14 @@ export default function DashboardScreen() {
           <Text className={["font-body", (`mt-2 text-sm font-semibold ${budget.remainingMinor < 0 ? 'text-rose-600 dark:text-rose-300' : 'text-gray-600 dark:text-neutral-300'}`)].filter(Boolean).join(' ')}>{budget.remainingMinor < 0 ? `Over by ${money(-budget.remainingMinor, budget.currency)}` : `${money(budget.remainingMinor, budget.currency)} remaining`}</Text>
         </Surface></Pressable>;
       }) : <Pressable accessibilityRole="button" onPress={() => router.push('/budgets')}><Surface><Text className="font-body font-semibold text-gray-900 dark:text-white">Set a monthly budget</Text><Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">Compare spending with limits you choose.</Text></Surface></Pressable>}
+
+      {metrics.netMinor < 0 || overBudget || approachingBudget || billNeedingAttention ? <>
+        <SectionTitle title="Worth a look" />
+        {metrics.netMinor < 0 ? <Pressable accessibilityRole="link" onPress={() => router.push('/transactions')}><Surface className="mb-2"><Text className="font-body font-semibold text-rose-700 dark:text-rose-300">This month’s recorded spending is above income</Text><Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">The difference is {money(-metrics.netMinor, 'PKR')}. Review this month’s transactions.</Text></Surface></Pressable> : null}
+        {overBudget ? <Pressable accessibilityRole="link" onPress={() => router.push('/budgets')}><Surface className="mb-2"><Text className="font-body font-semibold text-rose-700 dark:text-rose-300">A budget is over its limit</Text><Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">{overBudget.category.category.replaceAll('_', ' ')} is over by {money(overBudget.over, overBudget.budget.currency)}. Review budgets.</Text></Surface></Pressable>
+          : approachingBudget ? <Pressable accessibilityRole="link" onPress={() => router.push('/budgets')}><Surface className="mb-2"><Text className="font-body font-semibold text-amber-700 dark:text-amber-300">A budget is getting close to its limit</Text><Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">{approachingBudget.category.category.replaceAll('_', ' ')} has used {Math.round(approachingBudget.category.percentUsed)}% of its limit.</Text></Surface></Pressable> : null}
+        {billNeedingAttention ? <Pressable accessibilityRole="link" onPress={() => router.push('/obligations')}><Surface className="mb-2"><Text className={`font-body font-semibold ${billNeedingAttention.status === 'overdue' ? 'text-rose-700 dark:text-rose-300' : 'text-gray-900 dark:text-white'}`}>{billNeedingAttention.status === 'overdue' ? 'An unpaid bill is overdue' : 'An unpaid bill is due soon'}</Text><Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">{billNeedingAttention.name} · {money(billNeedingAttention.remainingMinor, billNeedingAttention.currency)}. View obligations.</Text></Surface></Pressable> : null}
+      </> : null}
 
       <SectionTitle title="Savings & emergency fund" action="Savings" onPress={() => router.push('/savings')} />
       {metrics.savings.length || emergency ? <Surface>

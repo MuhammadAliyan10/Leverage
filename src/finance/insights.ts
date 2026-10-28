@@ -1,8 +1,9 @@
-export const INSIGHTS_PERIODS = ['This month', 'Last month', 'Last 3 months', 'Last 6 months', 'This year'] as const;
+export const INSIGHTS_PERIODS = ['This month', 'Last month', 'Last 3 months', 'Last 6 months', 'This year', 'Custom'] as const;
 export type InsightsPeriod = (typeof INSIGHTS_PERIODS)[number];
 
 export interface InsightsDateRange { start: Date; end: Date }
 export interface InsightsPeriodRanges { current: InsightsDateRange; previous: InsightsDateRange }
+export interface CustomInsightsDates { startDate: string; endDate: string }
 
 function monthStart(year: number, month: number): Date { return new Date(year, month, 1); }
 function addCalendarDays(date: Date, days: number): Date { return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days); }
@@ -10,8 +11,9 @@ function addCalendarMonths(date: Date, months: number): Date { return monthStart
 function startOfYear(date: Date, offset = 0): Date { return new Date(date.getFullYear() + offset, 0, 1); }
 
 /** Local-calendar ranges end tomorrow, so future-dated entries are never included in "to date" periods. */
-export function getInsightsPeriodRanges(period: InsightsPeriod, now = new Date()): InsightsPeriodRanges {
+export function getInsightsPeriodRanges(period: InsightsPeriod, now = new Date(), custom?: CustomInsightsDates): InsightsPeriodRanges {
   if (!Number.isFinite(now.getTime())) throw new Error('Insights reference date is invalid.');
+  if (period === 'Custom') return getCustomInsightsPeriodRanges(custom, now);
   const tomorrow = addCalendarDays(now, 1);
   let currentStart: Date;
   let previousStart: Date;
@@ -35,6 +37,31 @@ export function getInsightsPeriodRanges(period: InsightsPeriod, now = new Date()
     previousEnd = new Date(previousStart.getFullYear(), now.getMonth(), Math.min(now.getDate(), new Date(previousStart.getFullYear(), now.getMonth() + 1, 0).getDate()) + 1);
   }
   return { current: { start: currentStart, end: tomorrow }, previous: { start: previousStart, end: previousEnd } };
+}
+
+function parseLocalDate(value: string): Date {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) throw new Error('Choose valid start and end dates.');
+  const year = Number(match[1]); const month = Number(match[2]) - 1; const day = Number(match[3]);
+  const date = new Date(year, month, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day) throw new Error('Choose valid start and end dates.');
+  return date;
+}
+
+/** Inclusive local calendar dates become a half-open query range; comparison uses the same number of days. */
+export function getCustomInsightsPeriodRanges(custom: CustomInsightsDates | undefined, now = new Date()): InsightsPeriodRanges {
+  if (!custom) throw new Error('Choose a start and end date.');
+  const start = parseLocalDate(custom.startDate);
+  const selectedEnd = parseLocalDate(custom.endDate);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (selectedEnd < start) throw new Error('End date must be on or after the start date.');
+  if (selectedEnd > today) throw new Error('Insights cannot include future dates.');
+  const end = addCalendarDays(selectedEnd, 1);
+  const days = calendarDaysInRange({ start, end });
+  if (days > 366) throw new Error('Choose a custom range of up to 366 days.');
+  const previousEnd = start;
+  const previousStart = addCalendarDays(previousEnd, -days);
+  return { current: { start, end }, previous: { start: previousStart, end: previousEnd } };
 }
 
 export function calendarDaysInRange(range: InsightsDateRange): number {

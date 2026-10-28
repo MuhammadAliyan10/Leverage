@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { calculateExpenseBucketTotals, calculateFinancialReport, dashboardMonthRange } from '../../src/finance/reporting.ts';
 import { projectTransactionActivity } from '../../src/finance/transactionDisplay.ts';
-import { calculateLiquidityPositions } from '../../src/finance/liquidity.ts';
+import { calculateAvailableToSpend, calculateLiquidityPositions } from '../../src/finance/liquidity.ts';
 
 const bucket = {
   id: 'week-1', group: 'Weekly',
@@ -56,6 +56,35 @@ test('dashboard monthly totals reconcile income, expenses, partial refunds, refu
   assert.equal(report.expenseMinor, 27_000);
   assert.equal(report.netMinor, 73_000);
   assert.deepEqual(report.excludedCurrencies, ['USD']);
+});
+
+test('available-to-spend subtracts only unpaid bills due by month end from already-unreserved balances', () => {
+  const positions = calculateLiquidityPositions([
+    { id: 'cash', currency: 'PKR', type: 'cash', archivedAt: null, balanceMinor: 20_000 },
+    { id: 'bank', currency: 'PKR', type: 'bank', archivedAt: null, balanceMinor: 5_000 },
+    { id: 'usd', currency: 'USD', type: 'wallet', archivedAt: null, balanceMinor: 9_000 },
+  ], [{ accountId: 'cash', amountMinor: 7_000 }]);
+  const result = calculateAvailableToSpend(positions, [
+    { id: 'partial', currency: 'PKR', amountMinor: 5_000, paidMinor: 2_000, dueDate: '2026-05-31', status: 'partial' },
+    { id: 'paid', currency: 'PKR', amountMinor: 4_000, paidMinor: 4_000, dueDate: '2026-05-20', status: 'paid' },
+    { id: 'cancelled', currency: 'PKR', amountMinor: 3_000, paidMinor: 0, dueDate: '2026-05-21', status: 'cancelled' },
+    { id: 'skipped', currency: 'PKR', amountMinor: 2_000, paidMinor: 0, dueDate: '2026-05-22', status: 'skipped' },
+    { id: 'future', currency: 'PKR', amountMinor: 8_000, paidMinor: 0, dueDate: '2026-06-01', status: 'upcoming' },
+    { id: 'usd-bill', currency: 'USD', amountMinor: 10_000, paidMinor: 0, dueDate: '2026-05-28', status: 'due' },
+  ], '2026-05-31');
+
+  assert.deepEqual(result, [
+    { currency: 'PKR', unreservedMinor: 18_000, unpaidBillsDueMinor: 3_000, availableToSpendMinor: 15_000 },
+    { currency: 'USD', unreservedMinor: 9_000, unpaidBillsDueMinor: 10_000, availableToSpendMinor: -1_000 },
+  ]);
+});
+
+test('available-to-spend includes overdue unpaid bills and rejects duplicate or malformed bill records', () => {
+  const liquidity = [{ currency: 'PKR', availableMinor: 500 }];
+  const overdue = [{ id: 'old', currency: 'PKR', amountMinor: 800, paidMinor: 0, dueDate: '2026-04-30', status: 'overdue' }];
+  assert.equal(calculateAvailableToSpend(liquidity, overdue, '2026-05-31')[0]?.availableToSpendMinor, -300);
+  assert.throws(() => calculateAvailableToSpend(liquidity, [...overdue, overdue[0]], '2026-05-31'), /bill is invalid/);
+  assert.throws(() => calculateAvailableToSpend(liquidity, [], '2026-02-31'), /period end date is invalid/);
 });
 
 test('dashboard chart aggregation uses complete unordered rows and stays stable across pagination boundaries', () => {

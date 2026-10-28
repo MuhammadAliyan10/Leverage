@@ -15,6 +15,8 @@ interface DatePickerFieldProps {
   placeholder?: string;
   accessibilityLabel?: string;
   clearable?: boolean;
+  minDate?: Date;
+  maxDate?: Date;
 }
 
 function parseDate(value: string): Date | undefined {
@@ -40,6 +42,8 @@ export function DatePickerField({
   placeholder = 'Choose a date',
   accessibilityLabel,
   clearable = false,
+  minDate,
+  maxDate,
 }: DatePickerFieldProps) {
   const [visible, setVisible] = useState(false);
   const { colorScheme } = useColorScheme();
@@ -93,6 +97,7 @@ export function DatePickerField({
           date={selectedDate ?? new Date()}
           label={label}
           saveLabel="Apply date"
+          validRange={minDate || maxDate ? { startDate: minDate, endDate: maxDate } : undefined}
           onDismiss={() => setVisible(false)}
           onConfirm={({ date }) => {
             setVisible(false);

@@ -187,6 +187,19 @@ export function createObligationsStore(
               AND NOT EXISTS (SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id)),0)<b.amountMinor
           ORDER BY b.dueDate,b.id LIMIT 20`, [today, today, ownerId]);
       },
+      unpaidDueThrough: async (ownerId:string, throughDate:string, today = localCalendarDate()): Promise<BillRow[]> => {
+        if (!ownerId.trim()) throw new Error('A profile is required to read unpaid bills.');
+        validateCalendarDate(throughDate, 'Bill period end date');
+        validateCalendarDate(today, 'Current date');
+        return (await read()).getAllAsync<BillRow>(`SELECT b.*,
+          COALESCE((SELECT SUM(p.amountMinor) FROM BillPayment p WHERE p.billId=b.id AND p.ownerId=b.ownerId
+            AND NOT EXISTS (SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id)),0) AS paidMinor,
+          CASE WHEN b.dueDate<? THEN 'overdue' WHEN b.dueDate=? THEN 'due' ELSE 'upcoming' END AS status
+          FROM Bill b WHERE b.ownerId=? AND b.dueDate<=? AND b.status NOT IN ('cancelled','skipped')
+            AND COALESCE((SELECT SUM(p.amountMinor) FROM BillPayment p WHERE p.billId=b.id AND p.ownerId=b.ownerId
+              AND NOT EXISTS (SELECT 1 FROM BillPaymentCorrection c WHERE c.originalPaymentId=p.id)),0)<b.amountMinor
+          ORDER BY b.dueDate,b.id`, [today, today, ownerId, throughDate]);
+      },
       recordPayment: <T>(input:{id:string;ownerId:string;billId:string;amountMinor:number;transactionId:string;idempotencyKey:string;paidAt:string}, postExpense:(sql:ObligationsSql)=>Promise<T>) => write(async(sql)=>{
         if (!Number.isSafeInteger(input.amountMinor)||input.amountMinor<=0) throw new Error('Bill payment must be positive integer minor units.');
         const existing=await sql.getFirstAsync<{id:string;billId:string;amountMinor:number;transactionId:string;paidAt:string}>('SELECT id,billId,amountMinor,transactionId,paidAt FROM BillPayment WHERE ownerId=? AND idempotencyKey=?',[input.ownerId,input.idempotencyKey]);
