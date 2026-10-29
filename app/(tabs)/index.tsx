@@ -34,7 +34,7 @@ function Skeleton({ height = 18, width = '100%' }: { height?: number; width?: `$
 
 function DashboardSkeleton() {
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
-    <GlobalHeader title="Dashboard" description="Your finances at a glance" />
+    <GlobalHeader title="Home" description="Your finances at a glance" />
     <ScrollView className="px-5" contentContainerStyle={{ paddingBottom: 32 }}>
       <Surface className="mt-5"><Skeleton width="45%" /><View className="mt-4"><Skeleton height={32} width="65%" /></View><View className="mt-3"><Skeleton width="80%" /></View></Surface>
       <Surface className="mt-4"><Skeleton width="55%" /><View className="mt-4"><Skeleton height={100} /></View></Surface>
@@ -49,9 +49,9 @@ function Chart({ points, width }: { points: readonly DashboardChartPoint[]; widt
   const max = points.reduce((highest, point) => Math.max(highest, Math.abs(point.amountMinor)), 0);
   if (points.length === 0 || max === 0) return <View className="h-36 items-center justify-center"><Text className="font-body text-sm text-gray-500 dark:text-neutral-400">No net spending in this period.</Text></View>;
   const hasRefundPeriods = points.some((point) => point.amountMinor < 0);
-  const plotHeight = hasRefundPeriods ? 74 : 56;
-  const baseline = hasRefundPeriods ? 36 : 48;
-  const maxBarHeight = hasRefundPeriods ? 30 : 42;
+  const plotHeight = hasRefundPeriods ? 90 : 74;
+  const baseline = hasRefundPeriods ? 45 : 66;
+  const maxBarHeight = hasRefundPeriods ? 40 : 58;
   const selectedPoint = points.find((point) => point.label === selectedLabel) ?? points.at(-1)!;
   const usableWidth = Math.max(100, width - 52);
   const gap = points.length > 1 ? 10 : 0;
@@ -143,7 +143,7 @@ export default function DashboardScreen() {
 
   if (isLoading && !metrics) return <DashboardSkeleton />;
   if (isError && !metrics) return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
-    <GlobalHeader title="Dashboard" description="Your finances at a glance" />
+    <GlobalHeader title="Home" description="Your finances at a glance" />
     <View className="flex-1 items-center justify-center px-8">
       <RefreshCw size={30} color={PRIMARY_COLOR} />
       <Text className="font-heading mt-4 text-center text-lg font-bold text-gray-900 dark:text-white">We couldn’t load your dashboard</Text>
@@ -176,7 +176,7 @@ export default function DashboardScreen() {
     : `${(Math.abs(amountMinor) / monthlyActivityScale) * 100}%`;
 
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
-    <GlobalHeader title="Dashboard" description="Your finances at a glance" RightIcon={<Bell size={21} color={PRIMARY_COLOR} />} onRightPress={() => router.push('/obligations')} rightActionLabel="Open upcoming obligations" />
+    <GlobalHeader title="Home" description="Your finances at a glance" RightIcon={<Bell size={21} color={PRIMARY_COLOR} />} onRightPress={() => router.push('/obligations')} rightActionLabel="Open upcoming obligations" />
     <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
       {isFetching ? <Text accessibilityLiveRegion="polite" className="font-body mt-2 text-right text-xs text-gray-500 dark:text-neutral-400">Updating…</Text> : null}
       {isError ? <View accessibilityLiveRegion="assertive" className="mt-3 flex-row items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-900 dark:bg-amber-950">
