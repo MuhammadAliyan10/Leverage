@@ -17,6 +17,21 @@ export function resolveCloudApiBaseUrl(value: string | undefined, development: b
   return null;
 }
 
+/** A public HTTPS origin; it identifies the gateway, never a credential. */
+export function resolveAIGatewayBaseUrl(value: string | undefined, development: boolean): string | null {
+  return resolveCloudApiBaseUrl(value, development);
+}
+
+/** Use the AI override when present; otherwise reuse the existing Hono API origin. */
+export function resolveConfiguredAIGatewayBaseUrl(
+  aiGatewayUrl: string | undefined,
+  existingApiUrl: string | undefined,
+  development: boolean,
+): string | null {
+  const selectedUrl = aiGatewayUrl?.trim() ? aiGatewayUrl : existingApiUrl;
+  return resolveAIGatewayBaseUrl(selectedUrl, development);
+}
+
 function resolveNeonEndpoint(value: string | undefined, expectedPath: string): string | null {
   const configured = value?.trim();
   if (!configured) return null;

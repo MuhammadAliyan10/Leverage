@@ -16,6 +16,7 @@ import { cancelCloudSync, syncOfflineData } from '../../utils/syncEngine';
 import { setSyncWakeHandler } from '../db/local/syncOutbox';
 import { clearNeonToken, cloudApiConfigured, getCloudAuthClient } from '../cloud/authClient';
 import { authTraceEvent, authTraceOperation, finishAuthTrace } from '../security/authDiagnostics';
+import { cancelAIProfileWork } from '../ai/runtime';
 
 const SESSION_KEY = 'houselog_user_id';
 const SIGNED_OUT_KEY = 'houselog_signed_out';
@@ -465,6 +466,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     const current = sessionRef.current;
     const ownerId = current.status === 'signedIn' || current.status === 'locked' ? current.user.id : null;
+    if (ownerId) cancelAIProfileWork(ownerId);
     ++sequenceRef.current;
     operationRef.current = false;
     queryClient.clear();
@@ -526,6 +528,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const lock = useCallback(() => {
     const current = sessionRef.current;
     if (current.status !== 'signedIn') return;
+    cancelAIProfileWork(current.user.id);
     queryClient.clear();
     setSession({ status: 'locked', user: current.user, notice: 'Unlock Leverage to continue.' });
   }, [queryClient, setSession]);

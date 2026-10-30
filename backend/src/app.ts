@@ -8,6 +8,8 @@ import { env } from './env.js';
 import { financeRoutes } from './finance-routes.js';
 import { savingsRoutes } from './savings-routes.js';
 import { recurringRoutes } from './recurring-routes.js';
+import { createAIGateway, createNeonJwtVerifier } from './aiGateway.js';
+import { createPrismaAISettingsStore } from './aiGatewayStore.js';
 
 type ApiEnvironment = { Variables: { userId: string } };
 export const app = new Hono<ApiEnvironment>();
@@ -16,7 +18,7 @@ app.use('*', bodyLimit({ maxSize: 64 * 1024 }));
 app.use('/api/*', cors({
   origin: (origin) => env.allowedOrigins.includes(origin) || origin === 'houselog://' ? origin : '',
   allowHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
-  allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'OPTIONS'],
+  allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true,
   maxAge: 600,
 }));
@@ -45,6 +47,21 @@ app.use('/api/v1/sync/*', requireSession);
 app.route('/api/v1/finance', financeRoutes);
 app.route('/api/v1/finance', savingsRoutes);
 app.route('/api/v1/finance', recurringRoutes);
+
+if (env.NEON_AUTH_BASE_URL && env.NEON_AUTH_JWKS_URL) {
+  const aiGateway = createAIGateway({
+    store: createPrismaAISettingsStore(prisma),
+    credentialEncryptionKey: env.AI_CREDENTIAL_ENCRYPTION_KEY!,
+    verifyNeonToken: createNeonJwtVerifier({
+      jwksUrl: env.NEON_AUTH_JWKS_URL,
+      issuer: new URL(env.NEON_AUTH_BASE_URL).origin,
+      ...(env.NEON_AUTH_AUDIENCE ? { audience: env.NEON_AUTH_AUDIENCE } : {}),
+    }),
+  });
+  app.route('/api/v1/ai', aiGateway);
+} else {
+  app.all('/api/v1/ai/*', (c) => c.json({ error: { code: 'AI_GATEWAY_NOT_CONFIGURED', message: 'The secure Neon Auth gateway is not configured.' } }, 503));
+}
 
 app.get('/api/v1/sync/identity', (c) => c.json({ userId: c.get('userId') }));
 

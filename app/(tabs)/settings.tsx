@@ -20,6 +20,7 @@ import { useAppLock } from '../../hooks/useAppLock';
 import { changePasswordSchema, profileNameSchema, type ChangePasswordForm, type ProfileNameForm } from '../../utils/validations/profile';
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 import { CloudSyncModal } from '../../components/settings/CloudSyncModal';
+import { AIIntelligenceSection } from '../../components/settings/AIIntelligenceSection';
 import { cloudApiConfigured } from '../../src/cloud/authClient';
 import { isDisposableAndroidVerificationBuild } from '../../src/security/verificationBuild';
 
@@ -238,6 +239,8 @@ export default function SettingsScreen() {
           <SettingRow icon={CalendarClock} title="Recurring, bills & debt" onPress={() => router.push('/obligations')} />
           <SettingRow icon={TrendingUp} title="Assets, investments & net worth" onPress={() => router.push('/assets')} />
         </Section>
+
+        <AIIntelligenceSection key={user?.id ?? 'signed-out-ai'} />
 
         <Section title="Security" description="On Android and iOS, the app locks after 15 minutes in the background and requires your profile password after a cold restart when app lock is enabled. On web, a remembered session stays open across refreshes and route changes; sign out on a shared browser. Password unlock is always available.">
           <SettingRow icon={LockKeyhole} title="App lock" value={Platform.OS === 'web' ? 'Unavailable in browser' : undefined} right={Platform.OS === 'web' ? undefined : <Switch accessibilityLabel="Enable app lock" accessibilityState={{ checked: profileSettings.appLockEnabled, disabled: savingSettings }} value={profileSettings.appLockEnabled} disabled={savingSettings} onValueChange={(value) => void saveProfileSetting({ appLockEnabled: value })} trackColor={{ false: '#d1d5db', true: PRIMARY_COLOR }} thumbColor="#ffffff" />} />

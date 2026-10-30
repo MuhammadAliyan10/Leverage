@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { assertProductionCloudApiConfigured, assertProductionNeonConfigured, classifyNeonDataApiFailure, resolveCloudApiBaseUrl, resolveNativeAuthRequestOrigin, resolveNeonAuthUrl, resolveNeonDataApiUrl, withNativeAuthRequestOrigin } from '../../src/cloud/apiConfiguration.ts';
+import { assertProductionCloudApiConfigured, assertProductionNeonConfigured, classifyNeonDataApiFailure, resolveCloudApiBaseUrl, resolveConfiguredAIGatewayBaseUrl, resolveNativeAuthRequestOrigin, resolveNeonAuthUrl, resolveNeonDataApiUrl, withNativeAuthRequestOrigin } from '../../src/cloud/apiConfiguration.ts';
 
 test('Neon sync failures become actionable safe categories without exposing database messages', () => {
   assert.equal(classifyNeonDataApiFailure(400, { code: '23503', message: 'foreign key violation for transaction' }), 'RELATED_RECORD_MISSING');
@@ -22,6 +22,12 @@ test('Neon sync failures become actionable safe categories without exposing data
 
 test('cloud API accepts a production HTTPS origin and normalizes its trailing slash', () => {
   assert.equal(resolveCloudApiBaseUrl(' https://mizan-api.fly.dev/ ', false), 'https://mizan-api.fly.dev');
+});
+
+test('AI gateway reuses the existing Hono API origin unless a dedicated valid origin is set', () => {
+  assert.equal(resolveConfiguredAIGatewayBaseUrl(undefined, 'https://mizan-api.fly.dev', false), 'https://mizan-api.fly.dev');
+  assert.equal(resolveConfiguredAIGatewayBaseUrl('https://ai-gateway.fly.dev', 'https://mizan-api.fly.dev', false), 'https://ai-gateway.fly.dev');
+  assert.equal(resolveConfiguredAIGatewayBaseUrl('https://api.example.invalid', 'https://mizan-api.fly.dev', false), null);
 });
 
 test('documentation placeholders cannot enable cloud authentication or sync', () => {

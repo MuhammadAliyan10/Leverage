@@ -6,9 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
+import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const pg = await PGlite.create();
+const pg = await PGlite.create({ extensions: { pgcrypto } });
 await pg.exec(`CREATE ROLE anonymous; CREATE ROLE authenticated; CREATE SCHEMA auth; CREATE SCHEMA neon_auth;
   CREATE FUNCTION auth.user_id() RETURNS text LANGUAGE sql STABLE AS $$ SELECT NULLIF(current_setting('test.neon_user_id',true),'') $$;
   CREATE TABLE neon_auth."user" (id text PRIMARY KEY,email text,name text);`);
@@ -33,6 +34,9 @@ process.env.BETTER_AUTH_URL = 'http://localhost:3001';
 process.env.ALLOWED_ORIGINS = 'http://localhost:3001';
 
 const [{ app }, { prisma }] = await Promise.all([import('../src/app.ts'), import('../src/db.ts')]);
+const { createPrismaAISettingsStore } = await import('../src/aiGatewayStore.ts');
+const { encryptAICredential } = await import('../src/aiCredentialVault.ts');
+const { createAIGateway } = await import('../src/aiGateway.ts');
 
 async function signUp(email, name, origin = 'http://localhost:3001') {
   const response = await app.request('/api/auth/sign-up/email', {
@@ -165,6 +169,80 @@ test('cloud API uses persistent identity, derives ownership from sessions, and d
   assert.equal(finalPage.hasMore,false);
   assert.equal(await prisma.mutationReceipt.count({ where: { userId: first.user.id } }), 6);
   assert.equal(await prisma.changeLog.count({ where: { userId: first.user.id } }), 6);
+});
+
+test('AI settings, monthly usage limits, and request leases persist per Neon subject', async () => {
+  const store = createPrismaAISettingsStore(prisma);
+  const settings = {
+    model: 'gpt-6-luna', enabled: false,
+    permissions: { aggregatedFinancialInsights: true, detailedFinancialRecords: false, projectsIntelligence: false },
+    consentAcceptedAt: new Date().toISOString(), credentialForwardingConsentAcceptedAt: new Date().toISOString(),
+    connectionStatus: 'connected', lastValidatedAt: new Date().toISOString(), monthlyRequestLimit: 30,
+  };
+  await store.saveSettings('neon-subject-ai-test', settings);
+  assert.deepEqual(await store.getSettings('neon-subject-ai-test'), settings);
+  assert.equal(await store.getSettings('different-neon-subject'), null);
+  assert.equal(await store.consumeMonthlyRequest('neon-subject-ai-test', '2026-10', 1), true);
+  assert.equal(await store.consumeMonthlyRequest('neon-subject-ai-test', '2026-10', 1), false);
+  assert.equal(await store.getMonthlyRequestCount('neon-subject-ai-test', '2026-10'), 1);
+  const lease = await store.tryAcquireConnectionTest('neon-subject-ai-test');
+  assert.ok(lease);
+  assert.equal(await store.tryAcquireConnectionTest('neon-subject-ai-test'), null);
+  await store.releaseConnectionTest('neon-subject-ai-test', lease);
+  assert.ok(await store.tryAcquireConnectionTest('neon-subject-ai-test'));
+  const rawCredential = `sk-proj-${'x'.repeat(40)}`;
+  const encryptedCredential = encryptAICredential('neon-subject-ai-test', rawCredential, 'ab'.repeat(32));
+  await store.saveCredential('neon-subject-ai-test', encryptedCredential);
+  assert.equal(await store.hasCredential('neon-subject-ai-test'), true);
+  assert.equal(await store.getCredential('neon-subject-ai-test'), encryptedCredential);
+  const storedCredential = await prisma.aiUserSetting.findUnique({ where: { userId: 'neon-subject-ai-test' }, select: { credentialCiphertext: true } });
+  assert.notEqual(storedCredential.credentialCiphertext, rawCredential);
+  assert.equal(JSON.stringify(storedCredential).includes(rawCredential), false);
+  await store.deleteCredential('neon-subject-ai-test');
+  assert.equal(await store.hasCredential('neon-subject-ai-test'), false);
+});
+
+test('AI credential workflow encrypts in the database and tests the provider through the authenticated gateway', async () => {
+  const userId = 'neon-subject-ai-vault-integration';
+  const rawCredential = `sk-proj-${'z'.repeat(40)}`;
+  let providerAuthorization;
+  const store = createPrismaAISettingsStore(prisma);
+  const gateway = createAIGateway({
+    store,
+    verifyNeonToken: async (token) => token === 'valid-neon-token-1234567890' ? userId : Promise.reject(new Error('invalid token')),
+    credentialEncryptionKey: 'cd'.repeat(32),
+    providerFetch: async (_url, init) => {
+      providerAuthorization = new Headers(init.headers).get('Authorization');
+      return Response.json({ status: 'completed', output: [{ content: [{ type: 'output_text', text: 'OK' }] }] });
+    },
+    now: () => new Date('2026-10-30T12:00:00.000Z'),
+  });
+  const headers = { Authorization: 'Bearer valid-neon-token-1234567890', 'Content-Type': 'application/json' };
+  const settingsInput = { model: 'gpt-6-luna', enabled: false,
+    permissions: { aggregatedFinancialInsights: true, detailedFinancialRecords: false, projectsIntelligence: false },
+    dataConsentAccepted: true, credentialForwardingConsentAccepted: true, monthlyRequestLimit: 30 };
+
+  assert.equal((await gateway.request('/settings')).status, 401);
+  await gateway.request('/settings', { method: 'PUT', headers, body: JSON.stringify(settingsInput) });
+  const saved = await gateway.request('/credential', { method: 'PUT', headers, body: JSON.stringify({ apiKey: rawCredential }) });
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).data.hasCredential, true);
+  const row = await prisma.aiUserSetting.findUnique({ where: { userId }, select: { credentialCiphertext: true } });
+  assert.ok(row.credentialCiphertext);
+  assert.notEqual(row.credentialCiphertext, rawCredential);
+
+  const tested = await gateway.request('/connection-test', { method: 'POST', headers, body: JSON.stringify({ model: 'gpt-6-luna' }) });
+  const testResult = await tested.json();
+  assert.equal(tested.status, 200);
+  assert.equal(providerAuthorization, `Bearer ${rawCredential}`);
+  assert.equal(JSON.stringify(testResult).includes(rawCredential), false);
+  assert.equal(testResult.data.connectionStatus, 'connected');
+
+  const enabled = await gateway.request('/settings', { method: 'PUT', headers, body: JSON.stringify({ ...settingsInput, enabled: true }) });
+  assert.equal((await enabled.json()).data.enabled, true);
+  const removed = await gateway.request('/credential', { method: 'DELETE', headers });
+  assert.equal((await removed.json()).data.hasCredential, false);
+  assert.equal(await store.getCredential(userId), null);
 });
 
 test('cloud corrections append an exact reversal then one replacement without mutating posted history', async () => {

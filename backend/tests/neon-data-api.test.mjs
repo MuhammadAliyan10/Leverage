@@ -4,9 +4,10 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
+import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const db = await PGlite.create();
+const db = await PGlite.create({ extensions: { pgcrypto } });
 await db.exec(`CREATE ROLE anonymous; CREATE ROLE authenticated; CREATE SCHEMA auth; CREATE SCHEMA neon_auth;
   CREATE FUNCTION auth.user_id() RETURNS text LANGUAGE sql STABLE AS $$ SELECT NULLIF(current_setting('test.neon_user_id',true),'') $$;
   CREATE TABLE neon_auth."user" (id uuid PRIMARY KEY,email text,name text);

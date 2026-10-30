@@ -7,6 +7,10 @@ const environmentSchema = z.object({
   BETTER_AUTH_SECRET: z.string().min(32),
   BETTER_AUTH_URL: z.string().url(),
   ALLOWED_ORIGINS: z.string().min(1),
+  NEON_AUTH_BASE_URL: z.string().url().optional(),
+  NEON_AUTH_JWKS_URL: z.string().url().optional(),
+  NEON_AUTH_AUDIENCE: z.string().min(1).optional(),
+  AI_CREDENTIAL_ENCRYPTION_KEY: z.preprocess((value) => value === '' ? undefined : value, z.string().regex(/^[a-fA-F0-9]{64}$/).optional()),
   PORT: z.coerce.number().int().min(1).max(65535).default(3001),
 });
 
@@ -33,6 +37,26 @@ export function parseEnvironment(source: NodeJS.ProcessEnv) {
   const authUrl = new URL(parsed.data.BETTER_AUTH_URL);
   if (parsed.data.NODE_ENV === 'production' && authUrl.protocol !== 'https:') {
     throw new Error('BETTER_AUTH_URL must use HTTPS in production.');
+  }
+  const neonAuthConfigured = Boolean(parsed.data.NEON_AUTH_BASE_URL && parsed.data.NEON_AUTH_JWKS_URL);
+  if (Boolean(parsed.data.NEON_AUTH_BASE_URL) !== Boolean(parsed.data.NEON_AUTH_JWKS_URL)) {
+    throw new Error('Configure both NEON_AUTH_BASE_URL and NEON_AUTH_JWKS_URL to enable AI gateway authentication.');
+  }
+  if (neonAuthConfigured) {
+    const neonAuthBase = new URL(parsed.data.NEON_AUTH_BASE_URL!);
+    const neonJwks = new URL(parsed.data.NEON_AUTH_JWKS_URL!);
+    if (parsed.data.NODE_ENV === 'production' && (neonAuthBase.protocol !== 'https:' || neonJwks.protocol !== 'https:')) {
+      throw new Error('Production Neon Auth base and JWKS URLs must use HTTPS.');
+    }
+    if (neonAuthBase.origin !== neonJwks.origin) {
+      throw new Error('The Neon Auth JWKS URL must use the configured Neon Auth origin.');
+    }
+  }
+  if (neonAuthConfigured && !parsed.data.AI_CREDENTIAL_ENCRYPTION_KEY) {
+    throw new Error('Configure AI_CREDENTIAL_ENCRYPTION_KEY in the server secret manager to enable the AI gateway.');
+  }
+  if (!neonAuthConfigured && parsed.data.AI_CREDENTIAL_ENCRYPTION_KEY) {
+    throw new Error('Configure Neon Auth before enabling AI credential encryption.');
   }
   return { ...parsed.data, allowedOrigins };
 }

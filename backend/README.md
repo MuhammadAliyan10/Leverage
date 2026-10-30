@@ -1,6 +1,6 @@
-# Leverage API (cloud sync)
+# Leverage API (cloud sync and AI gateway)
 
-This is a separate Node service. It is not imported by the Expo bundle. Neon credentials are used only by this server and the Prisma CLI.
+This is the existing Node backend used by the Expo app. Its Hono AI routes run in the same API instance as cloud sync; there is no separate gateway service or per-user server. It is not imported by the Expo bundle. Neon credentials and the AI encryption key are used only by this server and the Prisma CLI.
 
 ## Local setup
 
@@ -18,7 +18,7 @@ The backend can be packaged without exposing a database credential in the image:
 docker build -t leverage-api:local .
 ```
 
-The image runs as the unprivileged `node` user and starts the compiled server with `npm run start:production`'s equivalent (`node dist/src/index.js`). Supply `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `ALLOWED_ORIGINS`, and optionally `PORT` through the hosting provider's runtime secret/configuration store. `DATABASE_URL` must be the pooled runtime PostgreSQL URL with TLS enabled in production. Do not pass credentials as Docker build arguments or bake them into the image. The image health check uses `/health/ready`.
+The image runs as the unprivileged `node` user and starts the compiled server with `npm run start:production`'s equivalent (`node dist/src/index.js`). Supply `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `ALLOWED_ORIGINS`, and optionally `PORT` through the hosting provider's runtime secret/configuration store. To enable AI on the same API instance, also configure Neon Auth base/JWKS URLs and `AI_CREDENTIAL_ENCRYPTION_KEY` (32 random bytes, 64 hex characters) in that secret store. `DATABASE_URL` must be the pooled runtime PostgreSQL URL with TLS enabled in production. Do not pass credentials as Docker build arguments or bake them into the image. The image health check uses `/health/ready`.
 
 Schema changes are a separate release operation: review the SQL under `prisma/migrations`, then run `npm run prisma:migrate:deploy` from a controlled migration job with `DATABASE_URL_UNPOOLED` pointing to the intended database. Do not run that command as part of container startup, and do not apply migrations to the user's production database without an explicit release approval.
 

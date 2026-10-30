@@ -84,6 +84,38 @@ model RateLimit {
   lastRequest BigInt
 }
 
+// Neon Auth subjects are independent of this service's BetterAuth user table.
+// Provider credentials are stored only as authenticated ciphertext, never plaintext.
+model AiUserSetting {
+  userId                             String   @id
+  model                              String   @default("gpt-6-luna")
+  enabled                            Boolean  @default(false)
+  permissions                        Json
+  consentAcceptedAt                  DateTime?
+  credentialForwardingConsentAcceptedAt DateTime?
+  connectionStatus                   String   @default("not_configured")
+  lastValidatedAt                    DateTime?
+  monthlyRequestLimit                Int      @default(30)
+  credentialCiphertext               String?
+  createdAt                          DateTime @default(now())
+  updatedAt                          DateTime @updatedAt
+}
+
+model AiRequestUsage {
+  userId       String
+  month        String
+  requestCount Int      @default(0)
+  updatedAt    DateTime @updatedAt
+
+  @@id([userId, month])
+}
+
+model AiRequestLease {
+  userId    String   @id
+  leaseId   String   @unique
+  expiresAt DateTime
+}
+
 model FinanceAccount {
   id                   String               @default(uuid())
   userId               String

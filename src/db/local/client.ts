@@ -2065,6 +2065,30 @@ export const localDb = {
       return rows;
     },
 
+    findSelectedForAI: async (ownerId: string, transactionIds: readonly string[]): Promise<{
+      type: TransactionType; amountMinor: number; currency: CurrencyCode; category: string; date: string;
+    }[]> => {
+      if (!ownerId.trim() || transactionIds.length < 1 || transactionIds.length > 50 || transactionIds.some((id) => !id.trim() || id.length > 128)) {
+        throw new Error('Select between 1 and 50 valid transactions for detailed analysis.');
+      }
+      const ids = [...new Set(transactionIds)];
+      if (ids.length !== transactionIds.length) throw new Error('Selected transaction IDs must be unique.');
+      const database = await getDb();
+      const rows = await database.getAllAsync<{
+        type: string; amountMinor: number; currency: string | null; category: string | null; date: string;
+      }>(`SELECT t.type,t.amountMinor,COALESCE(t.sourceCurrency,a.currency) AS currency,COALESCE(t.category,'') AS category,t.date
+          FROM "Transaction" t
+          LEFT JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId
+          WHERE t.ownerId=? AND t.id IN (${ids.map(() => '?').join(',')})`, [ownerId, ...ids]);
+      if (rows.length !== ids.length) throw new Error('One or more selected transactions are unavailable in the active profile.');
+      return rows.map((row) => {
+        if (!isTransactionType(row.type) || !Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0 ||
+          !row.currency || !isCurrencyCode(row.currency) || typeof row.date !== 'string' || !Number.isFinite(Date.parse(row.date)) ||
+          (row.category?.length ?? 0) > 100) throw new Error('A selected transaction is invalid and cannot be shared for analysis.');
+        return { type: row.type, amountMinor: row.amountMinor, currency: row.currency, category: row.category ?? '', date: row.date };
+      });
+    },
+
     findRecentActivity: async (ownerId: string, limit = 5): Promise<TransactionActivity[]> => {
       if (!ownerId.trim()) throw new Error('A profile is required to read recent activity.');
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error('Recent activity limit must be between 1 and 10.');

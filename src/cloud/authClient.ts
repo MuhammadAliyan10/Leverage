@@ -91,6 +91,12 @@ async function refreshNeonJwt(ownerId: string): Promise<string | null> {
   return null;
 }
 
+/** Return a freshly issued Neon Auth JWT for authenticated server-to-server APIs. */
+export async function getFreshNeonJwt(ownerId: string): Promise<string | null> {
+  if (!cloudApiConfigured) return null;
+  return refreshNeonJwt(ownerId);
+}
+
 function isUsableNeonJwt(token: string): boolean {
   const claims = inspectNeonJwt(token);
   return claims.jwtShapeValid && claims.hasSubject && claims.hasAuthenticatedRole && claims.hasExpiry && !claims.expired;
