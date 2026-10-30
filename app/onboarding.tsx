@@ -1,12 +1,13 @@
 import { PRIMARY_COLOR } from '../src/constants/themeColors';
 import React, { useState } from 'react';
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { Platform, Pressable, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ArrowRight, Banknote, Check, CircleEllipsis, Landmark, PiggyBank, Smartphone, TrendingUp, Wallet } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { Input } from '../components/ui/Input';
+import { KeyboardAwareScrollView } from '../components/ui/KeyboardAwareScrollView';
 import { Button } from '../components/ui/Button';
 import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../components/ui/badgeStyles';
 import { localDb } from '../src/db/local/client';
@@ -70,8 +71,7 @@ export default function OnboardingScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1">
-        <ScrollView
+      <KeyboardAwareScrollView className="flex-1"
           contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 20, paddingTop: 16, paddingBottom: 32 }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
@@ -261,8 +261,7 @@ export default function OnboardingScreen() {
             </Text>
             </>}
           </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 }

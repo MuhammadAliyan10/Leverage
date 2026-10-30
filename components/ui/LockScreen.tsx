@@ -1,13 +1,13 @@
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 import React, { useEffect, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { Eye, EyeOff, Fingerprint, LockKeyhole } from 'lucide-react-native';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Button } from './Button';
 import { Input } from './Input';
+import { KeyboardAwareScrollView } from './KeyboardAwareScrollView';
 
 const schema = z.object({ password: z.string().min(1, 'Enter your profile password.') });
 type FormData = z.infer<typeof schema>;
@@ -48,7 +48,7 @@ export function LockScreen({ onUnlockPassword, onUnlockBiometric, checkBiometric
   };
 
   return (
-    <SafeAreaView className="absolute inset-0 z-50 flex-1 items-center justify-center bg-[#f8f9fc] px-6 dark:bg-neutral-950">
+    <KeyboardAwareScrollView className="absolute inset-0 z-50 flex-1 bg-[#f8f9fc] dark:bg-neutral-950" contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
       <View className="w-full max-w-[420px] rounded-md bg-white p-6 dark:bg-neutral-900">
         <View className="mb-5 h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
           <LockKeyhole size={27} color={PRIMARY_COLOR} />
@@ -89,6 +89,6 @@ export function LockScreen({ onUnlockPassword, onUnlockBiometric, checkBiometric
           Forgotten passwords cannot currently be reset. Your local financial records remain on this device.
         </Text>
       </View>
-    </SafeAreaView>
+    </KeyboardAwareScrollView>
   );
 }

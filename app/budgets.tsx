@@ -1,7 +1,8 @@
 import { PRIMARY_COLOR } from '../src/constants/themeColors';
 import React, { useMemo, useState } from 'react';
 import * as Crypto from 'expo-crypto';
-import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
+import { BottomSheetTextInput as TextInput } from '@gorhom/bottom-sheet';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { ChevronLeft, ChevronRight } from 'lucide-react-native';
@@ -95,7 +96,7 @@ export default function BudgetsScreen() {
     ? `Edit ${CLASSIFICATIONS[editingCategoryId].label} budget`
     : `Add ${selectedCategoryId ? CLASSIFICATIONS[selectedCategoryId].label : 'category'} budget`;
 
-  return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
+  return <SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Monthly Budgets" onDone={() => router.canGoBack() ? router.back() : router.replace('/(tabs)')} />
     <ScrollView className="flex-1 px-5 pt-5" contentContainerStyle={{ paddingBottom: 28 }}>
       <View className="mb-4 flex-row items-center justify-between rounded-md border border-gray-100 bg-white p-2 dark:border-neutral-800 dark:bg-neutral-900">

@@ -5,6 +5,7 @@ import { useCallback, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
+import { KeyboardAwareScrollView } from '../../components/ui/KeyboardAwareScrollView';
 import { localDb } from '../../src/db/local/client';
 import { formatMinorUnits } from '../../src/finance/ledger';
 import type { ProjectKind } from '../../src/finance/projects';
@@ -65,14 +66,14 @@ export default function ProjectsScreen() {
     <Modal visible={showCreate} animationType="slide" transparent onRequestClose={()=>setShowCreate(false)}>
       <View className="flex-1 justify-end bg-black/50"><View className="rounded-t-2xl bg-white px-5 pb-8 pt-3 dark:bg-neutral-950">
         <View className="mb-4 flex-row items-center justify-between"><View><Text className="font-body text-lg font-bold text-gray-900 dark:text-white">Create project</Text><Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">Budgets are plans; they do not add cash.</Text></View><Pressable onPress={()=>setShowCreate(false)} accessibilityLabel="Close" className="h-10 w-10 items-center justify-center rounded-md bg-gray-100 dark:bg-neutral-800"><X size={20} color="#8b8b98"/></Pressable></View>
-        <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <KeyboardAwareScrollView className="max-h-[80%]" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <Text className="mb-1.5 font-body text-xs text-gray-600 dark:text-neutral-300">Project name</Text><TextInput value={name} onChangeText={setName} placeholder="e.g. Northern areas trip" maxLength={100} className="mb-4 rounded-md border border-gray-300 bg-white px-4 py-3.5 font-body text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white" />
           <Text className="mb-1.5 font-body text-xs text-gray-600 dark:text-neutral-300">Description · optional</Text><TextInput value={description} onChangeText={setDescription} placeholder="What are you planning?" multiline maxLength={2000} className="mb-4 min-h-20 rounded-md border border-gray-300 bg-white px-4 py-3 font-body text-sm text-gray-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white" />
           <Text className="mb-2 font-body text-xs text-gray-600 dark:text-neutral-300">Project type</Text><View className="mb-4 flex-row flex-wrap gap-2">{kinds.map((item)=><Pressable key={item.id} onPress={()=>setKind(item.id)} className={`rounded-full border px-3.5 py-2 ${kind===item.id?'border-violet-500 bg-violet-50 dark:bg-violet-950':'border-gray-300 dark:border-neutral-700'}`}><Text className={`font-body text-sm ${kind===item.id?'text-violet-700 dark:text-violet-300':'text-gray-700 dark:text-neutral-300'}`}>{item.label}</Text></Pressable>)}</View>
           <Text className="mb-2 font-body text-xs text-gray-600 dark:text-neutral-300">Currency</Text><View className="mb-4 flex-row flex-wrap gap-2">{currencies.map((item)=><Pressable key={item} onPress={()=>setCurrency(item)} className={`rounded-full border px-3.5 py-2 ${currency===item?'border-violet-500 bg-violet-50 dark:bg-violet-950':'border-gray-300 dark:border-neutral-700'}`}><Text className={`font-body text-sm ${currency===item?'text-violet-700 dark:text-violet-300':'text-gray-700 dark:text-neutral-300'}`}>{item}</Text></Pressable>)}</View>
           <Text className="mb-1.5 font-body text-xs text-gray-600 dark:text-neutral-300">Total budget · optional</Text><TextInput value={budget} onChangeText={setBudget} placeholder="0.00" keyboardType="decimal-pad" className="mb-4 rounded-md border border-gray-300 bg-white px-4 py-3.5 font-body text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white" />
           <Text className="mb-1.5 font-body text-xs text-gray-600 dark:text-neutral-300">Your minimum contribution · optional</Text><TextInput value={contributionTarget} onChangeText={setContributionTarget} placeholder="e.g. 20,000" keyboardType="decimal-pad" className="mb-4 rounded-md border border-gray-300 bg-white px-4 py-3.5 font-body text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white" />
-        </ScrollView>
+        </KeyboardAwareScrollView>
         <Pressable disabled={busy} onPress={()=>void create()} className="mt-3 items-center rounded-md bg-primary py-3.5 disabled:opacity-50"><Text className="font-body font-semibold text-white">{busy?'Creating…':'Create project'}</Text></Pressable>
       </View></View>
     </Modal>

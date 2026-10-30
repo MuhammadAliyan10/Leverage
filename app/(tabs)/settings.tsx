@@ -9,6 +9,7 @@ import type { LucideIcon } from 'lucide-react-native';
 import { Controller, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
+import { KeyboardAwareScrollView } from '../../components/ui/KeyboardAwareScrollView';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { useAppConfirm } from '../../components/ui/useAppConfirm';
@@ -197,7 +198,7 @@ export default function SettingsScreen() {
   return (
     <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
       <GlobalHeader title="Settings" description="Manage your profile and app preferences" />
-      <ScrollView className="flex-1 px-4 pt-3" contentContainerStyle={{ paddingBottom: 36 }} showsVerticalScrollIndicator={false}>
+      <KeyboardAwareScrollView className="flex-1 px-4 pt-3" contentContainerStyle={{ paddingBottom: 36 }} showsVerticalScrollIndicator={false}>
         {sessionNotice ? <Text accessibilityRole="alert" className="font-body mb-3 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-800 dark:bg-amber-950 dark:text-amber-200">{sessionNotice}</Text> : null}
         {feedback ? <View accessibilityRole={feedback.kind === 'error' ? 'alert' : 'text'} className={`mb-3 flex-row items-start rounded-xl p-3 ${feedback.kind === 'error' ? 'bg-red-50 dark:bg-red-950/50' : 'bg-primary/10 dark:bg-primary/20'}`}>
           <View className="flex-1"><Text className={`font-body text-sm font-semibold ${feedback.kind === 'error' ? 'text-red-800 dark:text-red-200' : 'text-gray-900 dark:text-white'}`}>{feedback.title}</Text><Text className={`font-body mt-1 text-xs leading-5 ${feedback.kind === 'error' ? 'text-red-700 dark:text-red-200' : 'text-gray-700 dark:text-neutral-200'}`}>{feedback.message}</Text></View>
@@ -264,7 +265,7 @@ export default function SettingsScreen() {
         <Section title="Session">
           <SettingRow icon={LogOut} title="Sign out" danger onPress={handleSignOut} />
         </Section>
-      </ScrollView>
+      </KeyboardAwareScrollView>
 
       <ProfileSecurityModal
         key={panel ?? 'closed'}
@@ -361,7 +362,8 @@ function RecoveryModal({ visible, onClose, onExport, onRestore }: {
   };
   return <><Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1 justify-end bg-black/40">
-      <SafeAreaView edges={['bottom']} className="rounded-t-3xl bg-gray-50 px-5 pt-4 dark:bg-neutral-950" style={{ borderBottomLeftRadius: 0, borderBottomRightRadius: 0 }}>
+      <SafeAreaView edges={['bottom']} className="max-h-[90%] rounded-t-3xl bg-gray-50 px-5 pt-4 dark:bg-neutral-950" style={{ borderBottomLeftRadius: 0, borderBottomRightRadius: 0 }}>
+      <KeyboardAwareScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 12 }} keyboardShouldPersistTaps="handled">
         <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-xl font-bold text-gray-900 dark:text-white">Encrypted backup</Text><Pressable accessibilityRole="button" accessibilityLabel="Close backup" onPress={onClose} className="min-h-11 min-w-11 items-center justify-center rounded-full bg-white dark:bg-neutral-800"><X size={20} color="#687386" /></Pressable></View>
         <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">This backup includes every profile saved on this device. Choose a unique passphrase with at least 12 characters and keep it safe; you will need it to restore the file.</Text>
         <Input label="Backup passphrase" value={passphrase} onChangeText={setPassphrase} secureTextEntry={!showPassword} autoCapitalize="none" autoCorrect={false} error={undefined} trailingAction={<Pressable accessibilityRole="button" accessibilityLabel={showPassword ? 'Hide passphrase' : 'Show passphrase'} onPress={() => setShowPassword((shown) => !shown)}>{showPassword ? <EyeOff size={19} color="#737d8d" /> : <Eye size={19} color="#737d8d" />}</Pressable>} />
@@ -370,6 +372,7 @@ function RecoveryModal({ visible, onClose, onExport, onRestore }: {
         <Button title="Create encrypted backup" onPress={() => void exportBackup()} isLoading={busy} />
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => void restoreBackup()} className="mt-3 min-h-12 items-center justify-center"><Text className="font-body font-semibold text-primary">Choose backup file and restore</Text></Pressable>
         <Text className="font-body pb-4 pt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Restore replaces the profiles and records saved on this device. You will be signed out when it finishes. If the backup fails its checks, your current records stay in place.</Text>
+      </KeyboardAwareScrollView>
       </SafeAreaView>
     </KeyboardAvoidingView>
   </Modal>{dialog}</>;
@@ -443,6 +446,7 @@ function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSav
     <Modal visible={mode !== null} transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1 justify-end bg-black/40">
         <SafeAreaView edges={['bottom']} className="max-h-[90%] rounded-t-3xl bg-gray-50 dark:bg-neutral-950" style={{ paddingHorizontal: 20, paddingBottom: 20, borderBottomLeftRadius: 0, borderBottomRightRadius: 0 }}>
+          <KeyboardAwareScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 8 }} keyboardShouldPersistTaps="handled">
           <View className="mb-4 flex-row items-center justify-between pt-4">
             <Text className="font-heading text-xl font-bold text-gray-900 dark:text-white">{mode === 'name' ? 'Edit display name' : mode === 'password' ? 'Change password' : 'Switch local profile'}</Text>
             <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={onClose} className="min-h-11 min-w-11 items-center justify-center rounded-full bg-white dark:bg-neutral-800"><X size={20} color="#687386" /></Pressable>
@@ -463,12 +467,13 @@ function ProfileSecurityModal({ mode, fullName, currentProfileId, onClose, onSav
             <Text className="font-body mb-3 text-sm leading-5 text-gray-600 dark:text-neutral-300">Choose a profile, then enter its password. Leverage will not authenticate it automatically.</Text>
             {loadingProfiles ? <View className="items-center py-6"><ActivityIndicator color={PRIMARY_COLOR} /><Text className="font-body mt-2 text-sm text-gray-500">Loading profiles…</Text></View> : null}
             {profileError ? <View className="py-2"><Text accessibilityRole="alert" className="font-body text-sm text-red-600">{profileError}</Text><Pressable accessibilityRole="button" onPress={() => setRetry((value) => value + 1)} className="mt-3 min-h-11 justify-center"><Text className="font-body font-semibold text-primary">Retry</Text></Pressable></View> : null}
-            {!loadingProfiles && !profileError ? <ScrollView keyboardShouldPersistTaps="handled">
+            {!loadingProfiles && !profileError ? <View>
               {profiles.filter((profile) => profile.id !== currentProfileId).map((profile) => <Pressable key={profile.id} accessibilityRole="button" accessibilityLabel={`Sign in to ${profile.fullName}`} disabled={switchingProfile !== null} onPress={() => void chooseProfile(profile)} className="mb-2 min-h-14 flex-row items-center justify-between rounded-md bg-white px-4 dark:bg-neutral-900"><View><Text className="font-body font-semibold text-gray-900 dark:text-white">{profile.fullName}</Text><Text className="font-body mt-1 text-sm text-gray-500 dark:text-neutral-400">{profile.email}</Text></View>{switchingProfile === profile.id ? <ActivityIndicator color={PRIMARY_COLOR} /> : <ChevronRight size={18} color="#9ca3af" />}</Pressable>)}
               {profiles.length > 0 && profiles.every((profile) => profile.id === currentProfileId) ? <Text className="font-body py-3 text-sm text-gray-500 dark:text-neutral-400">No other local profiles are available.</Text> : null}
               {profiles.length === 0 ? <Text className="font-body py-3 text-sm text-gray-500 dark:text-neutral-400">No local profiles are available.</Text> : null}
-            </ScrollView> : null}
+            </View> : null}
           </> : null}
+          </KeyboardAwareScrollView>
         </SafeAreaView>
       </KeyboardAvoidingView>
     </Modal>

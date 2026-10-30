@@ -21,9 +21,16 @@ export interface LiquidityPosition {
   physicalCashBalanceMinor: number;
   physicalCashReservedMinor: number;
   physicalCashAvailableMinor: number;
+  savingsBalanceMinor: number;
+  savingsReservedMinor: number;
+  savingsAvailableMinor: number;
+  savingsAndSetAsideMinor: number;
   bankAndMobileBalanceMinor: number;
   bankAndMobileReservedMinor: number;
   bankAndMobileAvailableMinor: number;
+  spendableBalanceMinor: number;
+  spendableReservedMinor: number;
+  spendableAvailableMinor: number;
 }
 
 export interface AvailableToSpendBillInput {
@@ -77,8 +84,12 @@ export function calculateLiquidityPositions(
   const reserved = new Map<CurrencyCode, bigint>();
   const physicalCashBalances = new Map<CurrencyCode, bigint>();
   const physicalCashReserved = new Map<CurrencyCode, bigint>();
+  const savingsBalances = new Map<CurrencyCode, bigint>();
+  const savingsReserved = new Map<CurrencyCode, bigint>();
   const bankAndMobileBalances = new Map<CurrencyCode, bigint>();
   const bankAndMobileReserved = new Map<CurrencyCode, bigint>();
+  const spendableBalances = new Map<CurrencyCode, bigint>();
+  const spendableReserved = new Map<CurrencyCode, bigint>();
   for (const account of accounts) {
     if (account.archivedAt !== null || !['cash', 'bank', 'savings', 'wallet'].includes(normalizeAccountType(account.type) ?? '')) continue;
     if (!isCurrencyCode(account.currency)) throw new Error(`Account ${account.id} has an unsupported currency.`);
@@ -87,11 +98,15 @@ export function calculateLiquidityPositions(
     const accountReservation = reservationsByAccount.get(account.id) ?? 0n;
     balances.set(currency, (balances.get(currency) ?? 0n) + BigInt(account.balanceMinor));
     reserved.set(currency, (reserved.get(currency) ?? 0n) + accountReservation);
-    const isPhysicalCash = normalizeAccountType(account.type) === 'cash';
-    const balanceByType = isPhysicalCash ? physicalCashBalances : bankAndMobileBalances;
-    const reservedByType = isPhysicalCash ? physicalCashReserved : bankAndMobileReserved;
+    const type = normalizeAccountType(account.type);
+    const balanceByType = type === 'cash' ? physicalCashBalances : type === 'savings' ? savingsBalances : bankAndMobileBalances;
+    const reservedByType = type === 'cash' ? physicalCashReserved : type === 'savings' ? savingsReserved : bankAndMobileReserved;
     balanceByType.set(currency, (balanceByType.get(currency) ?? 0n) + balance);
     reservedByType.set(currency, (reservedByType.get(currency) ?? 0n) + accountReservation);
+    if (type !== 'savings') {
+      spendableBalances.set(currency, (spendableBalances.get(currency) ?? 0n) + balance);
+      spendableReserved.set(currency, (spendableReserved.get(currency) ?? 0n) + accountReservation);
+    }
   }
 
   return [...new Set([...balances.keys(), ...reserved.keys()])].sort().map((currency) => {
@@ -99,8 +114,12 @@ export function calculateLiquidityPositions(
     const reservedMinor = safeMinor(reserved.get(currency) ?? 0n, 'Reserved balance');
     const physicalCashBalanceMinor = safeMinor(physicalCashBalances.get(currency) ?? 0n, 'Physical cash balance');
     const physicalCashReservedMinor = safeMinor(physicalCashReserved.get(currency) ?? 0n, 'Physical cash reservation');
+    const savingsBalanceMinor = safeMinor(savingsBalances.get(currency) ?? 0n, 'Savings balance');
+    const savingsReservedMinor = safeMinor(savingsReserved.get(currency) ?? 0n, 'Savings reservation');
     const bankAndMobileBalanceMinor = safeMinor(bankAndMobileBalances.get(currency) ?? 0n, 'Bank and mobile balance');
     const bankAndMobileReservedMinor = safeMinor(bankAndMobileReserved.get(currency) ?? 0n, 'Bank and mobile reservation');
+    const spendableBalanceMinor = safeMinor(spendableBalances.get(currency) ?? 0n, 'Daily-use balance');
+    const spendableReservedMinor = safeMinor(spendableReserved.get(currency) ?? 0n, 'Daily-use reservation');
     return {
       currency,
       currentBalanceMinor,
@@ -109,21 +128,29 @@ export function calculateLiquidityPositions(
       physicalCashBalanceMinor,
       physicalCashReservedMinor,
       physicalCashAvailableMinor: safeMinor(BigInt(physicalCashBalanceMinor) - BigInt(physicalCashReservedMinor), 'Available physical cash'),
+      savingsBalanceMinor,
+      savingsReservedMinor,
+      savingsAvailableMinor: safeMinor(BigInt(savingsBalanceMinor) - BigInt(savingsReservedMinor), 'Available savings'),
+      savingsAndSetAsideMinor: safeMinor(BigInt(savingsBalanceMinor) + BigInt(spendableReservedMinor), 'Savings and set-aside funds'),
       bankAndMobileBalanceMinor,
       bankAndMobileReservedMinor,
       bankAndMobileAvailableMinor: safeMinor(BigInt(bankAndMobileBalanceMinor) - BigInt(bankAndMobileReservedMinor), 'Available bank and mobile funds'),
+      spendableBalanceMinor,
+      spendableReservedMinor,
+      spendableAvailableMinor: safeMinor(BigInt(spendableBalanceMinor) - BigInt(spendableReservedMinor), 'Available daily-use funds'),
     };
   });
 }
 
 /**
  * Estimates what remains through a period end from current unreserved liquid
- * balances, less unpaid recorded bills due by that date. Bills already paid,
+ * cash, bank and mobile wallet balances (excluding savings accounts), less
+ * their account earmarks and unpaid recorded bills due by that date. Bills already paid,
  * skipped, cancelled, or due after the period are excluded. Reservations have
- * already been removed from `availableMinor` and must not be subtracted again.
+ * already been removed from `spendableAvailableMinor` and must not be subtracted again.
  */
 export function calculateAvailableToSpend(
-  liquidity: readonly Pick<LiquidityPosition, 'currency' | 'availableMinor'>[],
+  liquidity: readonly Pick<LiquidityPosition, 'currency' | 'spendableAvailableMinor'>[],
   bills: readonly AvailableToSpendBillInput[],
   periodEndDate: string,
 ): AvailableToSpendPosition[] {
@@ -132,10 +159,10 @@ export function calculateAvailableToSpend(
   }
   const balances = new Map<CurrencyCode, bigint>();
   for (const position of liquidity) {
-    if (!isCurrencyCode(position.currency) || !Number.isSafeInteger(position.availableMinor) || balances.has(position.currency)) {
+    if (!isCurrencyCode(position.currency) || !Number.isSafeInteger(position.spendableAvailableMinor) || balances.has(position.currency)) {
       throw new Error('Available-to-spend liquid balances are invalid.');
     }
-    balances.set(position.currency, BigInt(position.availableMinor));
+    balances.set(position.currency, BigInt(position.spendableAvailableMinor));
   }
   const billIds = new Set<string>();
   const billsByCurrency = new Map<CurrencyCode, bigint>();

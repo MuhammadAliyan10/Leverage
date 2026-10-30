@@ -41,6 +41,7 @@ export function ActionSheet({ visible, title, onClose, children }: ActionSheetPr
       onClose={onClose}
       keyboardBehavior="interactive"
       keyboardBlurBehavior="restore"
+      android_keyboardInputMode="adjustResize"
       backgroundStyle={{ backgroundColor: dark ? '#0a0a0a' : '#f9fafb' }}
       handleIndicatorStyle={{ backgroundColor: dark ? '#737373' : '#9ca3af', width: 40 }}
     >

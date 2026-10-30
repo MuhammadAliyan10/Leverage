@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ActivityIndicator, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { KeyboardAwareScrollView } from '../ui/KeyboardAwareScrollView';
 import { cloudApiConfigured, cloudFetch, getCloudAuthClient } from '../../src/cloud/authClient';
 import { localDb } from '../../src/db/local/client';
 import { assessAccountReconciliation, type CloudAccountReconciliationPreview, type LocalAccountConflict } from '../../src/cloud/accountReconciliation';
@@ -192,7 +193,7 @@ export function CloudSyncModal({ visible, ownerId, fullName, onClose }: Props) {
   return <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
     <View className="flex-1 justify-end bg-black/40">
       <View className="max-h-[90%] rounded-t-3xl bg-white dark:bg-neutral-900">
-      <ScrollView className="px-5 pt-5" contentContainerStyle={{ paddingBottom: 28 }} keyboardShouldPersistTaps="handled">
+      <KeyboardAwareScrollView className="px-5 pt-5" contentContainerStyle={{ paddingBottom: 28 }} keyboardShouldPersistTaps="handled">
         <View className="mb-4 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Cloud sync</Text><Pressable accessibilityRole="button" onPress={onClose}><Text className="font-body text-sm font-semibold text-primary">Close</Text></Pressable></View>
         {identity ? <>
           <Text className="font-body text-sm text-gray-800 dark:text-neutral-100">Cloud identity connected</Text>
@@ -262,7 +263,7 @@ export function CloudSyncModal({ visible, ownerId, fullName, onClose }: Props) {
           <Pressable disabled={busy} onPress={() => void connect(true)} className="mt-2 min-h-11 items-center justify-center border border-primary px-4"><Text className="font-body font-semibold" style={{ color: PRIMARY_COLOR }}>Create cloud account and connect</Text></Pressable>
         </>}
         {error && identity ? <Text accessibilityRole="alert" className="font-body mt-3 text-xs leading-5 text-amber-700 dark:text-amber-300">{error}</Text> : null}
-      </ScrollView>
+      </KeyboardAwareScrollView>
       </View>
     </View>
   </Modal>;

@@ -1,6 +1,7 @@
 import { PRIMARY_COLOR } from '../src/constants/themeColors';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
+import { BottomSheetTextInput as TextInput } from '@gorhom/bottom-sheet';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -140,7 +141,7 @@ export default function AccountsScreen() {
   }, [activeAccounts, activeChartCurrency]);
   const positiveMixTotal = accountMix.reduce((total, item) => total + item.balanceMinor, 0);
 
-  return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
+  return <SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Accounts" onDone={() => router.canGoBack() ? router.back() : router.replace('/(tabs)')} />
     <ScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{ paddingBottom: 8 }} keyboardShouldPersistTaps="handled">
       <View className="mb-3 flex-row items-center justify-between">

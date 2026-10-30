@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import * as Crypto from 'expo-crypto';
-import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Text, View } from 'react-native';
+import { BottomSheetTextInput as TextInput } from '@gorhom/bottom-sheet';
 import { useQuery } from '@tanstack/react-query';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -138,7 +139,7 @@ export default function SavingsScreen() {
   const currencyChoices = (selected: CurrencyCode, onSelect: (code: CurrencyCode) => void) => <View className="mt-1 flex-row flex-wrap">{(Object.keys(CURRENCIES) as CurrencyCode[]).map((code) => <Pressable key={code} accessibilityRole="radio" accessibilityState={{ checked: selected === code }} onPress={() => onSelect(code)} className={`mr-2 mt-2 rounded-full px-3 py-2 ${selected === code ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs ${selected === code ? `font-bold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{code}</Text></Pressable>)}</View>;
   const accountChoices = (selected: string, onSelect: (id: string) => void, options: typeof accounts, label: string) => <View className="mt-3"><Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">{label}</Text><View className="mt-1 flex-row flex-wrap">{options.map((account) => <Pressable key={account.id} accessibilityRole="radio" accessibilityLabel={`${label}: ${account.name}`} accessibilityState={{ checked: selected === account.id }} onPress={() => onSelect(account.id)} className={`mr-2 mt-2 rounded-full border px-3 py-2 ${selected === account.id ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs ${selected === account.id ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{account.name}</Text></Pressable>)}</View>{options.length === 0 ? <Text className="font-body mt-2 text-xs text-amber-700 dark:text-amber-300">No active account uses this currency.</Text> : null}</View>;
 
-  return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
+  return <SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Savings & Safety Net" onDone={closeSavings} />
     <ScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{ paddingBottom: 24 }}>
       {!!error && <View className="mb-3 rounded-md bg-red-50 p-3 dark:bg-red-950"><Text className="font-body text-sm text-red-700 dark:text-red-200">Savings could not be loaded: {error.message}</Text><Pressable accessibilityRole="button" onPress={() => void refetch()} className="mt-2 self-start"><Text className="font-body font-semibold text-primary">Try again</Text></Pressable></View>}

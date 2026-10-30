@@ -197,26 +197,25 @@ export default function DashboardScreen() {
 
       <SectionTitle title="Liquid funds" action="Accounts" onPress={() => router.push('/accounts')} />
       {hasAccounts ? metrics.liquidity.map((position) => <Surface key={position.currency} className="mb-3">
-        <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{position.currency} · active liquid funds</Text>
+        <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">Total liquid funds · {position.currency}</Text>
         <Text style={strongNumber} className="mt-1 text-2xl text-gray-900 dark:text-white">{money(position.currentBalanceMinor, position.currency)}</Text>
-        <View className="mt-3 flex-row flex-wrap border-t border-gray-100 pt-3 dark:border-neutral-800">
-          <View className="mb-3 w-1/2 pr-2"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Physical cash</Text><Text className="font-body mt-1 font-semibold text-gray-800 dark:text-neutral-200">{money(position.physicalCashBalanceMinor, position.currency)}</Text></View>
-          <View className="mb-3 w-1/2 pl-2"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Bank, savings & mobile wallets</Text><Text className="font-body mt-1 font-semibold text-gray-800 dark:text-neutral-200">{money(position.bankAndMobileBalanceMinor, position.currency)}</Text></View>
-          <View className="mb-3 w-1/2 pr-2"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Earmarked funds</Text><Text className="font-body mt-1 font-semibold text-gray-800 dark:text-neutral-200">{money(position.reservedMinor, position.currency)}</Text></View>
-          <View className="mb-3 w-1/2 pl-2"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Unreserved balance</Text><Text className="font-body mt-1 font-semibold text-primary">{money(position.availableMinor, position.currency)}</Text></View>
+        <View className="mt-3 border-t border-gray-100 pt-2 dark:border-neutral-800">
+          <View className="flex-row items-center justify-between py-1.5"><Text className="font-body text-sm text-gray-600 dark:text-neutral-300">Physical cash available</Text><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{money(position.physicalCashAvailableMinor, position.currency)}</Text></View>
+          <View className="flex-row items-center justify-between py-1.5"><Text className="font-body text-sm text-gray-600 dark:text-neutral-300">Bank & mobile available</Text><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{money(position.bankAndMobileAvailableMinor, position.currency)}</Text></View>
+          <View className="flex-row items-center justify-between py-1.5"><Text className="font-body text-sm text-gray-600 dark:text-neutral-300">Savings & set aside</Text><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{money(position.savingsAndSetAsideMinor, position.currency)}</Text></View>
         </View>
       </Surface>) : <Surface><Text className="font-body font-semibold text-gray-900 dark:text-white">No active liquid accounts</Text><Text className="font-body mt-1 text-sm text-gray-600 dark:text-neutral-300">Archived accounts remain in your financial history and net worth.</Text></Surface>}
-      <Text className="font-body mt-1 text-xs leading-4 text-gray-500 dark:text-neutral-400">This total adds physical cash to balances in active bank accounts, savings accounts and mobile wallets. Set-aside money is shown below. Upcoming bills are not deducted; investments and other assets are not included.</Text>
+      <Text className="font-body mt-1 text-xs leading-4 text-gray-500 dark:text-neutral-400">Account balances are split between available funds and amounts allocated to savings. Available to spend also subtracts upcoming bills.</Text>
 
       <SectionTitle title="Available to spend" />
       {metrics.availableToSpend.length ? metrics.availableToSpend.map((position) => <Surface key={position.currency} className="mb-3">
-        <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{position.currency} · through {periodEndLabel}</Text>
+        <Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">Estimated after bills · {position.currency}</Text>
         <Text style={strongNumber} className={`mt-1 text-2xl ${position.availableToSpendMinor < 0 ? 'text-rose-700 dark:text-rose-300' : 'text-gray-900 dark:text-white'}`}>{money(position.availableToSpendMinor, position.currency)}</Text>
         <View className="mt-3 border-t border-gray-100 pt-3 dark:border-neutral-800">
-          <View className="mb-2 flex-row items-center justify-between gap-3"><Text className="flex-1 font-body text-xs text-gray-500 dark:text-neutral-400">Unreserved liquid balance</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{money(position.unreservedMinor, position.currency)}</Text></View>
-          <View className="flex-row items-center justify-between gap-3"><Text className="flex-1 font-body text-xs text-gray-500 dark:text-neutral-400">Unpaid bills due by {periodEndLabel}</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{position.unpaidBillsDueMinor > 0 ? '−' : ''}{money(position.unpaidBillsDueMinor, position.currency)}</Text></View>
+          <View className="mb-2 flex-row items-center justify-between gap-3"><Text className="flex-1 font-body text-sm text-gray-600 dark:text-neutral-300">Daily-use balance</Text><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{money(position.unreservedMinor, position.currency)}</Text></View>
+          <View className="flex-row items-center justify-between gap-3"><Text className="flex-1 font-body text-sm text-gray-600 dark:text-neutral-300">Bills due by {periodEndLabel}</Text><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{position.unpaidBillsDueMinor > 0 ? '−' : ''}{money(position.unpaidBillsDueMinor, position.currency)}</Text></View>
         </View>
-        <Text className="font-body mt-3 text-xs leading-4 text-gray-500 dark:text-neutral-400">Estimate through month-end: unreserved balances minus recorded unpaid bills due by then. Savings reservations are already removed. No minimum cash buffer or essential-bill label is set.</Text>
+        <Text className="font-body mt-3 text-xs leading-4 text-gray-500 dark:text-neutral-400">Uses cash, bank and mobile wallets after account earmarks; savings are excluded. Period ends {periodEndLabel}.</Text>
         {position.availableToSpendMinor < 0 ? <Text className="font-body mt-2 text-xs font-semibold text-rose-700 dark:text-rose-300">Recorded bills are higher than the unreserved balance by {money(-position.availableToSpendMinor, position.currency)}.</Text> : null}
       </Surface>) : <Surface><Text className="font-body text-sm text-gray-600 dark:text-neutral-300">Add an active liquid account to estimate available spending money.</Text></Surface>}
 

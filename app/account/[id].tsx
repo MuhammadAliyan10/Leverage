@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
+import { BottomSheetTextInput } from '@gorhom/bottom-sheet';
+import { KeyboardAwareScrollView } from '../../components/ui/KeyboardAwareScrollView';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -147,9 +149,9 @@ export default function AccountActivityScreen() {
   };
   const busy = accountsLoading || (summaryQuery.isLoading && !summaryQuery.data);
 
-  return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
+  return <SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title={account?.name ?? 'Account activity'} onDone={() => router.canGoBack() ? router.back() : router.replace('/accounts')} />
-    <ScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{ paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+    <KeyboardAwareScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{ paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
       {busy ? <Text className="font-body py-8 text-center text-gray-500 dark:text-neutral-400">Loading account activity…</Text>
         : accountsError || summaryQuery.isError ? <View className="rounded-md border border-red-200 bg-red-50 p-5 dark:border-red-900 dark:bg-red-950"><Text className="font-body mb-3 text-sm text-red-700 dark:text-red-300">Account details could not be loaded. Your saved records have not been changed.</Text><Pressable accessibilityRole="button" onPress={retry} className="houselog-button self-start px-4 py-2"><Text className="font-body font-semibold text-white">Try again</Text></Pressable></View>
           : !account || !summaryQuery.data ? <View className="rounded-md bg-white p-5 dark:bg-neutral-900"><Text className="font-body text-gray-700 dark:text-neutral-200">This account is not available in the current profile.</Text></View>
@@ -177,10 +179,10 @@ export default function AccountActivityScreen() {
                       : transactions.map((transaction) => <AccountTransactionRow key={transaction.id} transaction={transaction} accountId={account.id} currency={account.currency as CurrencyCode} />)}
               {!!history.hasNextPage && <Pressable disabled={history.isFetching} accessibilityRole="button" accessibilityState={{ disabled: history.isFetching, busy: history.isFetchingNextPage }} onPress={() => void history.fetchNextPage()} className={`houselog-button mt-3 items-center py-3 ${history.isFetching?'opacity-60':''}`}><Text className="font-body font-semibold text-white">{history.isFetchingNextPage ? 'Loading…' : 'Load older transactions'}</Text></Pressable>}
             </>}
-    </ScrollView>
+    </KeyboardAwareScrollView>
     <ActionSheet visible={editOpen} title="Edit account" onClose={() => { if (!editBusy) setEditOpen(false); }}>
       <Text className="font-body mb-1 text-sm font-semibold text-gray-600 dark:text-neutral-300">Account name</Text>
-      <TextInput accessibilityLabel="Account name" value={editName} onChangeText={(value) => { setEditName(value); setEditFieldErrors((errors) => ({ ...errors, name: undefined })); }} placeholder="e.g. Main bank" placeholderTextColor="#9ca3af" maxLength={80} autoCapitalize="words" editable={!editBusy} className={`font-body rounded-md border bg-white px-4 py-3 text-base text-gray-900 dark:bg-neutral-800 dark:text-white ${editFieldErrors.name ? 'mb-1 border-red-500 dark:border-red-500' : 'mb-4 border-gray-200 dark:border-neutral-700'}`} />
+      <BottomSheetTextInput accessibilityLabel="Account name" value={editName} onChangeText={(value) => { setEditName(value); setEditFieldErrors((errors) => ({ ...errors, name: undefined })); }} placeholder="e.g. Main bank" placeholderTextColor="#9ca3af" maxLength={80} autoCapitalize="words" editable={!editBusy} className={`font-body rounded-md border bg-white px-4 py-3 text-base text-gray-900 dark:bg-neutral-800 dark:text-white ${editFieldErrors.name ? 'mb-1 border-red-500 dark:border-red-500' : 'mb-4 border-gray-200 dark:border-neutral-700'}`} />
       {editFieldErrors.name ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" className="font-body mb-4 text-xs text-red-600 dark:text-red-400">{editFieldErrors.name}</Text> : null}
       <Text className="font-body mb-2 text-sm font-semibold text-gray-600 dark:text-neutral-300">Account type</Text>
       <View className="mb-3 flex-row flex-wrap">{ACCOUNT_TYPES.map((option) => <Pressable key={option.id} disabled={editBusy} accessibilityRole="radio" accessibilityState={{ checked: editType === option.id }} onPress={() => setEditType(option.id)} className={`mb-2 mr-2 rounded-full px-3 py-2 ${editType === option.id ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body ${editType === option.id ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{option.label}</Text></Pressable>)}</View>
@@ -188,7 +190,7 @@ export default function AccountActivityScreen() {
         <Text className="font-body mb-2 text-sm font-semibold text-gray-600 dark:text-neutral-300">Currency</Text>
         <View className="mb-3 flex-row flex-wrap">{(Object.keys(CURRENCIES) as CurrencyCode[]).map((code) => <Pressable key={code} disabled={editBusy} accessibilityRole="radio" accessibilityState={{ checked: editCurrency === code }} onPress={() => setEditCurrency(code)} className={`mb-2 mr-2 rounded-full px-3 py-2 ${editCurrency === code ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body ${editCurrency === code ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{code}</Text></Pressable>)}</View>
         <Text className="font-body mb-1 text-sm font-semibold text-gray-600 dark:text-neutral-300">Opening balance</Text>
-        <TextInput accessibilityLabel="Opening balance" value={editOpeningBalance} onChangeText={(value) => { setEditOpeningBalance(formatGroupedAmountInput(value)); setEditFieldErrors((errors) => ({ ...errors, openingBalance: undefined })); }} editable={!editBusy} keyboardType="decimal-pad" inputMode="decimal" placeholder="0.00" placeholderTextColor="#9ca3af" className={`font-body rounded-md border bg-white px-4 py-3 text-base text-gray-900 dark:bg-neutral-800 dark:text-white ${editFieldErrors.openingBalance ? 'mb-1 border-red-500 dark:border-red-500' : 'mb-4 border-gray-200 dark:border-neutral-700'}`} />
+      <BottomSheetTextInput accessibilityLabel="Opening balance" value={editOpeningBalance} onChangeText={(value) => { setEditOpeningBalance(formatGroupedAmountInput(value)); setEditFieldErrors((errors) => ({ ...errors, openingBalance: undefined })); }} editable={!editBusy} keyboardType="decimal-pad" inputMode="decimal" placeholder="0.00" placeholderTextColor="#9ca3af" className={`font-body rounded-md border bg-white px-4 py-3 text-base text-gray-900 dark:bg-neutral-800 dark:text-white ${editFieldErrors.openingBalance ? 'mb-1 border-red-500 dark:border-red-500' : 'mb-4 border-gray-200 dark:border-neutral-700'}`} />
         {editFieldErrors.openingBalance ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" className="font-body mb-4 text-xs text-red-600 dark:text-red-400">{editFieldErrors.openingBalance}</Text> : null}
       </> : null}
       <Text className="font-body mb-3 text-xs leading-5 text-gray-500 dark:text-neutral-400">{editConstraintsQuery.isLoading ? 'Checking account history and sync settings…' : editConstraintsQuery.isError ? 'Could not verify edit limits. Retry the account checks before saving.' : financialFieldsLocked ? 'Currency and opening balance are locked because this account has activity or cloud sync is connected.' : 'After you record a transaction, changing the starting balance or currency is restricted to protect your account history.'}</Text>

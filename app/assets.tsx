@@ -1,6 +1,7 @@
 import { PRIMARY_COLOR } from '../src/constants/themeColors';
 import React, { createContext, useContext, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, Text, TextInput, View, useColorScheme as useSystemColorScheme, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, Text, View, useColorScheme as useSystemColorScheme, useWindowDimensions } from 'react-native';
+import { BottomSheetTextInput as TextInput } from '@gorhom/bottom-sheet';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
@@ -88,7 +89,7 @@ export default function AssetsScreen() {
   const holdings=(data?.holdings??[]).filter((item)=>item.portfolioId===(selectedPortfolio||selectedPortfolioRow?.id));
   const cashChoices=(currency:string)=>accounts.filter((item)=>item.currency===currency);
 
-  return <AssetActionBusyContext.Provider value={busy}><SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
+  return <AssetActionBusyContext.Provider value={busy}><SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Assets & net worth" onDone={()=>router.canGoBack()?router.back():router.replace('/(tabs)')}/>
     <View className="mx-5 mt-3 mb-3 flex-row rounded-xl bg-gray-100 p-1 dark:bg-neutral-800">{([['overview','Overview'],['assets','Assets'],['investments','Investments']] as const).map(([key,label])=><Pressable key={key} accessibilityRole="tab" accessibilityState={{selected:section===key}} onPress={()=>setSection(key)} className={`flex-1 items-center rounded-lg py-2 ${section===key?'bg-white shadow-sm dark:bg-neutral-700':''}`}><Text className={["font-body", (section===key?'font-bold text-primary':'font-semibold text-gray-500 dark:text-neutral-300')].filter(Boolean).join(' ')}>{label}</Text></Pressable>)}</View>
     {query.isLoading?<View className="flex-1 items-center justify-center"><Text className="font-body text-gray-500 dark:text-neutral-400">Loading your financial position…</Text></View>:query.isError||!data?<View className="flex-1 items-center justify-center px-6"><Text className="font-body text-center font-semibold text-gray-800 dark:text-neutral-100">Net worth could not be calculated.</Text><Pressable onPress={()=>void query.refetch()} className="houselog-button mt-4 min-h-11 px-4 py-2"><Text className="font-body text-sm font-bold text-white">Retry</Text></Pressable></View>:<ScrollView className="flex-1 px-5" contentContainerStyle={{paddingTop:16,paddingBottom:40}} keyboardShouldPersistTaps="handled">

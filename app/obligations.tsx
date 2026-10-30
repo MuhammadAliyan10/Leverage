@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import * as Crypto from 'expo-crypto';
-import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Text, View } from 'react-native';
+import { BottomSheetTextInput as TextInput } from '@gorhom/bottom-sheet';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { DoneHeader } from '../components/ui/DoneHeader';
@@ -223,7 +224,7 @@ export default function ObligationsScreen() {
   const recurringDrawerTitle=activeRecurringDrawer==='subscription'?'Add subscription':activeRecurringDrawer==='schedule'?(editingScheduleId?'Edit recurring transaction':'Add recurring transaction'):activeRecurringDrawer==='bill'?'Add bill':activeRecurringDrawer==='bill-payment'?'Record bill payment':activeRecurringDrawer==='bill-correction'?'Correct bill payment':'Upcoming bills';
   const debtDrawerTitle=activeDebtDrawer==='create'?'Add debt':activeDebtDrawer==='activity'?'Record debt activity':activeDebtDrawer==='plan'?'Plan repayments':'Correct debt event';
 
-  return <ObligationBusyContext.Provider value={busy}><SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
+  return <ObligationBusyContext.Provider value={busy}><SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Recurring & Debt" onDone={closeObligations} />
     <ScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{paddingBottom:32}}>
       {query.isLoading||accountQuery.isLoading?<Text className="font-body py-4 text-gray-500">Loading obligations…</Text>:null}

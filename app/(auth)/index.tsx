@@ -7,9 +7,7 @@ import {
   Keyboard,
   TouchableOpacity,
   Pressable,
-  KeyboardAvoidingView,
   Platform,
-  ScrollView,
 } from 'react-native';
 import { Check, Eye, EyeOff, LockKeyhole, Mail, UserRound } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -20,6 +18,7 @@ import Toast from 'react-native-toast-message';
 import { getLocalAuthFailureMessage } from '../../src/security/localAuthError';
 import { authTraceEvent, beginAuthTrace, finishAuthTrace } from '../../src/security/authDiagnostics';
 import { Input } from '../../components/ui/Input';
+import { KeyboardAwareScrollView } from '../../components/ui/KeyboardAwareScrollView';
 import { Button } from '../../components/ui/Button';
 import { useAuth } from '../../src/context/AuthContext';
 import {
@@ -161,16 +160,12 @@ export default function AuthScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        className="flex-1"
-      >
-        <ScrollView
+      <KeyboardAwareScrollView
           contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-start', paddingHorizontal: 20, paddingVertical: 20 }}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
           showsVerticalScrollIndicator={false}
-        >
+      >
           <View className="w-full max-w-[460px] self-center py-5">
             <View className="mb-6 h-24 items-center justify-center">
               <View
@@ -399,8 +394,7 @@ export default function AuthScreen() {
               <Text className="font-body text-sm font-semibold text-primary">Restore an encrypted backup</Text>
             </TouchableOpacity>
           </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 }

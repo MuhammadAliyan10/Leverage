@@ -1,6 +1,6 @@
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, KeyboardAvoidingView, Platform, Pressable, TextInput, ScrollView, ActivityIndicator } from 'react-native';
+import { View, Text, Platform, Pressable, TextInput, ScrollView, ActivityIndicator } from 'react-native';
 import { useColorScheme } from 'nativewind';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useForm, useWatch, Controller } from 'react-hook-form';
@@ -11,6 +11,7 @@ import { DatePickerModal, TimePickerModal, en, registerTranslation } from 'react
 import { MD3DarkTheme, MD3LightTheme, PaperProvider } from 'react-native-paper';
 import { CalendarDays, ChevronLeft, ChevronRight, CircleHelp, Clock3, Keyboard, Pencil, Search, X } from 'lucide-react-native';
 import { Button } from '../../components/ui/Button';
+import { KeyboardAwareScrollView } from '../../components/ui/KeyboardAwareScrollView';
 import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../../components/ui/badgeStyles';
 import { useAddTransaction } from '../../hooks/mutations/useAddTransaction';
 import { convertForeignMinorToPkr, formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseExchangeRate, parseMinorUnits } from '../../src/finance/ledger';
@@ -412,11 +413,7 @@ export default function AddTransactionScreen() {
       }}
     >
     <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
-      <KeyboardAvoidingView 
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        className="flex-1"
-      >
-        <ScrollView className="flex-1 w-full" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ width: '100%', alignItems: 'center', paddingBottom: 24 }}>
+        <KeyboardAwareScrollView className="flex-1 w-full" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ width: '100%', alignItems: 'center', paddingBottom: 24 }}>
           <View style={{ width: '100%', maxWidth: 640, alignSelf: 'center', paddingHorizontal: 16, boxSizing: 'border-box' }}>
           
           {/* Header & Toggle */}
@@ -661,7 +658,7 @@ export default function AddTransactionScreen() {
 
           </View>
           </View>
-        </ScrollView>
+        </KeyboardAwareScrollView>
 
         <DatePickerModal
           key={datePickerVisible ? `date-${selectedDate.getTime()}` : 'date-hidden'}
@@ -700,7 +697,6 @@ export default function AddTransactionScreen() {
           {!correctionOf && <Pressable accessibilityRole="button" accessibilityState={{ disabled: isSubmitting || addTransaction.isPending || accounts.length === 0 || accountsLoading || accountsError || profileChanged || Boolean(insufficientFundsMessage), busy: isSubmitting || addTransaction.isPending }} disabled={isSubmitting || addTransaction.isPending || accounts.length === 0 || accountsLoading || accountsError || profileChanged || Boolean(insufficientFundsMessage)} onPress={() => saveTransaction(true)} className="mt-2 min-h-11 flex-row items-center justify-center">{isSubmitting || addTransaction.isPending ? <><ActivityIndicator size="small" color={PRIMARY_COLOR} /><Text className="font-body ml-2 text-sm font-semibold text-primary">Saving…</Text></> : <Text className="font-body text-sm font-semibold text-primary">Save and add another</Text>}</Pressable>}
         </View>
 
-      </KeyboardAvoidingView>
     </SafeAreaView>
     </PaperProvider>
   );

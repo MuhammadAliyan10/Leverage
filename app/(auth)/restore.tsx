@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Eye, EyeOff, FileUp } from 'lucide-react-native';
 import { Input } from '../../components/ui/Input';
+import { KeyboardAwareScrollView } from '../../components/ui/KeyboardAwareScrollView';
 import { Button } from '../../components/ui/Button';
 import { useAppConfirm } from '../../components/ui/useAppConfirm';
 import { useAuth } from '../../src/context/AuthContext';
@@ -38,8 +39,7 @@ export default function RestoreBackupScreen() {
   };
 
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
-    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1">
-      <ScrollView contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 20, paddingTop: 14, paddingBottom: 32 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+    <KeyboardAwareScrollView className="flex-1" contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 20, paddingTop: 14, paddingBottom: 32 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
         <View className="w-full max-w-[480px] self-center">
           <Pressable accessibilityRole="button" accessibilityLabel="Back to sign in" onPress={() => router.replace('/(auth)')} className="mb-8 h-11 w-11 items-center justify-center rounded-full border border-gray-200 bg-white dark:border-neutral-800 dark:bg-neutral-900"><ArrowLeft size={20} color={PRIMARY_COLOR} /></Pressable>
 
@@ -57,8 +57,7 @@ export default function RestoreBackupScreen() {
             <Text className="font-body flex-1 text-xs leading-5 text-gray-600 dark:text-neutral-300">Your current records stay unchanged unless the backup opens and passes all data checks.</Text>
           </View>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollView>
     {dialog}
   </SafeAreaView>;
 }

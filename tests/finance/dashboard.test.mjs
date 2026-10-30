@@ -80,7 +80,7 @@ test('available-to-spend subtracts only unpaid bills due by month end from alrea
 });
 
 test('available-to-spend includes overdue unpaid bills and rejects duplicate or malformed bill records', () => {
-  const liquidity = [{ currency: 'PKR', availableMinor: 500 }];
+  const liquidity = [{ currency: 'PKR', spendableAvailableMinor: 500 }];
   const overdue = [{ id: 'old', currency: 'PKR', amountMinor: 800, paidMinor: 0, dueDate: '2026-04-30', status: 'overdue' }];
   assert.equal(calculateAvailableToSpend(liquidity, overdue, '2026-05-31')[0]?.availableToSpendMinor, -300);
   assert.throws(() => calculateAvailableToSpend(liquidity, [...overdue, overdue[0]], '2026-05-31'), /bill is invalid/);
@@ -160,10 +160,58 @@ test('liquidity reserves only the amounts earmarked in each active liquid accoun
     { accountId: 'portfolio', amountMinor: 10000 },
     { accountId: 'cash-usd', amountMinor: 3000 },
   ]), [
-    { currency: 'PKR', currentBalanceMinor: 175000, reservedMinor: 12000, availableMinor: 163000, physicalCashBalanceMinor: 100000, physicalCashReservedMinor: 12000, physicalCashAvailableMinor: 88000, bankAndMobileBalanceMinor: 75000, bankAndMobileReservedMinor: 0, bankAndMobileAvailableMinor: 75000 },
-    { currency: 'USD', currentBalanceMinor: 10000, reservedMinor: 3000, availableMinor: 7000, physicalCashBalanceMinor: 0, physicalCashReservedMinor: 0, physicalCashAvailableMinor: 0, bankAndMobileBalanceMinor: 10000, bankAndMobileReservedMinor: 3000, bankAndMobileAvailableMinor: 7000 },
+    { currency: 'PKR', currentBalanceMinor: 175000, reservedMinor: 12000, availableMinor: 163000, physicalCashBalanceMinor: 100000, physicalCashReservedMinor: 12000, physicalCashAvailableMinor: 88000, savingsBalanceMinor: 0, savingsReservedMinor: 0, savingsAvailableMinor: 0, savingsAndSetAsideMinor: 12000, bankAndMobileBalanceMinor: 75000, bankAndMobileReservedMinor: 0, bankAndMobileAvailableMinor: 75000, spendableBalanceMinor: 175000, spendableReservedMinor: 12000, spendableAvailableMinor: 163000 },
+    { currency: 'USD', currentBalanceMinor: 10000, reservedMinor: 3000, availableMinor: 7000, physicalCashBalanceMinor: 0, physicalCashReservedMinor: 0, physicalCashAvailableMinor: 0, savingsBalanceMinor: 0, savingsReservedMinor: 0, savingsAvailableMinor: 0, savingsAndSetAsideMinor: 3000, bankAndMobileBalanceMinor: 10000, bankAndMobileReservedMinor: 3000, bankAndMobileAvailableMinor: 7000, spendableBalanceMinor: 10000, spendableReservedMinor: 3000, spendableAvailableMinor: 7000 },
   ]);
   assert.throws(() => calculateLiquidityPositions([
     { id: 'cash', currency: 'PKR', type: 'cash', archivedAt: null, balanceMinor: 100 },
   ], [{ accountId: 'cash', amountMinor: Number.MAX_SAFE_INTEGER + 1 }]), /reservation is invalid/);
+});
+
+test('savings remain in total liquidity but are excluded from daily-use and available-to-spend balances', () => {
+  const positions = calculateLiquidityPositions([
+    { id: 'physical-cash', currency: 'PKR', type: 'cash', archivedAt: null, balanceMinor: 10_000 },
+    { id: 'bank', currency: 'PKR', type: 'bank', archivedAt: null, balanceMinor: 30_000 },
+    { id: 'jazzcash', currency: 'PKR', type: 'wallet', archivedAt: null, balanceMinor: 20_000 },
+    { id: 'savings', currency: 'PKR', type: 'savings', archivedAt: null, balanceMinor: 50_000 },
+  ], [{ accountId: 'physical-cash', amountMinor: 1_000 }, { accountId: 'savings', amountMinor: 5_000 }]);
+
+  assert.deepEqual(positions, [{
+    currency: 'PKR',
+    currentBalanceMinor: 110_000,
+    reservedMinor: 6_000,
+    availableMinor: 104_000,
+    physicalCashBalanceMinor: 10_000,
+    physicalCashReservedMinor: 1_000,
+    physicalCashAvailableMinor: 9_000,
+    savingsBalanceMinor: 50_000,
+    savingsReservedMinor: 5_000,
+    savingsAvailableMinor: 45_000,
+    savingsAndSetAsideMinor: 51_000,
+    bankAndMobileBalanceMinor: 50_000,
+    bankAndMobileReservedMinor: 0,
+    bankAndMobileAvailableMinor: 50_000,
+    spendableBalanceMinor: 60_000,
+    spendableReservedMinor: 1_000,
+    spendableAvailableMinor: 59_000,
+  }]);
+
+  assert.deepEqual(calculateAvailableToSpend(positions, [
+    { id: 'hotel', currency: 'PKR', amountMinor: 12_000, paidMinor: 2_000, dueDate: '2026-05-30', status: 'partial' },
+  ], '2026-05-31'), [{
+    currency: 'PKR', unreservedMinor: 59_000, unpaidBillsDueMinor: 10_000, availableToSpendMinor: 49_000,
+  }]);
+});
+
+test('liquid funds split saved cash from available physical and bank/mobile funds', () => {
+  const [position] = calculateLiquidityPositions([
+    { id: 'cash', currency: 'PKR', type: 'cash', archivedAt: null, balanceMinor: 23_030 },
+    { id: 'bank-mobile', currency: 'PKR', type: 'wallet', archivedAt: null, balanceMinor: 2_382 },
+  ], [{ accountId: 'cash', amountMinor: 22_000 }]);
+
+  assert.equal(position.currentBalanceMinor, 25_412);
+  assert.equal(position.physicalCashAvailableMinor, 1_030);
+  assert.equal(position.bankAndMobileAvailableMinor, 2_382);
+  assert.equal(position.savingsAndSetAsideMinor, 22_000);
+  assert.equal(position.physicalCashAvailableMinor + position.bankAndMobileAvailableMinor + position.savingsAndSetAsideMinor, position.currentBalanceMinor);
 });

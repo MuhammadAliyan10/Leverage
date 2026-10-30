@@ -74,7 +74,7 @@ For offline use, the local database can be the write-ahead store. Sync must use 
 
 - Expo Router provides authentication, onboarding, dashboard, add transaction, transaction history, Insights, settings, and a budget screen.
 - The app stores accounts and categorized income/expense/transfer rows in local SQLite. Reads and writes are scoped by the local profile ID.
-- Local SQLite now uses `PRAGMA user_version = 1`; a transactional migration handles the released Prisma-shaped and intermediate local schemas, validates row counts and integrity, preserves existing labels, and rolls back invalid conversions. Legacy sync flags are reset because this client has no server acknowledgement to trust.
+- Local SQLite uses a transactional, versioned migration chain (currently schema version 17). Migrations preserve existing records, validate conversions, and roll back on invalid data.
 - Account and transaction persistence use shared runtime domain validation. New records require valid owner/account relationships, integer minor-unit amounts, supported classifications/currencies, and stable transaction IDs; repeated identical IDs are idempotent and conflicting reuse is rejected.
 - Transaction entry parses PKR amounts into integer paisa and rejects excess precision or unsafe values. Existing floating-point SQLite values are migrated to a new integer column.
 - Income entry distinguishes salary, freelance, gross business receipts, family gifts, foreign family remittances, investment returns, rent, and other income. Gift records require the sender name/relationship; tax status is a separate user-entered review field.
@@ -86,15 +86,15 @@ For offline use, the local database can be the write-ahead store. Sync must use 
 
 ### What is still a prototype or missing
 
-- SQLite stores one row per transaction. Cash-account balances are derived from opening balances plus recorded income, expenses, and same-currency transfers. Assets beyond cash accounts, liabilities, debts, repayments, full cash flow, balance sheet, and net worth are not yet implemented.
-- Account setup remains basic. Debt, repayments, assets beyond cash accounts, and receipt attachments need dedicated flows. Receipt selection and persistence are not implemented; the Expo document-picker package is not in the current app dependencies.
-- Categories are hardcoded. Budgets are not persisted. Transaction edit/delete, account management, export, and local wipe controls are placeholders.
-- Authentication is local-only and uses an unsalted SHA-256 password hash. It is not suitable for production identity or password storage.
+- SQLite stores one row per transaction; assets, investments, budgets, savings funds, obligations, repayments, and recurring schedules use separate versioned domain tables and append-only event records. Cash-account balances are derived from opening balances and ledger transactions. This is not yet a unified double-entry journal, so reports across those domains must use their domain-specific rules rather than assume journal-level reconciliation.
+- Receipt selection and persistence are not implemented; the Expo document-picker package is not in the current app dependencies. Review account editing, transaction correction, export, and local wipe controls against their current screens before treating them as complete.
+- Categories are hardcoded. Budget, savings, debt, asset, and investment histories are persisted in local SQLite; they do not automatically become cloud-synchronized merely because personal ledger sync is enabled.
+- Local app profiles and the cloud identity are separate. Better Auth/Neon Auth provides the authenticated cloud session; the local SQLite profile ID is not a cloud authorization credential. The local profile password hash remains an unsalted SHA-256 hash and is not suitable as a production password verifier.
 - The SQLite database is not encrypted by this code. Local profile scoping is an application convention, not a security boundary; production authorization and tenant isolation must be enforced by a trusted backend.
-- There is no API/backend in this repository. The Neon URL is for Prisma CLI configuration only; the Expo app never connects directly to Neon. Sync does not send data or mark rows synced.
-- Credentials must remain in ignored environment files for trusted server-side tooling and must never be bundled into the Expo app. Because the database password was shared in chat, rotate it before using the database with real financial records.
+- Authenticated cloud sync exists for supported personal finance records through narrow Neon Data API RPCs. It is not a general-purpose sync API: project records are not currently part of the cloud change feed.
+- Credentials must remain in ignored environment files and must never be bundled into the Expo app. The mobile app uses short-lived authenticated tokens and narrowly scoped Neon RPCs; it must not receive a database password.
 
-Before business accounting features are built, add a versioned SQLite journal schema, event-to-posting services, balanced opening entries, and journal-based statements. For this personal-finance phase, next add receipt attachment storage, assets/liabilities and debt repayment flows, account editing, and then a trusted authenticated sync API.
+Before business accounting features are built, add a versioned SQLite journal schema, event-to-posting services, balanced opening entries, and journal-based statements. For this personal-finance phase, next add receipt attachment storage and continue improving assets/liabilities and debt repayment flows.
 
 ## Income sources and tax separation
 
@@ -111,10 +111,20 @@ Reference sources: [FBR Income Tax Ordinance (amended 20 February 2026)](https:/
 | Area | Responsibility | Current data flow |
 | --- | --- | --- |
 | `app/` | Expo Router screens and navigation | Form state → hooks → local database |
-| `src/context/AuthContext.tsx` | Local profile session | SecureStore session ID ↔ local SQLite `User` |
-| `src/db/local/client.ts` | Local persistence and schema upgrades | Expo SQLite tables `User`, `Account`, `Transaction` |
+| `src/context/AuthContext.tsx` | Local profile and cloud-auth session | SecureStore local profile ID plus Better Auth/Neon Auth session |
+| `src/db/local/client.ts` | Local persistence and schema upgrades | Expo SQLite core ledger and versioned finance-domain tables |
 | `hooks/queries/` | User-scoped reads | TanStack Query → local SQLite → screen summaries |
 | `hooks/mutations/` | User actions | Validation/form → local SQLite → invalidate query cache |
 | `src/finance/ledger.ts` | Exact-money and ledger domain primitives | Dated journal entries → validated reports (not connected yet) |
-| `prisma/` | Future PostgreSQL schema/migrations | Prisma CLI uses direct `DATABASE_URL_UNPOOLED` |
-| `utils/syncEngine.ts` | Sync placeholder | Reports unavailable and leaves local rows pending |
+| `backend/prisma/` | Cloud identity, personal-finance schema and migrations | Prisma migration source plus narrow Neon Data API RPCs |
+| `utils/syncEngine.ts` | Personal finance cloud sync | Pulls the owner-scoped change feed, uploads idempotent mutations, then confirms changes |
+
+## Projects and shared trip accounting
+
+Projects are stored in the local SQLite database and use integer minor units. They support a project budget, per-member contribution targets, participant-paid expenses, pooled-fund expenses, refunds, category budgets, and settlement history. Expenses store immutable per-member shares. Equal, percentage, fixed-amount, weighted, and individual splits are validated and allocated with exact minor-unit reconciliation. Percentage shares must total 100%; fixed shares must equal the expense total; individual expenses must name exactly one participant.
+
+When an expense is explicitly linked to one of the current device owner's personal accounts, the app posts one corresponding personal-ledger expense in the same local write transaction. A linked refund posts one matching refund transaction. The project remains the source for member shares and project reports; the personal ledger records the actual cash-account movement. A pooled-fund purchase must not also be linked to a personal account.
+
+Pooled contributions, project revenue, withdrawals, and pooled expenses are currently project-level records. They do not represent custodial cash in a reconciled bank/cash account, and they are not posted to the personal ledger. Consequently the displayed fund balance is a recorded project balance, not proof of money held. Local participant names and entries also remain only on that device. Registered member invitations, permissioned cross-device project sync, and server-side membership enforcement are not implemented yet. Do not treat local role labels as a security boundary or use project totals as audited balances.
+
+Project expenses and their share rows, refunds, cash events, and settlements are append-only in local SQLite. The local project store checks active project membership, currency consistency, contribution/withdrawal and pooled-spending bounds, refund caps, and settlement limits. These checks protect local data integrity only; shared-project authorization must be enforced by the server before any invitation or sync feature is enabled.
