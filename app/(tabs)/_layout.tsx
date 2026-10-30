@@ -95,6 +95,9 @@ export default function TabsLayout() {
           tabBarLabel: 'Add',
           tabBarAccessibilityLabel: 'Add Transaction',
           tabBarLabelStyle: [styles.label, styles.addLabel],
+          tabBarButton: ({ ref: _ref, ...props }) => (
+            <Pressable {...props} style={[props.style, styles.tabButton]} />
+          ),
           tabBarIcon: () => (
             <View
               style={[

@@ -33,7 +33,9 @@ const EXCHANGE_RATE_SCALE = 100_000_000n;
 
 /** Parses a PKR-per-currency-unit rate to an exact 8-decimal integer scale. */
 export function parseExchangeRate(input: string): bigint {
-  const match = /^(\d+)(?:\.(\d{1,8}))?$/.exec(input.trim());
+  const value = input.trim();
+  if (value.length > 32) throw new Error('Exchange rate must be 32 characters or fewer.');
+  const match = /^(\d+)(?:\.(\d{1,8}))?$/.exec(value);
   if (!match) throw new Error('Enter an exchange rate with up to eight decimal places.');
   const rate = BigInt(match[1]) * EXCHANGE_RATE_SCALE
     + BigInt((match[2] ?? '').padEnd(8, '0') || '0');
@@ -63,7 +65,7 @@ export function parseMinorUnits(input: string, fractionDigits = 2): number {
   }
 
   const value = input.trim();
-  const match = /^(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d*))?$/.exec(value);
+  const match = /^((?:\d{1,3}(?:,\d{3})+)|(?:\d{1,2}(?:,\d{2})*,\d{3})|\d+)(?:\.(\d*))?$/.exec(value);
   if (!match) throw new Error('Enter a positive amount using digits and an optional decimal point.');
 
   const fraction = match[2] ?? '';
@@ -84,23 +86,63 @@ export function parseMinorUnits(input: string, fractionDigits = 2): number {
   return Number(minorUnits);
 }
 
-/** Groups the integer portion of an editable money value without changing its decimal text. */
+/** Groups editable amounts using the PKR/Indian digit grouping convention. */
 export function formatGroupedAmountInput(input: string): string {
-  // Formatting must never "repair" a malformed value into a different valid
-  // amount (for example, `1,2` must not silently become `12`). Keep invalid
-  // text visible so parseMinorUnits can reject it with a useful form error.
+  // Keep invalid pasted punctuation visible so parseMinorUnits can reject it.
   if (!/^[\d.,]*$/.test(input)) return input;
   const parts = input.split('.');
   if (parts.length > 2) return input;
 
   const wholeInput = parts[0];
   const fraction = parts[1];
-  if (wholeInput.includes(',') && !/^\d{1,3}(?:,\d{3})+$/.test(wholeInput)) return input;
-
+  if (wholeInput.includes(',') && !/^(?:\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})*,\d{3})$/.test(wholeInput)) return input;
   let whole = wholeInput.replaceAll(',', '');
   if (!whole && fraction !== undefined) whole = '0';
-  whole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  if (whole.length > 3) {
+    const trailingThousands = whole.slice(-3);
+    const leadingDigits = whole.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+    whole = `${leadingDigits},${trailingThousands}`;
+  }
   return fraction === undefined ? whole : `${whole}.${fraction}`;
+}
+
+/** Keeps only a non-negative decimal number with the requested precision. */
+export function sanitizeDecimalInput(input: string, fractionDigits = 2): string {
+  if (!Number.isInteger(fractionDigits) || fractionDigits < 0 || fractionDigits > 8) {
+    throw new Error('fractionDigits must be an integer between 0 and 8.');
+  }
+  const cleaned = input.replaceAll(',', '').replace(/[^\d.]/g, '');
+  const point = cleaned.indexOf('.');
+  const whole = (point === -1 ? cleaned : cleaned.slice(0, point));
+  if (point === -1 || fractionDigits === 0) return whole;
+  const fraction = cleaned.slice(point + 1).replaceAll('.', '').slice(0, fractionDigits);
+  return `${whole || '0'}.${fraction}`;
+}
+
+/** Sanitizes a decimal amount and applies the app's PKR/Indian digit grouping. */
+export function sanitizeGroupedAmountInput(input: string, fractionDigits = 2): string {
+  return formatGroupedAmountInput(sanitizeDecimalInput(input, fractionDigits));
+}
+
+/** Keeps only non-negative whole-number digits. */
+export function sanitizeIntegerInput(input: string): string {
+  return input.replace(/\D/g, '');
+}
+
+/** Keeps the caret beside the same digit after grouping commas are inserted or removed. */
+export function mapGroupedAmountCursor(input: string, formatted: string, cursor: number): number {
+  const boundedCursor = Math.max(0, Math.min(cursor, input.length));
+  const meaningfulCharacters = input.slice(0, boundedCursor).replace(/[^\d.]/g, '').length;
+  if (meaningfulCharacters === 0) return 0;
+
+  let seen = 0;
+  for (let index = 0; index < formatted.length; index += 1) {
+    if (/[\d.]/.test(formatted[index])) {
+      seen += 1;
+      if (seen === meaningfulCharacters) return index + 1;
+    }
+  }
+  return formatted.length;
 }
 
 /** Formats integer minor units for display. Keep calculations in minor units. */

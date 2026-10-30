@@ -9,6 +9,8 @@ import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Toast from 'react-native-toast-message';
+import type { ToastConfig } from 'react-native-toast-message';
+import { AppToast } from '../components/ui/AppToast';
 import { localDb } from '../src/db/local/client';
 import { useAppLock } from '../hooks/useAppLock';
 import { LockScreen } from '../components/ui/LockScreen';
@@ -30,6 +32,13 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+const toastConfig: ToastConfig = {
+  success: (props) => <AppToast {...props} variant="success" />,
+  error: (props) => <AppToast {...props} variant="error" />,
+  warning: (props) => <AppToast {...props} variant="warning" />,
+  info: (props) => <AppToast {...props} variant="info" />,
+};
 
 function RootNavigator() {
   const router = useRouter();
@@ -162,7 +171,7 @@ function RootNavigator() {
               <Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Sign out and sign in online</Text>
             </Pressable>
           </View>
-          <Toast />
+          <Toast config={toastConfig} visibilityTime={4500} topOffset={Platform.OS === 'ios' ? 90 : 64} />
         </View>
       </GestureHandlerRootView>
     );
@@ -193,7 +202,7 @@ function RootNavigator() {
           biometricEnabled={profileSettings.biometricUnlockEnabled}
         />
       )}
-      <Toast />
+      <Toast config={toastConfig} visibilityTime={4500} topOffset={Platform.OS === 'ios' ? 90 : 64} />
     </GestureHandlerRootView>
   );
 }

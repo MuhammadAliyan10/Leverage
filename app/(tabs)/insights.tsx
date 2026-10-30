@@ -266,7 +266,7 @@ export default function InsightsScreen() {
             </Card> : null}
 
             {period === 'This month' && data.currentMonthBudgets.length === 0 ? <ReviewNotice title="No monthly budget is set" detail="Add limits for the categories you want to keep an eye on. You can change them any time." action="Set a budget" onPress={() => router.push('/budgets')} tone="primary" /> : null}
-            {data.report.netMinor > 0 ? <ReviewNotice title="You have a period surplus" detail="If some of this money is meant for a goal, you can reserve it on the Savings page. This summary does not move money." action="View savings" onPress={() => router.push('/savings')} tone="primary" /> : null}
+            {data.report.netMinor > 0 ? <ReviewNotice title="Recorded income is higher than spending" detail="This is the difference for the selected period, not your current available balance. You can reserve money for a goal on the Savings page." action="View savings" onPress={() => router.push('/savings')} tone="primary" /> : null}
 
             <Card>
               <SectionTitle title="Coming up" hint={`Known bills and schedule reminders in ${data.currency}. These are reminders, not automatic payments.`} />
@@ -307,10 +307,10 @@ export default function InsightsScreen() {
                   <View className={`mr-2 h-7 w-7 items-center justify-center rounded-full ${data.report.netMinor >= 0 ? 'bg-emerald-100 dark:bg-emerald-900/60' : 'bg-red-100 dark:bg-red-900/60'}`}>
                     {data.report.netMinor >= 0 ? <TrendingUp size={15} color={GREEN} /> : <TrendingDown size={15} color="#DC4C4C" />}
                   </View>
-                  <Text className="font-body text-xs font-bold text-gray-700 dark:text-neutral-200">{data.report.netMinor >= 0 ? 'Surplus' : 'Shortfall'}</Text>
+                  <Text className="font-body text-xs font-bold text-gray-700 dark:text-neutral-200">{data.report.netMinor >= 0 ? 'Income above spending' : 'Spending above income'}</Text>
                 </View>
                 <Money amount={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? GREEN : '#DC4C4C'} className="text-2xl" />
-                <Text className="mt-1 font-body text-xs text-gray-600 dark:text-neutral-300">{data.report.netMinor >= 0 ? 'You recorded more money in than spending.' : 'You recorded more spending than money in.'}</Text>
+                <Text className="mt-1 font-body text-xs text-gray-600 dark:text-neutral-300">Difference for this period. It does not show your current available account balance.</Text>
               </View>
               <View accessibilityRole="image" accessibilityLabel={spendingShare === null ? 'No receipts recorded to compare with spending.' : `${spendingShareLabel} of recorded receipts used for spending.`} className="h-[68px] w-[68px] items-center justify-center">
                 <Svg width={68} height={68} viewBox="0 0 68 68">
@@ -335,7 +335,7 @@ export default function InsightsScreen() {
 
           <Card>
             <SectionTitle title="Income vs spending" hint={`${financialPoints[0]?.group === 'day' ? 'Daily' : financialPoints[0]?.group === 'week' ? 'Weekly' : 'Monthly'} totals · ${data.currency}. Tap a bar for exact figures.`} />
-            {selectedFinancialPoint ? <Pressable accessibilityRole="button" accessibilityLabel={`Open transactions for ${selectedFinancialPoint.label}`} onPress={() => goTransactions({ currency: data.currency, startDate: selectedFinancialPoint.startDate, endDate: selectedFinancialPoint.endDate })} className="mb-3 rounded-xl bg-gray-50 px-3 py-2 dark:bg-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{selectedFinancialPoint.label} · selected · tap for transactions</Text><Text className="mt-1 font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">Income {formatMinorUnits(selectedFinancialPoint.incomeMinor, data.currency)} · Spending {formatMinorUnits(selectedFinancialPoint.expenseMinor, data.currency)}</Text><Text className="mt-1 font-body text-xs font-bold" style={{ color: selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor >= 0 ? GREEN : '#DC4C4C' }}>{selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor >= 0 ? 'Surplus' : 'Shortfall'} {formatMinorUnits(Math.abs(selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor), data.currency)}</Text></Pressable> : null}
+            {selectedFinancialPoint ? <Pressable accessibilityRole="button" accessibilityLabel={`Open transactions for ${selectedFinancialPoint.label}`} onPress={() => goTransactions({ currency: data.currency, startDate: selectedFinancialPoint.startDate, endDate: selectedFinancialPoint.endDate })} className="mb-3 rounded-xl bg-gray-50 px-3 py-2 dark:bg-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{selectedFinancialPoint.label} · selected · tap for transactions</Text><Text className="mt-1 font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">Income {formatMinorUnits(selectedFinancialPoint.incomeMinor, data.currency)} · Spending {formatMinorUnits(selectedFinancialPoint.expenseMinor, data.currency)}</Text><Text className="mt-1 font-body text-xs font-bold" style={{ color: selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor >= 0 ? GREEN : '#DC4C4C' }}>{selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor >= 0 ? 'Income above spending' : 'Spending above income'} {formatMinorUnits(Math.abs(selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor), data.currency)}</Text></Pressable> : null}
             {financialPoints.some((point) => point.incomeMinor !== 0 || point.expenseMinor !== 0) ? <GroupedFinancialBars points={financialPoints} width={trendChartWidth} currency={data.currency} selectedId={selectedFinancialPoint?.id} onSelect={setSelectedTrendId} /> : <Empty text="No income or spending recorded for this period. The chart uses a zero baseline; no activity is shown as an empty state." />}
             <View className="mt-1 flex-row justify-center gap-5"><Legend color={GREEN} label="Income" /><Legend color={ORANGE} label="Spending after refunds" /></View>
           </Card>
@@ -394,7 +394,7 @@ export default function InsightsScreen() {
           </Card>
 
           {data.incomeSources.length > 0 ? <Card>
-            <SectionTitle title="Where money came from" hint="Receipts can include salary, gifts and other sources. This is not a tax calculation." />
+            <SectionTitle title="Income by saved source" hint="Based on the source saved with each income transaction. Tap a row to review those transactions. This is not a tax calculation." />
             {data.incomeSources.map((source) => {
               const style = INCOME_STYLE[source.source] ?? { color: '#64748B', icon: CircleEllipsis }; const Icon = style.icon;
               const label = CLASSIFICATIONS[source.source as keyof typeof CLASSIFICATIONS]?.label ?? source.source.replaceAll('_', ' ');
@@ -434,11 +434,11 @@ export default function InsightsScreen() {
               <StatementLine label="Income received" value={data.report.incomeMinor} currency={data.currency} color={GREEN} />
               <StatementLine label="Spending after refunds" value={-data.report.expenseMinor} currency={data.currency} color={ORANGE} />
               <View className="my-2 border-t border-gray-100 dark:border-neutral-800" />
-              <StatementLine label={data.report.netMinor >= 0 ? 'Surplus' : 'Shortfall'} value={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? GREEN : '#DC4C4C'} strong />
-              <Text className="mt-3 font-body text-xs leading-5 text-gray-500 dark:text-neutral-400">Transfers between your accounts, starting balances, borrowed or repaid principal, and asset or investment purchases are excluded. They change balances but are not income or everyday spending.</Text>
+              <StatementLine label="Income minus spending" value={data.report.netMinor} currency={data.currency} color={data.report.netMinor >= 0 ? GREEN : '#DC4C4C'} strong />
+              <Text className="mt-3 font-body text-xs leading-5 text-gray-500 dark:text-neutral-400">This is a period difference, not your current available balance. Transfers between your accounts, starting balances, borrowed or repaid principal, and asset or investment purchases are excluded. They change balances but are not income or everyday spending.</Text>
             </Card>
             <Card>
-              <SectionTitle title="Income sources" hint="Where recorded income came from during this period." />
+              <SectionTitle title="Income sources as recorded" hint="Categories saved on income transactions for this period." />
               {data.incomeSources.length ? data.incomeSources.map((item) => <StatementLine key={item.source} label={CLASSIFICATIONS[item.source as keyof typeof CLASSIFICATIONS]?.label ?? item.source.replaceAll('_', ' ')} value={item.amountMinor} currency={data.currency} color={GREEN} />) : <Empty text="No income was recorded for this period." />}
             </Card>
             <Card>

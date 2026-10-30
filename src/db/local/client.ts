@@ -1834,7 +1834,7 @@ export const localDb = {
 
     changePassword: async (ownerId: string, currentPassword: string, newPassword: string): Promise<void> => {
       if (!ownerId.trim()) throw new Error('Your local profile is unavailable. Sign in again.');
-      if (newPassword.length < 10 || newPassword.length > 1024 || !/[A-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+      if (newPassword.length < 12 || newPassword.length > 1024 || !/[A-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
         throw new Error('The new password does not meet the Leverage password requirements.');
       }
       try {

@@ -1,3 +1,5 @@
+import { CLASSIFICATIONS, resolveClassification } from './domain.ts';
+
 export interface FinancialReportRow {
   id: string;
   ownerId: string;
@@ -5,6 +7,7 @@ export interface FinancialReportRow {
   amountMinor: number;
   type: string;
   category: string;
+  classificationId?: string | null;
   note: string;
   accountId: string | null;
   toAccountId: string | null;
@@ -15,6 +18,7 @@ export interface FinancialReportRow {
   linkedOriginalToAccountId: string | null;
   linkedOriginalType: string | null;
   linkedCategory: string | null;
+  linkedClassificationId?: string | null;
   linkedCurrency: string | null;
   linkedDestinationCurrency: string | null;
   linkedRootType: string | null;
@@ -174,10 +178,11 @@ export function buildFinancialReportQuery(ownerId: string, startDate: string, en
   return {
     sql: `
       SELECT t.id, t.ownerId, t.date, t.amountMinor, t.type, t.categoryId AS category, COALESCE(t.note, '') AS note,
-        t.accountId, t.toAccountId, t.reversalOfId, a.currency AS accountCurrency, destination.currency AS destinationCurrency,
+        t.accountId, t.toAccountId, t.reversalOfId, t.classificationId, a.currency AS accountCurrency, destination.currency AS destinationCurrency,
         original.accountId AS linkedOriginalAccountId, original.toAccountId AS linkedOriginalToAccountId,
         original.type AS linkedOriginalType,
         CASE WHEN original.type = 'Refund' THEN rootOriginal.categoryId ELSE original.categoryId END AS linkedCategory,
+        CASE WHEN original.type = 'Refund' THEN rootOriginal.classificationId ELSE original.classificationId END AS linkedClassificationId,
         originalAccount.currency AS linkedCurrency,
         originalDestination.currency AS linkedDestinationCurrency,
         rootOriginal.type AS linkedRootType,
@@ -236,6 +241,13 @@ export function calculateFinancialReport(
   const expenseAdjustmentById = new Map<string, bigint>();
   const addExpenseAdjustment = (id: string, adjustment: bigint) => {
     expenseAdjustmentById.set(id, (expenseAdjustmentById.get(id) ?? 0n) + adjustment);
+  };
+  const incomeSource = (classificationId: string | null | undefined, category: string): string => {
+    const resolved = resolveClassification(classificationId ?? category);
+    if (resolved && CLASSIFICATIONS[resolved].type === 'Income') return resolved;
+    // Preserve an unknown legacy label for review instead of assigning it a
+    // plausible but potentially false source.
+    return category.trim() || 'Unclassified income';
   };
 
   const startMs = new Date(range.startDate).getTime();
@@ -303,7 +315,8 @@ export function calculateFinancialReport(
     if (isNonOperatingMovement(row)) continue;
     if (type === 'Income') {
       income += amount;
-      incomeSourceTotals.set(row.category, (incomeSourceTotals.get(row.category) ?? 0n) + amount);
+      const source = incomeSource(row.classificationId, row.category);
+      incomeSourceTotals.set(source, (incomeSourceTotals.get(source) ?? 0n) + amount);
     }
     else if (type === 'Expense') {
       expense += amount;
@@ -316,7 +329,8 @@ export function calculateFinancialReport(
     } else if (type === 'Reversal') {
       if (row.linkedOriginalType === 'Income') {
         income -= amount;
-        incomeSourceTotals.set(row.linkedCategory!, (incomeSourceTotals.get(row.linkedCategory!) ?? 0n) - amount);
+        const source = incomeSource(row.linkedClassificationId, row.linkedCategory!);
+        incomeSourceTotals.set(source, (incomeSourceTotals.get(source) ?? 0n) - amount);
       }
       else if (row.linkedOriginalType === 'Expense') {
         expense -= amount;

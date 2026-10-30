@@ -11,7 +11,7 @@ interface InputProps extends TextInputProps {
   inputRef?: React.Ref<TextInput>;
 }
 
-export const Input: React.FC<InputProps> = ({ label, error, helperText, leadingIcon, trailingAction, variant = 'default', style, onFocus, onBlur, inputRef, ...props }) => {
+export const Input: React.FC<InputProps> = ({ label, error, helperText, leadingIcon, trailingAction, variant = 'default', style, onFocus, onBlur, inputRef, placeholderTextColor = '#9ca3af', ...props }) => {
   const [isFocused, setIsFocused] = useState(false);
   const isPill = variant === 'pill';
 
@@ -19,8 +19,8 @@ export const Input: React.FC<InputProps> = ({ label, error, helperText, leadingI
     <View className="mb-4 w-full">
       <Text className="font-body mb-1.5 text-sm font-semibold text-gray-700 dark:text-neutral-200">{label}</Text>
       <View className={`w-full flex-row items-center ${isPill ? 'rounded-full border px-4' : 'rounded-xl border-2 px-4'}
-        ${isFocused ? 'bg-primary/5' : isPill ? 'bg-gray-100 dark:bg-neutral-800' : 'bg-white dark:bg-neutral-900'}
-        ${error ? 'border-red-500' : isPill ? 'border-transparent' : 'border-gray-200'}
+        ${isFocused ? 'bg-primary/5 dark:bg-primary/10' : isPill ? 'bg-gray-100 dark:bg-neutral-800' : 'bg-white dark:bg-neutral-900'}
+        ${error ? 'border-red-500' : isFocused ? 'border-primary' : isPill ? 'border-transparent' : 'border-gray-300 dark:border-neutral-700'}
       `}>
         {leadingIcon}
         <TextInput
@@ -39,10 +39,10 @@ export const Input: React.FC<InputProps> = ({ label, error, helperText, leadingI
             setIsFocused(false);
             onBlur?.(event);
           }}
-          placeholderTextColor="#9ca3af"
           accessibilityLabel={label}
           accessibilityHint={error ? `Error: ${error}` : helperText}
           {...props}
+          placeholderTextColor={placeholderTextColor}
         />
         {trailingAction}
       </View>

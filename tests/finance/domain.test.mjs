@@ -89,6 +89,7 @@ test('foreign remittance conversion uses exact scaled rate and half-up rounding'
   assert.equal(convertForeignMinorToPkr(1, parseExchangeRate('1.5')), 2);
   assert.throws(() => parseExchangeRate('0'), /greater than zero/);
   assert.throws(() => parseExchangeRate('1.123456789'), /eight decimal places/);
+  assert.throws(() => parseExchangeRate('9'.repeat(33)), /32 characters or fewer/);
 });
 
 test('account validation restricts new account types and ISO currency metadata', () => {

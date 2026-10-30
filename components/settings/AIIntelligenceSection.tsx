@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Modal, Platform, Pressable, Switch, Text, TextInput, View, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, Modal, Platform, Pressable, Switch, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Brain, Eye, EyeOff, KeyRound, ShieldCheck, X } from 'lucide-react-native';
 import { Button } from '../ui/Button';
 import { KeyboardAwareScrollView } from '../ui/KeyboardAwareScrollView';
+import { Input } from '../ui/Input';
 import { useAuth } from '../../src/context/AuthContext';
 import { aiProfileStore } from '../../src/ai/profileStore';
 import { AIGatewayError, aiGatewayClient, type RemoteAISettings } from '../../src/ai/gatewayClient';
@@ -285,12 +286,8 @@ export function AIIntelligenceSection() {
               <Text className="font-body mb-2 text-sm font-semibold text-gray-900 dark:text-white">Model</Text>
               <View className="mb-3 gap-2">{OPENAI_MODELS.map((model) => <Pressable key={model.id} accessibilityRole="radio" accessibilityState={{ checked: config.model === model.id, disabled: busy }} disabled={busy} onPress={() => void chooseModel(model.id).catch((error: unknown) => setNotice(error instanceof Error ? error.message : 'Model selection could not be saved.'))} className={`min-h-11 flex-row items-center rounded-xl border px-3 py-2 ${config.model === model.id ? 'border-primary bg-primary/10' : 'border-gray-200 bg-white dark:border-neutral-700 dark:bg-neutral-900'}`}><View className={`mr-2 h-4 w-4 rounded-full border ${config.model === model.id ? 'border-primary bg-primary' : 'border-gray-400'}`} /><Text className="font-body flex-1 text-sm text-gray-800 dark:text-neutral-100">{model.label}</Text></Pressable>)}</View>
 
-              <Text className="font-body mb-2 mt-2 text-sm font-semibold text-gray-900 dark:text-white">API credential</Text>
               {hasCredential ? <Text className="font-body mb-2 text-xs leading-5 text-gray-600 dark:text-neutral-300">An encrypted credential is saved to your account for use across your devices. Its value is never returned to the app.</Text> : <Text className="font-body mb-2 text-xs leading-5 text-gray-600 dark:text-neutral-300">Enter an OpenAI project key. The existing Leverage backend encrypts it before saving it to the account database; it is not stored on this device.</Text>}
-              <View className="mb-2 min-h-12 flex-row items-center rounded-xl border border-gray-200 bg-white px-3 dark:border-neutral-700 dark:bg-neutral-900">
-                <TextInput accessibilityLabel="OpenAI API key" value={credentialDraft} onChangeText={setCredentialDraft} secureTextEntry={!showCredential} autoCapitalize="none" autoCorrect={false} autoComplete="off" editable={!busy} placeholder={hasCredential ? 'Enter a replacement key' : 'Paste your OpenAI project key'} placeholderTextColor="#9ca3af" className="font-body min-h-12 flex-1 py-2 text-sm text-gray-900 dark:text-white" />
-                <Pressable accessibilityRole="button" accessibilityLabel={showCredential ? 'Hide API key' : 'Show API key'} disabled={busy} onPress={() => setShowCredential((value) => !value)} className="min-h-10 min-w-10 items-center justify-center">{showCredential ? <EyeOff size={18} color="#737d8d" /> : <Eye size={18} color="#737d8d" />}</Pressable>
-              </View>
+              <Input label="API credential" accessibilityLabel="OpenAI API key" value={credentialDraft} onChangeText={setCredentialDraft} secureTextEntry={!showCredential} autoCapitalize="none" autoCorrect={false} autoComplete="off" editable={!busy} placeholder={hasCredential ? 'Enter a replacement key' : 'Paste your OpenAI project key'} trailingAction={<Pressable accessibilityRole="button" accessibilityLabel={showCredential ? 'Hide API key' : 'Show API key'} disabled={busy} onPress={() => setShowCredential((value) => !value)} className="min-h-10 min-w-10 items-center justify-center">{showCredential ? <EyeOff size={18} color="#737d8d" /> : <Eye size={18} color="#737d8d" />}</Pressable>} />
               <Button title={busy ? 'Saving…' : hasCredential ? 'Replace credential' : 'Save encrypted credential'} onPress={() => void saveCredential()} disabled={busy || !credentialDraft.trim() || !config.credentialForwardingAcceptedAt || !aiGatewayClient.configured} isLoading={busy} />
               {hasCredential ? <Pressable accessibilityRole="button" disabled={busy} onPress={() => void removeCredential()} className="mt-2 min-h-11 items-center justify-center"><Text className="font-body text-sm font-semibold text-red-600">Remove saved credential</Text></Pressable> : null}
 

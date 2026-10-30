@@ -14,11 +14,11 @@ import { Button } from '../../components/ui/Button';
 import { KeyboardAwareScrollView } from '../../components/ui/KeyboardAwareScrollView';
 import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../../components/ui/badgeStyles';
 import { useAddTransaction } from '../../hooks/mutations/useAddTransaction';
-import { convertForeignMinorToPkr, formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseExchangeRate, parseMinorUnits } from '../../src/finance/ledger';
+import { convertForeignMinorToPkr, formatMinorUnits, formatMinorUnitsForInput, mapGroupedAmountCursor, parseExchangeRate, parseMinorUnits, sanitizeDecimalInput, sanitizeGroupedAmountInput } from '../../src/finance/ledger';
 import { useAccounts } from '../../hooks/queries/useAccounts';
 import * as Crypto from 'expo-crypto';
 import { useAuth } from '../../src/context/AuthContext';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { localDb } from '../../src/db/local/client';
 import Toast from 'react-native-toast-message';
 import {
@@ -108,10 +108,26 @@ export default function AddTransactionScreen() {
   const [accountSearch, setAccountSearch] = useState('');
   const [correctionRestriction, setCorrectionRestriction] = useState<string | null>(null);
   const [showAdditionalDetails, setShowAdditionalDetails] = useState(false);
+  const [amountRowWidth, setAmountRowWidth] = useState(0);
   const [datePickerVisible, setDatePickerVisible] = useState(false);
   const [timePickerVisible, setTimePickerVisible] = useState(false);
   const addTransaction = useAddTransaction();
   const { data: accounts = [], isLoading: accountsLoading, isError: accountsError } = useAccounts();
+  const accountReservationsQuery = useQuery({
+    queryKey: ['account-reservations', user?.id],
+    enabled: !!user,
+    queryFn: async () => {
+      if (!user) throw new Error('Sign in to verify account allocations.');
+      const reservations = await localDb.savings.reservationsByAccount(user.id);
+      if (reservations.some((reservation) => reservation.amountMinor < 0)) {
+        throw new Error('A savings allocation is inconsistent. Refresh the data before spending.');
+      }
+      return reservations;
+    },
+  });
+  const reservationsByAccount = useMemo(() => new Map(
+    (accountReservationsQuery.data ?? []).map(({ accountId, amountMinor }) => [accountId, amountMinor]),
+  ), [accountReservationsQuery.data]);
   const [correctionOriginalAccount, setCorrectionOriginalAccount] = useState<string | null>(null);
   const [correctionLoadedId, setCorrectionLoadedId] = useState<string | null>(null);
   const [correctionLoadFailedId, setCorrectionLoadFailedId] = useState<string | null>(null);
@@ -120,6 +136,17 @@ export default function AddTransactionScreen() {
   const isDark = Platform.OS === 'web'
     ? typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
     : colorScheme === 'dark';
+  const remittanceInputStyle = {
+    width: '100%' as const,
+    height: 54,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: isDark ? '#404040' : '#d1d5db',
+    backgroundColor: isDark ? '#262626' : '#f9fafb',
+    paddingHorizontal: 16,
+    color: isDark ? '#ffffff' : '#111827',
+  };
+  const remittancePlaceholderColor = isDark ? '#a3a3a3' : '#6b7280';
   const paperBaseTheme = isDark ? MD3DarkTheme : MD3LightTheme;
   const paperTheme = {
     ...paperBaseTheme,
@@ -166,13 +193,38 @@ export default function AddTransactionScreen() {
 
   const transactionType = useWatch({ control, name: 'type' });
   const watchedAmount = useWatch({ control, name: 'amount' }) ?? '';
+  const amountInputValueRef = useRef(watchedAmount);
+  const amountSelectionRef = useRef({ start: 0, end: 0 });
+  const amountSelectionSyncPendingRef = useRef(false);
+  const amountSelectionSyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [amountSelection, setAmountSelection] = useState({ start: 0, end: 0 });
+  useEffect(() => {
+    amountInputValueRef.current = watchedAmount;
+  }, [watchedAmount]);
   const selectedDate = useWatch({ control, name: 'date' });
   const selectedCategoryId = useWatch({ control, name: 'categoryId' });
   const selectedAccountId = useWatch({ control, name: 'accountId' });
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId);
+  const selectedAccountReservedMinor = selectedAccount ? reservationsByAccount.get(selectedAccount.id) ?? 0 : 0;
+  const selectedAccountAvailableMinor = selectedAccount
+    ? Math.max(0, selectedAccount.balanceMinor - selectedAccountReservedMinor)
+    : 0;
+  const reservationCheckUnavailable = Boolean(user)
+    && accountReservationsQuery.data === undefined
+    && (transactionType === 'Expense' || transactionType === 'Transfer');
   const selectedToAccountId = useWatch({ control, name: 'toAccountId' });
   const selectedTaxStatus = useWatch({ control, name: 'taxStatus' }) ?? 'unreviewed';
   const selectedPaymentMethod = useWatch({ control, name: 'paymentMethod' }) ?? 'Bank transfer';
+  const amountLayout = useMemo(() => {
+    const glyphUnits = Array.from(watchedAmount).reduce((width, character) => (
+      width + (character === ',' || character === '.' ? 0.3 : 0.62)
+    ), 0);
+    const amountInputMaxWidth = Math.max(80, amountRowWidth - 80);
+    const fontSize = glyphUnits && amountRowWidth > 0
+      ? Math.max(20, Math.min(48, (amountInputMaxWidth / glyphUnits) * 0.9))
+      : 48;
+    return fontSize;
+  }, [amountRowWidth, watchedAmount]);
   const correctionReady = Boolean(correctionOf) && correctionLoadedId === correctionOf;
   const correctionLoadFailed = Boolean(correctionOf) && correctionLoadFailedId === correctionOf;
   const correctionLoading = Boolean(correctionOf) && !correctionReady && !correctionLoadFailed;
@@ -180,14 +232,14 @@ export default function AddTransactionScreen() {
     if (correctionOf || !selectedAccount || (transactionType !== 'Expense' && transactionType !== 'Transfer')) return null;
     try {
       const amountMinor = parseMinorUnits(watchedAmount);
-      if (amountMinor > selectedAccount.balanceMinor) {
-        return `Not enough money in this account. Available: ${formatMinorUnits(selectedAccount.balanceMinor, selectedAccount.currency)}.`;
+      if (amountMinor > selectedAccountAvailableMinor) {
+        return `Only ${formatMinorUnits(selectedAccountAvailableMinor, selectedAccount.currency)} is available in ${selectedAccount.name}; ${formatMinorUnits(selectedAccountReservedMinor, selectedAccount.currency)} is set aside. Lower the amount or release savings from this account.`;
       }
     } catch {
       // The form validation below explains empty or malformed amounts.
     }
     return null;
-  }, [correctionOf, selectedAccount, transactionType, watchedAmount]);
+  }, [correctionOf, selectedAccount, selectedAccountAvailableMinor, selectedAccountReservedMinor, transactionType, watchedAmount]);
   const categories = transactionType === 'Income' ? INCOME_SOURCES : EXPENSE_CATEGORIES;
   const visibleCategories = categories;
   const normalizedAccountSearch = accountSearch.trim().toLocaleLowerCase('en-US');
@@ -203,6 +255,7 @@ export default function AddTransactionScreen() {
   const sourceAmount = useWatch({ control, name: 'sourceAmount' }) ?? '';
   const sourceCurrency = useWatch({ control, name: 'sourceCurrency' }) ?? 'USD';
   const exchangeRate = useWatch({ control, name: 'exchangeRate' }) ?? '';
+  const remittanceAccountMismatch = isRemittance && selectedAccount !== undefined && selectedAccount.currency !== 'PKR';
   let remittancePreview = '';
   if (isRemittance && sourceAmount && exchangeRate) {
     try {
@@ -216,6 +269,9 @@ export default function AddTransactionScreen() {
     if (ownerAtEntry.current !== user.id) {
       setProfileChanged(true);
       reset({ type: 'Expense', amount: '', accountId: '', categoryId: EXPENSE_CATEGORIES[0].id, date: new Date(), note: '', sourceName: '', paymentMethod: 'Bank transfer' });
+      amountInputValueRef.current = '';
+      amountSelectionRef.current = { start: 0, end: 0 };
+      setAmountSelection({ start: 0, end: 0 });
       setCorrectionOriginalAccount(null);
       setCorrectionLoadedId(null);
       operationId.current = Crypto.randomUUID();
@@ -308,13 +364,14 @@ export default function AddTransactionScreen() {
     setValue('date', updated, { shouldValidate: true });
   };
 
-  const onSubmit = async (data: AddTransactionFormData, addAnother = false) => {
+  const onSubmit = async (data: AddTransactionFormData) => {
     if (savingRef.current) return;
     savingRef.current = true;
     try {
       if (!user || ownerAtEntry.current !== user.id || profileChanged) throw new Error('Your profile changed while this form was open. Reopen Add before saving.');
       if (correctionRestriction) throw new Error(correctionRestriction);
       if (!accounts.some((account) => account.id === data.accountId)) throw new Error('Choose a valid active account before saving.');
+      if (isRemittance && selectedAccount?.currency !== 'PKR') throw new Error('Choose a PKR account for a converted family remittance.');
       if (data.type === 'Transfer' && !accounts.some((account) => account.id === data.toAccountId && account.id !== data.accountId && account.currency === selectedAccount?.currency)) {
         throw new Error('Choose an active destination account with the same currency. Cross-currency transfers are not supported.');
       }
@@ -354,26 +411,25 @@ export default function AddTransactionScreen() {
       } else {
         await addTransaction.mutateAsync(draft);
         operationId.current = Crypto.randomUUID();
-        if (addAnother) {
-          reset({
-            type: data.type,
-            amount: '',
-            accountId: data.accountId,
-            toAccountId: undefined,
-            categoryId: data.categoryId,
-            date: new Date(),
-            note: '',
-            sourceName: '',
-            paymentMethod: data.paymentMethod ?? 'Bank transfer',
-            sourceAmount: '',
-            sourceCurrency: 'USD',
-            exchangeRate: '',
-            referenceNumber: '',
-            taxStatus: 'unreviewed',
-          });
-        } else {
-          router.replace('/(tabs)');
-        }
+        reset({
+          type: data.type,
+          amount: '',
+          accountId: data.accountId,
+          toAccountId: undefined,
+          categoryId: data.categoryId,
+          date: new Date(),
+          note: '',
+          sourceName: '',
+          paymentMethod: data.paymentMethod ?? 'Bank transfer',
+          sourceAmount: '',
+          sourceCurrency: data.sourceCurrency ?? 'USD',
+          exchangeRate: '',
+          referenceNumber: '',
+          taxStatus: 'unreviewed',
+        });
+        amountInputValueRef.current = '';
+        amountSelectionRef.current = { start: 0, end: 0 };
+        setAmountSelection({ start: 0, end: 0 });
       }
     } catch (error) {
       Toast.show({ type: 'error', text1: correctionOf ? 'Correction not saved' : 'Transaction not saved', text2: error instanceof Error ? error.message : 'Please review the transaction and try again.', position: 'top' });
@@ -382,7 +438,7 @@ export default function AddTransactionScreen() {
     }
   };
 
-  const saveTransaction = (addAnother = false) => { void handleSubmit((data) => onSubmit(data, addAnother))(); };
+  const saveTransaction = () => { void handleSubmit(onSubmit)(); };
 
   const getTypeTextClass = (type: string, currentSelected: string) => {
     if (type !== currentSelected) return 'text-gray-500 dark:text-neutral-300';
@@ -418,10 +474,10 @@ export default function AddTransactionScreen() {
           
           {/* Header & Toggle */}
           <View className="w-full pt-3 pb-3 items-center">
-            {correctionOf && <Text className="font-body mb-3 w-full border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">This appends a correction and preserves the original. Original account: {correctionOriginalAccount ?? 'loading…'}{!accounts.some((account) => account.id === selectedAccountId) ? '. Choose an active account explicitly.' : '.'}</Text>}
-            {correctionRestriction && <Text className="font-body mb-3 w-full border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{correctionRestriction}</Text>}
-            {profileChanged && <Text className="font-body mb-3 w-full border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">Your profile changed while this form was open. Please reopen Add to continue safely.</Text>}
-            {correctionLoadFailed && <Pressable accessibilityRole="button" className="mb-3 self-center border border-red-300 px-4 py-2" onPress={() => { setCorrectionLoadedId(null); setCorrectionLoadFailedId(null); setCorrectionRetry((value) => value + 1); }}><Text className="font-body text-sm font-semibold text-red-700">Retry loading original transaction</Text></Pressable>}
+            {correctionOf && <Text className="font-body mb-3 w-full border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">This appends a correction and preserves the original. Original account: {correctionOriginalAccount ?? 'loading…'}{!accounts.some((account) => account.id === selectedAccountId) ? '. Choose an active account explicitly.' : '.'}</Text>}
+            {correctionRestriction && <Text className="font-body mb-3 w-full border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">{correctionRestriction}</Text>}
+            {profileChanged && <Text className="font-body mb-3 w-full border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">Your profile changed while this form was open. Please reopen Add to continue safely.</Text>}
+            {correctionLoadFailed && <Pressable accessibilityRole="button" className="mb-3 self-center border border-red-300 px-4 py-2 dark:border-red-700" onPress={() => { setCorrectionLoadedId(null); setCorrectionLoadFailedId(null); setCorrectionRetry((value) => value + 1); }}><Text className="font-body text-sm font-semibold text-red-700 dark:text-red-300">Retry loading original transaction</Text></Pressable>}
             <View className="flex-row rounded-full bg-gray-200 p-1 w-full max-w-sm dark:bg-neutral-900">
               {(['Expense', 'Income', 'Transfer'] as const).map((type) => (
                 <Pressable
@@ -433,7 +489,7 @@ export default function AddTransactionScreen() {
                   onPress={() => {
                     setValue('type', type);
                     setAccountSearch('');
-                    if (type !== 'Transfer') setValue('categoryId', (type === 'Income' ? INCOME_SOURCES : EXPENSE_CATEGORIES)[0].id);
+                    if (type !== 'Transfer') setValue('categoryId', type === 'Income' ? '' : EXPENSE_CATEGORIES[0].id);
                   }}
                 >
                   <Text className={["font-body", (`text-sm font-bold ${getTypeTextClass(type, transactionType)}`)].filter(Boolean).join(' ')}>
@@ -447,22 +503,62 @@ export default function AddTransactionScreen() {
           {/* Amount Hero Input */}
           <View className="w-full items-center justify-center py-6">
             <Text className="font-body mb-3 font-semibold text-gray-500 dark:text-neutral-400">{isRemittance ? 'Converted amount (PKR)' : transactionType === 'Transfer' ? 'Transfer amount' : 'Amount'}</Text>
-            <View className="relative h-20 w-full items-center justify-center">
-              <Text className="font-heading absolute left-[12%] text-lg font-bold text-gray-500 dark:text-neutral-400">{isRemittance ? 'PKR' : selectedAccount?.currency ?? 'Select account'}</Text>
+            <View
+              onLayout={(event) => setAmountRowWidth(event.nativeEvent.layout.width)}
+              className="relative h-20 w-full items-center justify-center"
+            >
+              <Text className="font-heading absolute left-0 text-sm font-bold text-gray-500 dark:text-neutral-300">
+                {isRemittance ? 'PKR' : selectedAccount?.currency ?? '—'}
+              </Text>
               <Controller
                 control={control}
                 name="amount"
                 render={({ field: { onChange, onBlur, value } }) => (
                   <TextInput
                     accessibilityLabel={`${transactionType} amount${selectedAccount ? ` in ${selectedAccount.currency}` : ''}`}
-                    className="font-heading h-full w-full text-center text-5xl font-bold text-gray-950 dark:text-white"
-                    style={{ width: '100%', textAlign: 'center', textAlignVertical: 'center', paddingVertical: 0, lineHeight: 60, includeFontPadding: false }}
+                    className="font-heading h-full w-full text-center font-bold text-gray-950 dark:text-white"
+                    style={{ width: '100%', minWidth: 0, fontSize: amountLayout, textAlign: 'center', textAlignVertical: 'center', paddingVertical: 0, lineHeight: amountLayout * 1.2, includeFontPadding: false }}
                     keyboardType="decimal-pad"
                     autoFocus={Platform.OS !== 'web'}
                     placeholder="0"
                     placeholderTextColor="#d1d5db"
                     value={value}
-                    onChangeText={(text) => onChange(formatGroupedAmountInput(text))}
+                    selection={amountSelection}
+                    onSelectionChange={({ nativeEvent: { selection } }) => {
+                      if (amountSelectionSyncPendingRef.current) {
+                        const expected = amountSelectionRef.current;
+                        if (selection.start === expected.start && selection.end === expected.end) {
+                          amountSelectionSyncPendingRef.current = false;
+                        }
+                        return;
+                      }
+                      amountSelectionRef.current = selection;
+                      setAmountSelection(selection);
+                    }}
+                    onChangeText={(text) => {
+                      const previousSelection = amountSelectionRef.current;
+                      const selectionLength = previousSelection.end - previousSelection.start;
+                      const previousValue = amountInputValueRef.current;
+                      const lengthDelta = text.length - previousValue.length;
+                      const editingAtEnd = previousSelection.start === previousValue.length
+                        && previousSelection.end === previousSelection.start;
+                      const rawCursor = lengthDelta < 0
+                        ? selectionLength > 0 ? previousSelection.start : Math.max(0, previousSelection.start + lengthDelta)
+                        : Math.min(text.length, previousSelection.start + lengthDelta + selectionLength);
+                      const formatted = sanitizeGroupedAmountInput(text);
+                      const cursor = editingAtEnd ? formatted.length : mapGroupedAmountCursor(text, formatted, rawCursor);
+                      const nextSelection = { start: cursor, end: cursor };
+                      amountInputValueRef.current = formatted;
+                      amountSelectionRef.current = nextSelection;
+                      amountSelectionSyncPendingRef.current = true;
+                      if (amountSelectionSyncTimeoutRef.current) clearTimeout(amountSelectionSyncTimeoutRef.current);
+                      amountSelectionSyncTimeoutRef.current = setTimeout(() => {
+                        amountSelectionSyncPendingRef.current = false;
+                        amountSelectionSyncTimeoutRef.current = null;
+                      }, 100);
+                      setAmountSelection(nextSelection);
+                      onChange(formatted);
+                    }}
                     onBlur={onBlur}
                     maxLength={24}
                     editable={!isRemittance}
@@ -470,8 +566,8 @@ export default function AddTransactionScreen() {
                 )}
               />
             </View>
-            {errors.amount && <Text className="font-body mt-2 text-sm text-red-500">{errors.amount.message}</Text>}
-            {insufficientFundsMessage && <Text accessibilityRole="alert" className="font-body mt-2 text-sm text-red-500">{insufficientFundsMessage}</Text>}
+            {errors.amount && <Text className="font-body mt-2 text-sm text-red-600 dark:text-red-400">{errors.amount.message}</Text>}
+            {insufficientFundsMessage && <Text accessibilityRole="alert" className="font-body mt-2 text-sm text-red-600 dark:text-red-400">{insufficientFundsMessage}</Text>}
           </View>
 
           {/* Details Section */}
@@ -481,14 +577,14 @@ export default function AddTransactionScreen() {
             <View className="border-b border-gray-100 pb-4">
               <Text className="font-body text-base font-semibold text-gray-700 dark:text-neutral-100">{transactionType === 'Transfer' ? 'From account' : transactionType === 'Income' ? 'Deposit to' : 'Paid from'}</Text>
               {accountsLoading ? (
-                <View className="mt-3 flex-row items-center"><ActivityIndicator size="small" color={PRIMARY_COLOR} /><Text className="font-body ml-2 text-sm text-gray-500">Loading accounts…</Text></View>
+                <View className="mt-3 flex-row items-center"><ActivityIndicator size="small" color={PRIMARY_COLOR} /><Text className="font-body ml-2 text-sm text-gray-500 dark:text-neutral-400">Loading accounts…</Text></View>
               ) : accountsError ? (
-                <View className="mt-3"><Text className="font-body text-sm text-red-600">Accounts could not be loaded. Try again before saving.</Text><Pressable accessibilityRole="button" className="mt-2 self-start border-b border-primary pb-0.5" onPress={() => void queryClient.invalidateQueries({ queryKey: ['accounts', user?.id] })}><Text className="font-body text-sm font-semibold text-primary">Retry accounts</Text></Pressable></View>
+                <View className="mt-3"><Text className="font-body text-sm text-red-600 dark:text-red-400">Accounts could not be loaded. Try again before saving.</Text><Pressable accessibilityRole="button" className="mt-2 self-start border-b border-primary pb-0.5" onPress={() => void queryClient.invalidateQueries({ queryKey: ['accounts', user?.id] })}><Text className="font-body text-sm font-semibold text-primary">Retry accounts</Text></Pressable></View>
               ) : accounts.length === 0 ? (
                 <View className="mt-3"><Text className="font-body text-sm text-gray-500 dark:text-neutral-400">Create an account before recording income or spending.</Text><Pressable accessibilityRole="button" className="mt-3 self-start border-b border-primary pb-0.5" onPress={() => router.push('/accounts')}><Text className="font-body text-sm font-semibold text-primary">Create account</Text></Pressable></View>
               ) : (
                 <>
-                {accounts.length > 4 && <View className="mt-3 flex-row items-center border border-gray-200 bg-gray-50 px-3 dark:border-neutral-700 dark:bg-neutral-800"><Search size={17} color="#6b7280" /><TextInput accessibilityLabel="Search accounts" className="font-body min-h-11 flex-1 px-2 text-sm text-gray-900 dark:text-white" placeholder="Search name, type, or currency" placeholderTextColor="#9ca3af" value={accountSearch} onChangeText={setAccountSearch} /></View>}
+                {accounts.length > 4 && <View className="mt-3 flex-row items-center border border-gray-200 bg-gray-50 px-3 dark:border-neutral-700 dark:bg-neutral-800"><Search size={17} color={isDark ? '#a3a3a3' : '#6b7280'} /><TextInput accessibilityLabel="Search accounts" className="font-body min-h-11 flex-1 px-2 text-sm text-gray-900 dark:text-white" placeholder="Search name, type, or currency" placeholderTextColor="#9ca3af" value={accountSearch} onChangeText={setAccountSearch} /></View>}
                 <ScrollView horizontal style={{ width: '100%', flexGrow: 0, flexShrink: 1 }} className="mt-3" showsHorizontalScrollIndicator={false}>
                   {visibleAccounts.map((account) => {
                     const selected = account.id === selectedAccountId;
@@ -497,33 +593,48 @@ export default function AddTransactionScreen() {
                         key={account.id}
                         accessibilityRole="button"
                         accessibilityState={{ selected }}
-                        accessibilityLabel={`${account.name}, ${account.type}, ${account.currency}, balance ${formatMinorUnits(account.balanceMinor, account.currency)}`}
-                        onPress={() => setValue('accountId', account.id, { shouldValidate: true })}
+                        accessibilityLabel={`${account.name}, ${account.type}, ${account.currency}, total ${formatMinorUnits(account.balanceMinor, account.currency)}${accountReservationsQuery.data ? `, available ${formatMinorUnits(Math.max(0, account.balanceMinor - (reservationsByAccount.get(account.id) ?? 0)), account.currency)}, set aside ${formatMinorUnits(reservationsByAccount.get(account.id) ?? 0, account.currency)}` : ', checking set-aside amount'}`}
+                        onPress={() => {
+                          setValue('accountId', account.id, { shouldValidate: true });
+                          const destination = accounts.find((candidate) => candidate.id === selectedToAccountId);
+                          if (selectedToAccountId && (!destination || destination.id === account.id || destination.currency !== account.currency)) {
+                            setValue('toAccountId', undefined, { shouldValidate: true });
+                          }
+                        }}
                         className={`mr-2 min-h-12 justify-center rounded-xl border px-3 py-2 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL}`}
                       >
                         <Text className={`font-body font-semibold ${selected ? BADGE_PRIMARY_TEXT : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text>
-                        <Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text>
+                        <Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type.charAt(0).toLocaleUpperCase('en-US') + account.type.slice(1)} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text>
+                        {accountReservationsQuery.data ? <>
+                          <Text className={`font-body mt-1 text-xs font-semibold ${selected ? BADGE_PRIMARY_TEXT : 'text-gray-700 dark:text-neutral-200'}`}>Available {formatMinorUnits(Math.max(0, account.balanceMinor - (reservationsByAccount.get(account.id) ?? 0)), account.currency)}</Text>
+                          <Text className="font-body mt-0.5 text-[10px] text-gray-500 dark:text-neutral-400">Set aside {formatMinorUnits(reservationsByAccount.get(account.id) ?? 0, account.currency)}</Text>
+                        </> : null}
                       </Pressable>
                     );
                   })}
                 </ScrollView>
-                {visibleAccounts.length === 0 && <Text className="font-body mt-2 text-sm text-gray-500">No matching accounts.</Text>}
+                {visibleAccounts.length === 0 && <Text className="font-body mt-2 text-sm text-gray-500 dark:text-neutral-400">No matching accounts.</Text>}
                 </>
               )}
-              {errors.accountId && <Text className="font-body mt-1 text-sm text-red-600">{errors.accountId.message}</Text>}
+              {accountReservationsQuery.isLoading && (transactionType === 'Expense' || transactionType === 'Transfer') ? <View className="mt-3 flex-row items-center"><ActivityIndicator size="small" color={PRIMARY_COLOR} /><Text className="font-body ml-2 text-xs text-gray-500 dark:text-neutral-400">Checking each account’s set-aside funds…</Text></View> : null}
+              {accountReservationsQuery.isError && (transactionType === 'Expense' || transactionType === 'Transfer') ? <View className="mt-3"><Text accessibilityRole="alert" className="font-body text-sm text-red-600 dark:text-red-400">Account reservations could not be verified. Refresh before recording this expense.</Text><Pressable accessibilityRole="button" onPress={() => void accountReservationsQuery.refetch()} className="mt-2 self-start border-b border-primary pb-0.5"><Text className="font-body text-sm font-semibold text-primary">Retry balance check</Text></Pressable></View> : null}
+              {insufficientFundsMessage ? <Pressable accessibilityRole="link" onPress={() => router.push('/savings')} className="mt-2 self-start border-b border-primary pb-0.5"><Text className="font-body text-sm font-semibold text-primary">Review savings allocations</Text></Pressable> : null}
+              {accountReservationsQuery.data && (transactionType === 'Expense' || transactionType === 'Transfer') ? <Text className="font-body mt-2 text-xs leading-4 text-gray-500 dark:text-neutral-400">Available is this account’s balance after savings and emergency-fund set-asides.</Text> : null}
+              {errors.accountId && <Text className="font-body mt-1 text-sm text-red-600 dark:text-red-400">{errors.accountId.message}</Text>}
+              {remittanceAccountMismatch && <Text accessibilityRole="alert" className="font-body mt-2 text-sm text-amber-700 dark:text-amber-300">Choose a PKR account for a converted family remittance.</Text>}
               {transactionType === 'Transfer' && accounts.length > 1 && (
                 <View className="mt-4">
                   <Text className="font-body text-base font-semibold text-gray-700 dark:text-neutral-100">To account</Text>
-                  {accounts.length > 4 && <View className="mt-3 flex-row items-center border border-gray-200 bg-gray-50 px-3 dark:border-neutral-700 dark:bg-neutral-800"><Search size={17} color="#6b7280" /><TextInput accessibilityLabel="Search destination accounts" className="font-body min-h-11 flex-1 px-2 text-sm text-gray-900 dark:text-white" placeholder="Search destination accounts" placeholderTextColor="#9ca3af" value={accountSearch} onChangeText={setAccountSearch} /></View>}
+                  {accounts.length > 4 && <View className="mt-3 flex-row items-center border border-gray-200 bg-gray-50 px-3 dark:border-neutral-700 dark:bg-neutral-800"><Search size={17} color={isDark ? '#a3a3a3' : '#6b7280'} /><TextInput accessibilityLabel="Search destination accounts" className="font-body min-h-11 flex-1 px-2 text-sm text-gray-900 dark:text-white" placeholder="Search destination accounts" placeholderTextColor="#9ca3af" value={accountSearch} onChangeText={setAccountSearch} /></View>}
                   <ScrollView horizontal style={{ width: '100%', flexGrow: 0, flexShrink: 1 }} className="mt-3" showsHorizontalScrollIndicator={false}>
                     {visibleDestinationAccounts.map((account) => {
                       const selected = account.id === selectedToAccountId;
-                      return <Pressable key={account.id} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => setValue('toAccountId', account.id, { shouldValidate: true })} className={`mr-2 min-h-12 justify-center border px-3 py-2 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body font-semibold ${selected ? BADGE_PRIMARY_TEXT : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text><Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>;
+                      return <Pressable key={account.id} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => setValue('toAccountId', account.id, { shouldValidate: true })} className={`mr-2 min-h-12 justify-center rounded-xl border px-3 py-2 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body font-semibold ${selected ? BADGE_PRIMARY_TEXT : 'text-gray-700 dark:text-neutral-100'}`}>{account.name}</Text><Text className="font-body mt-0.5 text-xs text-gray-500 dark:text-neutral-400">{account.type} · {account.currency} · {formatMinorUnits(account.balanceMinor, account.currency)}</Text></Pressable>;
                     })}
                   </ScrollView>
-                  {!accounts.some((account) => account.id !== selectedAccountId && account.currency === selectedAccount?.currency) && <Text className="font-body mt-2 text-sm text-gray-500">No other active account uses {selectedAccount?.currency ?? 'the selected currency'}. Cross-currency transfers are not supported.</Text>}
-                  {errors.toAccountId && <Text className="font-body mt-1 text-sm text-red-500">{errors.toAccountId.message}</Text>}
-                  <Text className="font-body mt-2 text-xs text-gray-500">Moving money between your accounts does not count as income or spending.</Text>
+                  {!accounts.some((account) => account.id !== selectedAccountId && account.currency === selectedAccount?.currency) && <Text className="font-body mt-2 text-sm text-gray-500 dark:text-neutral-400">No other active account uses {selectedAccount?.currency ?? 'the selected currency'}. Cross-currency transfers are not supported.</Text>}
+                  {errors.toAccountId && <Text className="font-body mt-1 text-sm text-red-600 dark:text-red-400">{errors.toAccountId.message}</Text>}
+                  <Text className="font-body mt-2 text-xs text-gray-500 dark:text-neutral-400">Moving money between your accounts does not count as income or spending.</Text>
                 </View>
               )}
             </View>
@@ -531,7 +642,12 @@ export default function AddTransactionScreen() {
             {/* Category Horizontal Scroll */}
             <View className="border-b border-gray-100 pb-4 pt-3 dark:border-neutral-800">
               <Text className="font-body mb-3 text-sm font-semibold text-gray-800 dark:text-neutral-100">{transactionType === 'Income' ? 'Income classification' : 'Category'}</Text>
-              {transactionType === 'Transfer' ? <Text className="font-body text-sm text-blue-700">Internal transfer · excluded from income and spending totals</Text> : <ScrollView horizontal showsHorizontalScrollIndicator={false} className="-mx-2 px-2">
+              {transactionType === 'Transfer' ? <View>
+                <View className="self-start rounded-full border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-800 dark:bg-blue-950">
+                  <Text className="font-body text-sm font-semibold text-blue-800 dark:text-blue-200">Internal transfer</Text>
+                </View>
+                <Text className="font-body mt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Transfers between your accounts are excluded from income and spending totals.</Text>
+              </View> : <ScrollView horizontal showsHorizontalScrollIndicator={false} className="-mx-2 px-2">
                 {visibleCategories.map((cat) => {
                   const isSelected = selectedCategoryId === cat.id;
                   return (
@@ -547,7 +663,8 @@ export default function AddTransactionScreen() {
                   );
                 })}
               </ScrollView>}
-              {errors.categoryId && <Text className="font-body mt-1 text-sm text-red-600">{errors.categoryId.message}</Text>}
+              {transactionType === 'Income' && !selectedCategoryId ? <Text className="font-body mt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">Choose the source that best matches this receipt.</Text> : null}
+              {errors.categoryId && <Text className="font-body mt-1 text-sm text-red-600 dark:text-red-400">{errors.categoryId.message}</Text>}
             </View>
 
             {transactionType === 'Income' && (
@@ -570,9 +687,9 @@ export default function AddTransactionScreen() {
                     />
                   )}
                 />
-                {errors.sourceName && <Text className="font-body mt-1 text-sm text-red-500">{errors.sourceName.message}</Text>}
+                {errors.sourceName && <Text className="font-body mt-1 text-sm text-red-600 dark:text-red-400">{errors.sourceName.message}</Text>}
                 {selectedCategoryId === 'family_gift' && (
-                  <Text className="font-body mt-2 text-xs leading-5 text-gray-500">
+                  <Text className="font-body mt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">
                     A gift is not salary. Keep the sender and payment proof; tax treatment depends on current rules and your circumstances.
                   </Text>
                 )}
@@ -593,23 +710,23 @@ export default function AddTransactionScreen() {
                   ))}
                 </View>
                 {selectedCategoryId === 'business_revenue' && (
-                  <Text className="font-body mt-2 text-xs leading-5 text-gray-500">
+                  <Text className="font-body mt-2 text-xs leading-5 text-gray-500 dark:text-neutral-400">
                     These are gross receipts, not profit. A profit report needs business costs to be recorded and matched.
                   </Text>
                 )}
                 {isRemittance && <View className="mt-4 gap-3">
                   <Text className="font-body text-sm font-semibold text-gray-700 dark:text-neutral-100">Original remittance details</Text>
-                  <Controller control={control} name="sourceAmount" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="Amount in original currency" keyboardType="decimal-pad" value={value} onChangeText={(text) => onChange(formatGroupedAmountInput(text))} />} />
-                  {errors.sourceAmount && <Text className="font-body text-sm text-red-500">{errors.sourceAmount.message}</Text>}
+                  <Controller control={control} name="sourceAmount" render={({ field: { onChange, onBlur, value } }) => <TextInput accessibilityLabel="Amount in original currency" className="font-body text-base" style={remittanceInputStyle} placeholder="Amount in original currency" placeholderTextColor={remittancePlaceholderColor} keyboardType="decimal-pad" maxLength={24} value={value} onChangeText={(text) => onChange(sanitizeGroupedAmountInput(text))} onBlur={onBlur} />} />
+                  {errors.sourceAmount && <Text className="font-body text-sm text-red-600 dark:text-red-400">{errors.sourceAmount.message}</Text>}
                   <View className="flex-row gap-2">{['USD', 'GBP', 'EUR', 'AED', 'SAR'].map((currency) => <Pressable key={currency} accessibilityRole="radio" accessibilityState={{ selected: sourceCurrency === currency }} onPress={() => setValue('sourceCurrency', currency)} className={`rounded-full border px-3 py-2 ${sourceCurrency === currency ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${sourceCurrency === currency ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{currency}</Text></Pressable>)}</View>
-                  <Controller control={control} name="exchangeRate" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="PKR per 1 unit (provider rate)" keyboardType="decimal-pad" value={value} onChangeText={onChange} />} />
-                  {errors.exchangeRate && <Text className="font-body text-sm text-red-500">{errors.exchangeRate.message}</Text>}
+                  <Controller control={control} name="exchangeRate" render={({ field: { onChange, onBlur, value } }) => <TextInput accessibilityLabel="Provider exchange rate in PKR per unit" className="font-body text-base" style={remittanceInputStyle} placeholder="PKR per 1 unit (provider rate)" placeholderTextColor={remittancePlaceholderColor} keyboardType="decimal-pad" maxLength={32} value={value} onChangeText={(text) => onChange(sanitizeDecimalInput(text, 8))} onBlur={onBlur} />} />
+                  {errors.exchangeRate && <Text className="font-body text-sm text-red-600 dark:text-red-400">{errors.exchangeRate.message}</Text>}
                   {remittancePreview ? <Text className="font-body font-semibold text-primary">Converted amount: {remittancePreview}</Text> : null}
-                  <Controller control={control} name="referenceNumber" render={({ field: { onChange, value } }) => <TextInput className="font-body rounded-xl border-2 border-gray-200 bg-gray-50 px-4 py-3 text-base text-black" placeholder="Bank / remittance reference number" value={value} onChangeText={onChange} />} />
-                  <Text className="font-body text-xs leading-5 text-gray-500">Enter the exchange rate shown by your bank or provider. The converted PKR amount is what will be added to your account.</Text>
+                  <Controller control={control} name="referenceNumber" render={({ field: { onChange, onBlur, value } }) => <TextInput accessibilityLabel="Bank or remittance reference number" className="font-body text-base" style={remittanceInputStyle} placeholder="Bank / remittance reference number" placeholderTextColor={remittancePlaceholderColor} maxLength={120} value={value} onChangeText={onChange} onBlur={onBlur} />} />
+                  <Text className="font-body text-xs leading-5 text-gray-500 dark:text-neutral-400">Enter the exchange rate shown by your bank or provider. The converted PKR amount is what will be added to your account.</Text>
                 </View>}
                 <Text className="font-body mt-4 text-sm font-semibold text-gray-700 dark:text-neutral-100">Tax record</Text>
-                <Text className="font-body mt-1 text-xs text-gray-500">Your record only; Leverage does not decide the legal tax treatment.</Text>
+                <Text className="font-body mt-1 text-xs text-gray-500 dark:text-neutral-400">Your record only; Leverage does not decide the legal tax treatment.</Text>
                 <View className="mt-2 flex-row flex-wrap gap-2">{([['unreviewed', 'Not reviewed'], ['taxable', 'Taxable'], ['non_taxable', 'Non-taxable']] as const).map(([value, label]) => <Pressable key={value} accessibilityRole="radio" accessibilityState={{ selected: selectedTaxStatus === value }} onPress={() => setValue('taxStatus', value)} className={`rounded-full border px-3 py-2 ${selectedTaxStatus === value ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${selectedTaxStatus === value ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{label}</Text></Pressable>)}</View>
               </View>
             )}
@@ -690,11 +807,10 @@ export default function AddTransactionScreen() {
         <View className="w-full border-t border-gray-200 bg-white px-4 pt-3 pb-3 dark:border-neutral-800 dark:bg-neutral-950">
           <Button
             title={correctionLoading ? 'Loading original…' : correctionOf ? 'Save correction' : `Save ${transactionType.toLocaleLowerCase('en-US')}`}
-            onPress={() => saveTransaction(false)}
+            onPress={saveTransaction}
             isLoading={isSubmitting || addTransaction.isPending}
-            disabled={accounts.length === 0 || accountsLoading || accountsError || correctionLoading || correctionLoadFailed || Boolean(correctionRestriction) || profileChanged || !user || Boolean(insufficientFundsMessage)}
+            disabled={accounts.length === 0 || accountsLoading || accountsError || reservationCheckUnavailable || correctionLoading || correctionLoadFailed || Boolean(correctionRestriction) || profileChanged || !user || Boolean(insufficientFundsMessage) || Boolean(remittanceAccountMismatch)}
           />
-          {!correctionOf && <Pressable accessibilityRole="button" accessibilityState={{ disabled: isSubmitting || addTransaction.isPending || accounts.length === 0 || accountsLoading || accountsError || profileChanged || Boolean(insufficientFundsMessage), busy: isSubmitting || addTransaction.isPending }} disabled={isSubmitting || addTransaction.isPending || accounts.length === 0 || accountsLoading || accountsError || profileChanged || Boolean(insufficientFundsMessage)} onPress={() => saveTransaction(true)} className="mt-2 min-h-11 flex-row items-center justify-center">{isSubmitting || addTransaction.isPending ? <><ActivityIndicator size="small" color={PRIMARY_COLOR} /><Text className="font-body ml-2 text-sm font-semibold text-primary">Saving…</Text></> : <Text className="font-body text-sm font-semibold text-primary">Save and add another</Text>}</Pressable>}
         </View>
 
     </SafeAreaView>

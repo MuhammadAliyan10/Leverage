@@ -54,6 +54,9 @@ yarn-error.*
 .windsurf/
 .vscode/mcp.json
 
+# Unredacted local app captures. Public-ready copies live in assets/screenshots/.
+/assets/App Images/
+
 # Environment variables and local secrets
 .env*
 !.env.example

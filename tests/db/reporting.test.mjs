@@ -13,7 +13,7 @@ function setupReportDatabase() {
     );
     CREATE TABLE "Transaction" (
       id TEXT PRIMARY KEY, ownerId TEXT NOT NULL, date TEXT NOT NULL, amountMinor INTEGER NOT NULL,
-      type TEXT NOT NULL, categoryId TEXT NOT NULL, note TEXT, accountId TEXT, toAccountId TEXT, reversalOfId TEXT,
+      type TEXT NOT NULL, categoryId TEXT NOT NULL, classificationId TEXT, note TEXT, accountId TEXT, toAccountId TEXT, reversalOfId TEXT,
       synced INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX Transaction_owner_date_id_idx ON "Transaction"(ownerId, date DESC, id DESC);
@@ -29,6 +29,7 @@ function setupReportDatabase() {
     insert.run(`expense-${String(index).padStart(4, '0')}`, 'user-1', date, index === 0 ? 500 : 100, 'Expense', 'Food', 'pkr', null, null);
   }
   insert.run('income', 'user-1', date, 5000, 'Income', 'Salary', 'pkr', null, null);
+  database.prepare('UPDATE "Transaction" SET classificationId = ? WHERE id = ?').run('family_gift', 'income');
   insert.run('refund', 'user-1', date, 250, 'Refund', 'Expense refund', 'pkr', null, 'expense-0000');
   insert.run('refund-partial', 'user-1', date, 50, 'Refund', 'Expense refund', 'pkr', null, 'expense-0000');
   insert.run('correction-original', 'user-1', date, 600, 'Expense', 'Housing', 'pkr', null, null);
@@ -61,7 +62,7 @@ test('complete indexed report totals ignore pagination, retain archived history,
   assert.equal(full.expenseMinor, 250825);
   assert.equal(full.netMinor, -245825);
   assert.equal(full.expenseCount, 2502, 'frequency counts positive net expense records after partial refunds and full reversals');
-  assert.deepEqual(full.incomeSourceTotals, [{ source: 'Salary', amountMinor: 5000 }]);
+  assert.deepEqual(full.incomeSourceTotals, [{ source: 'family_gift', amountMinor: 5000 }], 'income sources use the saved classification rather than a stale display label');
   assert.deepEqual(full.excludedCurrencies, ['USD']);
   assert.deepEqual(full.categoryTotals, [
     { category: 'Food', amountMinor: 250425 },

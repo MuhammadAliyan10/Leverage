@@ -14,7 +14,7 @@ import { useAuth } from '../src/context/AuthContext';
 import { useAccounts } from '../hooks/queries/useAccounts';
 import { DatePickerField } from '../components/ui/DatePickerField';
 import { localDb } from '../src/db/local/client';
-import { formatGroupedAmountInput, formatMinorUnits, parseMinorUnits } from '../src/finance/ledger';
+import { formatGroupedAmountInput, formatMinorUnits, parseMinorUnits, sanitizeGroupedAmountInput, sanitizeIntegerInput } from '../src/finance/ledger';
 import type { RecurrenceFrequency } from '../src/finance/recurrence';
 import { calculateDebtPositions } from '../src/finance/debtPosition';
 import { cancelBillReminder, scheduleBillReminder } from '../src/security/localReminders';
@@ -46,7 +46,7 @@ function Choice({ label, selected, onPress }: {label:string;selected:boolean;onP
 function Field({ value, onChangeText, placeholder, numeric = false, amount = false, bottomSheet = true }: {value:string;onChangeText:(value:string)=>void;placeholder:string;numeric?:boolean;amount?:boolean;bottomSheet?:boolean}) {
   const busy = useContext(ObligationBusyContext);
   const InputComponent = bottomSheet ? BottomSheetTextInput : TextInput;
-  return <View className="mt-2"><Text className="font-body mb-1 text-xs font-semibold text-gray-600 dark:text-neutral-300">{placeholder}</Text><InputComponent editable={!busy} accessibilityLabel={placeholder} value={value} onChangeText={(text) => onChangeText(amount ? formatGroupedAmountInput(text) : text)} placeholder={placeholder} keyboardType={numeric?'decimal-pad':'default'} inputMode={numeric?'decimal':'text'} className="font-body rounded-xl bg-gray-100 px-3 py-3 text-gray-900 dark:bg-neutral-800 dark:text-white" /></View>;
+  return <View className="mt-2"><Text className="font-body mb-1 text-xs font-semibold text-gray-600 dark:text-neutral-300">{placeholder}</Text><InputComponent editable={!busy} accessibilityLabel={placeholder} value={value} onChangeText={(text) => onChangeText(amount ? sanitizeGroupedAmountInput(text) : numeric ? sanitizeIntegerInput(text) : text)} placeholder={placeholder} keyboardType={numeric?(amount?'decimal-pad':'number-pad'):'default'} inputMode={numeric?(amount?'decimal':'numeric'):'text'} className="font-body rounded-xl bg-gray-100 px-3 py-3 text-gray-900 dark:bg-neutral-800 dark:text-white" /></View>;
 }
 function Card({ title, children }: {title:string;children:React.ReactNode}) {
   return <View className="mb-4 rounded-md border border-gray-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900"><SectionHeading title={title} size="compact" className="mb-3"/>{children}</View>;

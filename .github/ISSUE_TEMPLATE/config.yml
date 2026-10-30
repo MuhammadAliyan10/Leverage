@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/MuhammadAliyan10/HouseLog/security/advisories/new
+    about: Report security issues privately. Do not post credentials or financial records in public issues.
+  - name: Support and project documentation
+    url: https://github.com/MuhammadAliyan10/HouseLog#readme
+    about: Review setup guides and the codebase documentation before opening a support issue.

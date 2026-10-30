@@ -1,60 +1,86 @@
 # Leverage
 
-Leverage is a local-first personal finance app for tracking day-to-day money and understanding a household’s wider financial position. It is built with Expo SDK 57, React Native, TypeScript, SQLite, and an optional Neon-backed cloud service.
+<p align="center">
+  <strong>A local-first personal finance app for understanding where your money is, where it goes, and what it is committed to.</strong>
+</p>
 
-> This repository is private. The MIT license is included for the project owner’s future open-source use; review the license and third-party asset licenses before making the repository public.
+<p align="center">
+  <img alt="Expo SDK 57" src="https://img.shields.io/badge/Expo-SDK%2057-000020?logo=expo&logoColor=white">
+  <img alt="React Native 0.86" src="https://img.shields.io/badge/React%20Native-0.86-20232A?logo=react&logoColor=61DAFB">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6-blue?logo=typescript&logoColor=white">
+  <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-green.svg">
+</p>
 
-## What the app includes
+Leverage (the repository is named **HouseLog**) helps people manage day-to-day finances and understand their wider financial position. It brings account balances, transactions, budgets, savings, upcoming obligations, assets, projects, and insights together in one mobile app.
 
-- **Dashboard:** liquid funds, cash available to spend, recent activity, upcoming commitments, and spending trends.
-- **Transactions:** income, expenses, transfers, search, filters, and transaction history.
-- **Accounts:** multiple cash, bank, and wallet balances with account activity.
-- **Budgets and savings:** monthly category budgets, savings goals, and emergency-fund tracking.
-- **Recurring, bills, and debt:** scheduled items, obligations, and repayment plans.
-- **Assets and net worth:** physical assets, investments, liabilities, and account-based position summaries.
-- **Projects:** trip and group budgets, member contributions, pooled funds, expense splits, settlements, and project reports. Shared project collaboration requires the configured cloud services.
-- **Optional AI:** the existing Hono API can provide consent-gated AI features. Provider credentials are stored encrypted by that server; the app does not bundle provider API keys.
-- **Security and recovery:** local profile protection, biometric unlock where supported, encrypted backups, and recovery flows.
+> Screenshots below are illustrative demo captures. Names, balances, transaction details, and other personal information have been replaced with synthetic examples.
 
-Financial amounts are stored as integer minor units. Currency totals remain separate; the app does not silently convert currencies. See [the financial model](docs/financial-model.md) for ledger and reporting rules.
+## Screenshots
 
-## Data and service model
+<p align="center">
+  <img src="assets/screenshots/home.jpg" alt="Leverage home dashboard showing available funds, accounts, and spending overview" width="220">
+  <img src="assets/screenshots/transactions.jpg" alt="Transaction history with search and filters" width="220">
+  <img src="assets/screenshots/add-transaction.jpg" alt="Add transaction form" width="220">
+  <img src="assets/screenshots/insights.jpg" alt="Financial insights and spending breakdown" width="220">
+</p>
 
-The app stores local profile and financial records in on-device SQLite. Core local workflows do not require a continuously running developer server. Cloud sign-in, supported account/transaction sync, and AI gateway features require the configured Neon services and the existing Hono API to be reachable. Shared project collaboration uses authenticated Neon Data API functions and the project database migrations. These are optional app integrations, not services started by `expo start`.
+<p align="center">
+  <img src="assets/screenshots/savings.jpg" alt="Savings goals and emergency fund" width="220">
+  <img src="assets/screenshots/recurring-debt.jpg" alt="Recurring items, bills, and debt schedules" width="220">
+  <img src="assets/screenshots/assets-net-worth.jpg" alt="Assets and net worth overview" width="220">
+  <img src="assets/screenshots/settings.jpg" alt="Settings, security, and optional AI configuration" width="220">
+</p>
 
-The backend is in [`backend/`](backend/README.md). It is part of this repository and is the existing API for authentication and supported cloud operations; AI routes run in the same API process. Do not put database URLs, auth secrets, or AI encryption keys in Expo `EXPO_PUBLIC_*` variables. Public endpoint origins are configuration; secret credentials belong in the server’s secret manager.
+## Features
 
-Cloud scope and release limitations are documented in [backend/README.md](backend/README.md). A passing local test suite does not prove a production deployment, native release, database migration, or recovery procedure.
+- **Home dashboard:** liquid funds, spendable cash, account summaries, upcoming items, recent activity, and spending trends.
+- **Transactions:** record income, expenses, and transfers; review history; search and filter activity.
+- **Accounts:** track cash, bank, savings, and mobile-wallet accounts with account-level history.
+- **Budgets and savings:** plan monthly category limits, track savings goals, and set an emergency-fund target.
+- **Recurring, bills, and debt:** keep schedules and obligations visible, then record confirmed payments when they happen.
+- **Assets and net worth:** track assets, investments, liabilities, and balances across supported currencies.
+- **Projects:** organize event and group finances with budgets, contributions, pooled funds, expense splits, settlements, and reports. Shared collaboration requires the configured cloud services.
+- **Insights:** review income versus spending and category-level activity over a selected period.
+- **Optional AI:** consent-gated assistance can use the existing Hono gateway. Provider credentials are handled by the server and are not bundled in the app.
+- **Privacy and security:** local financial data uses encrypted SQLite; secure device storage protects local keys. Authentication, backups, and biometric unlock are available where configured and supported.
+
+## How data is stored
+
+The app is local-first. Core financial records are stored in an on-device SQLite database protected with SQLCipher. Amounts use integer minor units, and different currencies remain separate unless a conversion is explicitly implemented. See [Financial model](docs/financial-model.md) for balance and ledger rules.
+
+Cloud features are optional integrations. Authentication, supported synchronization, shared Projects, and AI require the existing Neon services and/or the Hono API to be configured and reachable. The mobile app does not include a database administrator credential or AI provider key. Read [Environment and security](docs/environment-and-security.md) and [the backend guide](backend/README.md) before configuring cloud services.
+
+The repository includes the API implementation; a deployment is needed only for workflows that call it. Running `expo start` does not deploy or start the cloud backend.
 
 ## Requirements
 
-- Node.js **22.13 or newer** (Expo SDK 57’s minimum supported Node version).
-- npm, using the committed lockfile.
-- For native development builds: Android Studio/Android SDK for Android, or Xcode for iOS on macOS.
-- Expo account and EAS CLI access for hosted EAS builds.
+- Node.js **22.13 or newer**.
+- npm and the committed lockfile.
+- Android Studio and Android SDK for local Android native builds; Xcode on macOS for local iOS native builds.
+- An installed development build for native functionality. **Expo Go is not supported** because this app uses native modules and `expo-dev-client`.
 
-This app includes custom native functionality and uses `expo-dev-client`; **Expo Go is not the supported runtime**. Use an installed development build or a built app.
+The project currently uses Expo SDK 57, React Native 0.86, and React 19.2.3. See the [versioned Expo SDK 57 documentation](https://docs.expo.dev/versions/v57.0.0/) when changing Expo configuration or native dependencies.
 
-## Install and run locally
+## Run locally
 
 ```sh
 npm ci
 npx expo start
 ```
 
-Open the project in an installed development build. To compile and install a native development build locally:
+Open the Metro session in an installed Leverage development build. To compile and install a native development build locally:
 
 ```sh
 npm run android
-# or, on macOS with Xcode installed
+# On macOS with Xcode:
 npm run ios
 ```
 
-Copy `.env.example` to `.env` only when local cloud/API configuration is needed. The example includes public endpoint configuration and placeholders; it contains no database password, auth secret, or AI provider key. Local-only `.env` files are ignored by Git.
+Copy `.env.example` to `.env` only if you are configuring local cloud/API features. The example uses placeholders. Do not put secrets in `EXPO_PUBLIC_*` variables; those values are compiled into the app and visible to its users.
 
-## Backend setup
+### Optional backend
 
-The backend is optional for local-only use. Cloud authentication, cloud features, invitations, and AI require a deployed/configured API and database. For isolated local backend development:
+The app’s local-only flows do not require a backend. To run the existing API for development, use disposable services and credentials:
 
 ```sh
 cd backend
@@ -64,15 +90,9 @@ npm run prisma:generate
 npm run dev
 ```
 
-Fill `.env` with disposable development services and secrets before starting it. Apply migrations only to a reviewed disposable development database:
+Configure the local `.env` before starting the API. Review the backend documentation and migrations before applying changes to any database. Never point development builds or test accounts at production financial data.
 
-```sh
-npm run prisma:migrate:deploy
-```
-
-Production migrations require a separate review and release operation. See [backend/README.md](backend/README.md) and [AI setup notes](docs/ai-foundation.md) for server configuration, security boundaries, and current cloud limitations.
-
-## Verify source
+## Verification
 
 ```sh
 npm run typecheck
@@ -81,39 +101,35 @@ npm test
 npm run verify:source
 ```
 
-`verify:source` runs the source checks, backend checks, and an Android JavaScript bundle export. It does **not** compile or launch a native Android/iOS app, contact a production Neon database, deploy the backend, or verify an EAS release. Use disposable accounts and data for integration checks.
+These commands check source-level behavior and produce a JavaScript bundle where configured. They do not by themselves prove native runtime behavior on every device, production database security, live cross-device synchronization, a deployed backend, or a released EAS build. See the verification notes under [`docs/`](docs/README.md) for their scope and date.
 
 ## Build and release
 
-EAS profiles are defined in [`eas.json`](eas.json):
-
-| Profile | Output | Intended use |
-| --- | --- | --- |
-| `development` | Android APK, development client | Native development; uses a separate disposable Android app identity. |
-| `preview` | Android APK | Internal preview; uses a separate disposable Android app identity. |
-| `production-apk` | Android APK | Internal distribution under the normal Leverage app identity. |
-| `production` | Android App Bundle | Store distribution under the normal Leverage app identity. |
-
-Before a production build, configure the required HTTPS API and Neon endpoint values in the EAS **production** environment. Server secrets must stay in the server’s secret manager; they must not be embedded in an app build. EAS manages the app version/build number according to `appVersionSource` and profile settings.
-
-Typical manual release commands (no GitHub Actions are configured):
+Build profiles are defined in [`eas.json`](eas.json). Hosted builds require a configured Expo/EAS project and the appropriate build environment. Examples:
 
 ```sh
 eas build --profile production-apk --platform android
-# or for a store upload package
 eas build --profile production --platform android
 ```
 
-Review the build identity, app version, signing credentials, configuration, and device behavior before sharing an APK or submitting a store bundle. Create a Git tag and GitHub Release only after the build has been reviewed; attach the generated package to the release rather than committing APK/AAB files to the repository.
+The first profile is for Android APK distribution; the second produces an Android App Bundle. Review app identity, signing, versioning, environment values, privacy disclosures, and device behavior before distribution. No GitHub Actions workflow is configured. Do not commit APK, AAB, IPA, signing keys, or local build output.
 
-## Repository hygiene
+## Documentation
 
-- Keep `.env` files, signing keys, certificates, local databases, build output, and device-specific editor/MCP settings out of Git.
-- Commit `.env.example` files with placeholders only.
-- Keep `package-lock.json` and `backend/package-lock.json` in sync with their package manifests.
-- Do not commit generated APK, AAB, IPA, or native build directories.
-- GitHub Actions are intentionally not used in this repository.
+- [Documentation index](docs/README.md)
+- [Codebase guide](docs/codebase-guide.md) — startup, navigation, data flow, and folder map.
+- [Financial model](docs/financial-model.md) — ledger, balances, account movements, savings, and Projects accounting.
+- [Environment and security](docs/environment-and-security.md) — configuration, secret handling, and publication checklist.
+- [AI foundation](docs/ai-foundation.md) — consent, providers, credentials, and gateway behavior.
+- [Backend guide](backend/README.md) — API, auth, cloud boundaries, local development, and deployment notes.
+- [Android verification notes](docs/android-phase-2a-verification.md) · [Phase 2B](docs/android-phase-2b-verification.md) · [Phase 2C](docs/android-phase-2c-verification.md)
+
+## Contributing and security
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Please report vulnerabilities privately using the process in [SECURITY.md](SECURITY.md), not in a public issue.
+
+Before making this repository public, review the [security and publication checklist](docs/environment-and-security.md#repository-audit-and-release-checklist), third-party asset licenses, database policies, and Git history. The current checkout contains no live `.env` files, but historical commits include public Neon endpoint URLs; see the documented history note before changing repository visibility.
 
 ## License
 
-Leverage source code is licensed under the MIT License. See [LICENSE](LICENSE). Third-party packages, fonts, and assets may have separate terms; their notices remain with the corresponding dependency or asset.
+Leverage is licensed under the [MIT License](LICENSE). Third-party dependencies, fonts, and assets may have their own licenses and notices.

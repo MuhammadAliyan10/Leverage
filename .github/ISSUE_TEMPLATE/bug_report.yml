@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible problem in Leverage.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never include real account details, transaction history, balances, passwords, API keys, database URLs, backups, or unredacted screenshots.** Use a synthetic profile and describe the issue without personal financial data.
+  - type: input
+    id: version
+    attributes:
+      label: App version or commit
+      placeholder: 1.0.0 or a commit hash
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Android
+        - iOS
+        - Web
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the issue using fictional or redacted values.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Tap ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant redacted logs
+      description: Remove emails, identifiers, credentials, and financial data before pasting logs.
+    validations:
+      required: false

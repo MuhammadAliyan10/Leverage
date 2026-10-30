@@ -85,7 +85,7 @@ function ActivityRow({ activity, onPress }: { activity: TransactionActivity; onP
   const transfer = activity.direction === 'transfer';
   const Icon = incoming ? ArrowDownLeft : transfer ? ArrowLeftRight : ArrowUpRight;
   const amountColor = incoming ? 'text-emerald-700 dark:text-emerald-300' : transfer ? 'text-blue-700 dark:text-blue-300' : 'text-gray-900 dark:text-white';
-  const sign = incoming ? '+' : transfer ? '↔ ' : '−';
+  const sign = incoming ? '+' : transfer ? '' : '−';
   return <Pressable accessibilityRole="button" accessibilityLabel={`${activity.title}, ${activity.categoryLabel}, open transactions`} onPress={onPress} className="min-h-[68px] flex-row items-center border-b border-gray-100 py-3 last:border-b-0 dark:border-neutral-800">
     <View className={`mr-3 h-10 w-10 items-center justify-center rounded-full ${incoming ? 'bg-emerald-50 dark:bg-emerald-950' : transfer ? 'bg-blue-50 dark:bg-blue-950' : 'bg-gray-100 dark:bg-neutral-800'}`}><Icon size={19} color={incoming ? '#047857' : transfer ? '#1d4ed8' : '#6b7280'} /></View>
     <View className="mr-2 flex-1">

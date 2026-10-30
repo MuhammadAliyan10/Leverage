@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { ActivityIndicator, Modal, Pressable, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Modal, Pressable, Text, View } from 'react-native';
 import { KeyboardAwareScrollView } from '../ui/KeyboardAwareScrollView';
+import { Input } from '../ui/Input';
 import { cloudApiConfigured, cloudFetch, getCloudAuthClient } from '../../src/cloud/authClient';
 import { localDb } from '../../src/db/local/client';
 import { assessAccountReconciliation, type CloudAccountReconciliationPreview, type LocalAccountConflict } from '../../src/cloud/accountReconciliation';
@@ -193,7 +194,7 @@ export function CloudSyncModal({ visible, ownerId, fullName, onClose }: Props) {
   return <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
     <View className="flex-1 justify-end bg-black/40">
       <View className="max-h-[90%] rounded-t-3xl bg-white dark:bg-neutral-900">
-      <KeyboardAwareScrollView className="px-5 pt-5" contentContainerStyle={{ paddingBottom: 28 }} keyboardShouldPersistTaps="handled">
+      <KeyboardAwareScrollView fitContent className="px-5 pt-5" contentContainerStyle={{ paddingBottom: 28 }} keyboardShouldPersistTaps="handled">
         <View className="mb-4 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Cloud sync</Text><Pressable accessibilityRole="button" onPress={onClose}><Text className="font-body text-sm font-semibold text-primary">Close</Text></Pressable></View>
         {identity ? <>
           <Text className="font-body text-sm text-gray-800 dark:text-neutral-100">Cloud identity connected</Text>
@@ -254,10 +255,8 @@ export function CloudSyncModal({ visible, ownerId, fullName, onClose }: Props) {
           <Pressable disabled={busy} onPress={() => void disconnectSession()} className="mt-2 min-h-11 items-center justify-center border border-primary px-4"><Text className="font-body font-semibold" style={{ color: PRIMARY_COLOR }}>Sign out of cloud</Text></Pressable>
         </> : <>
           <Text className="font-body mb-4 text-xs leading-5 text-gray-500 dark:text-neutral-400">Link this profile to your cloud account. Existing supported records will be queued, and new changes will sync after they are saved here. Keep using this device until the status confirms they have synced.</Text>
-          <Text className="font-body mb-1 text-xs font-semibold text-gray-700 dark:text-neutral-200">Cloud account email</Text>
-          <TextInput accessibilityLabel="Cloud account email" autoCapitalize="none" autoComplete="email" keyboardType="email-address" value={email} onChangeText={setEmail} className="mb-3 min-h-12 border border-gray-200 px-3 text-gray-900 dark:border-neutral-700 dark:text-white" />
-          <Text className="font-body mb-1 text-xs font-semibold text-gray-700 dark:text-neutral-200">Cloud account password</Text>
-          <TextInput accessibilityLabel="Cloud account password" autoComplete="password" secureTextEntry value={password} onChangeText={setPassword} className="mb-2 min-h-12 border border-gray-200 px-3 text-gray-900 dark:border-neutral-700 dark:text-white" />
+          <Input label="Cloud account email" placeholder="you@example.com" autoCapitalize="none" autoComplete="email" keyboardType="email-address" value={email} onChangeText={setEmail} />
+          <Input label="Cloud account password" placeholder="Enter your cloud password" autoComplete="password" secureTextEntry value={password} onChangeText={setPassword} />
           {error ? <Text accessibilityRole="alert" className="font-body mt-2 text-xs leading-5 text-red-600">{error}</Text> : null}
           <Pressable disabled={busy} onPress={() => void connect(false)} className="mt-4 min-h-12 items-center justify-center bg-primary px-4">{busy ? <ActivityIndicator color="#fff" /> : <Text className="font-body font-semibold text-white">Sign in and connect</Text>}</Pressable>
           <Pressable disabled={busy} onPress={() => void connect(true)} className="mt-2 min-h-11 items-center justify-center border border-primary px-4"><Text className="font-body font-semibold" style={{ color: PRIMARY_COLOR }}>Create cloud account and connect</Text></Pressable>

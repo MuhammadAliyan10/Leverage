@@ -220,7 +220,9 @@ export function createBudgetingStore(
   const assertExistingReservationsCovered = async (db: BudgetingSql, ownerId: string, accountId: string): Promise<void> => {
     const balance = await accountBalance(db, ownerId, accountId);
     const reserved = await accountReservations(db, ownerId, accountId);
-    if (balance < reserved) throw new Error('This transaction would spend money already earmarked for a savings or emergency fund.');
+    if (balance < reserved) {
+      throw new Error('This would spend money reserved for savings. Lower the amount or release it.');
+    }
   };
 
   const insertTransfer = async (

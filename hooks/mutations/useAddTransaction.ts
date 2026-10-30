@@ -54,10 +54,10 @@ export function useAddTransaction() {
     onSuccess: async () => {
       if (!user) return;
       const refreshes = await Promise.allSettled([
-        queryClient.invalidateQueries({ queryKey: ['dashboard', 'metrics', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['dashboard', 'metrics', user.id], refetchType: 'all' }),
         queryClient.invalidateQueries({ queryKey: ['financial-report', user.id] }),
         queryClient.invalidateQueries({ queryKey: ['insights', user.id] }),
-        queryClient.invalidateQueries({ queryKey: ['transactions', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['transactions', user.id], refetchType: 'all' }),
         queryClient.invalidateQueries({ queryKey: ['accounts', user.id] }),
         queryClient.invalidateQueries({ queryKey: ['account-records', user.id] }),
         queryClient.invalidateQueries({ queryKey: ['transaction-filter-accounts', user.id] }),

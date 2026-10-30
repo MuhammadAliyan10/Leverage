@@ -15,7 +15,7 @@ import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } 
 import { useAppConfirm } from '../components/ui/useAppConfirm';
 import { useAuth } from '../src/context/AuthContext';
 import { CLASSIFICATIONS, CURRENCIES, EXPENSE_CLASSIFICATION_IDS, type CurrencyCode } from '../src/finance/domain';
-import { formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
+import { sanitizeGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
 import { useBudgeting, useBudgetingWrites } from '../hooks/queries/useBudgeting';
 
 // A budget period is a calendar date, not an instant. Formatting local parts avoids
@@ -152,7 +152,7 @@ export default function BudgetsScreen() {
       </>}
       <Text className="font-body mt-5 text-xs font-semibold text-gray-600 dark:text-neutral-300">Monthly limit · {currency}</Text>
       <View className="mt-1 flex-row items-stretch">
-        <TextInput accessibilityLabel={`${selectedCategoryId?CLASSIFICATIONS[selectedCategoryId].label:'Category'} monthly budget amount in ${currency}`} editable={!isSaving} value={budgetAmount} onChangeText={(value)=>{setBudgetAmount(formatGroupedAmountInput(value));setBudgetError('');}} placeholder={`Limit in ${currency}`} placeholderTextColor="#9ca3af" keyboardType="decimal-pad" inputMode="decimal" className="font-body min-h-12 flex-1 rounded-md border border-gray-200 bg-white px-3 py-3 text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"/>
+        <TextInput accessibilityLabel={`${selectedCategoryId?CLASSIFICATIONS[selectedCategoryId].label:'Category'} monthly budget amount in ${currency}`} editable={!isSaving} value={budgetAmount} onChangeText={(value)=>{setBudgetAmount(sanitizeGroupedAmountInput(value));setBudgetError('');}} placeholder={`Limit in ${currency}`} placeholderTextColor="#9ca3af" keyboardType="decimal-pad" inputMode="decimal" className="font-body min-h-12 flex-1 rounded-md border border-gray-200 bg-white px-3 py-3 text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white"/>
         <Pressable accessibilityRole="button" accessibilityLabel={editingCategoryId?'Save budget limit':'Set monthly budget'} accessibilityState={{disabled:isBusy||!selectedCategoryId,busy:isSaving}} disabled={isBusy||!selectedCategoryId} onPress={()=>void save()} className={`houselog-button ml-2 min-h-12 min-w-[132px] flex-row items-center justify-center px-3 ${isBusy||!selectedCategoryId?'opacity-60':''}`}>
           {isSaving?<ActivityIndicator color="#fff" className="mr-2"/>:null}
           <Text className="font-body text-center text-sm font-semibold text-white">{isSaving?'Saving…':editingCategoryId?'Save limit':'Set budget'}</Text>

@@ -2,10 +2,10 @@ import { useEffect, useRef } from 'react';
 import type { ComponentProps } from 'react';
 import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, View, type FocusEvent } from 'react-native';
 
-type Props = ComponentProps<typeof ScrollView>;
+type Props = ComponentProps<typeof ScrollView> & { fitContent?: boolean };
 
 /** Scroll form content into the area left available when the native keyboard opens. */
-export function KeyboardAwareScrollView(props: Props) {
+export function KeyboardAwareScrollView({ fitContent = false, ...props }: Props) {
   const scrollRef = useRef<ScrollView>(null);
   const focusedInputRef = useRef<number | null>(null);
 
@@ -25,10 +25,11 @@ export function KeyboardAwareScrollView(props: Props) {
   };
 
   return (
-    <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <View className="flex-1" onFocus={handleFocusCapture}>
+    <KeyboardAvoidingView className={fitContent ? undefined : 'flex-1'} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <View className={fitContent ? 'shrink' : 'flex-1'} onFocus={handleFocusCapture}>
         <ScrollView
           {...props}
+          style={fitContent ? [{ flexGrow: 0, flexShrink: 1 }, props.style] : props.style}
           ref={scrollRef}
           keyboardShouldPersistTaps={props.keyboardShouldPersistTaps ?? 'handled'}
           automaticallyAdjustKeyboardInsets={Platform.OS === 'ios' ? true : props.automaticallyAdjustKeyboardInsets}

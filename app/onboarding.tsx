@@ -11,7 +11,7 @@ import { KeyboardAwareScrollView } from '../components/ui/KeyboardAwareScrollVie
 import { Button } from '../components/ui/Button';
 import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../components/ui/badgeStyles';
 import { localDb } from '../src/db/local/client';
-import { formatGroupedAmountInput, parseMinorUnits } from '../src/finance/ledger';
+import { sanitizeGroupedAmountInput, parseMinorUnits } from '../src/finance/ledger';
 import { CURRENCIES } from '../src/finance/domain';
 import { useAuth } from '../src/context/AuthContext';
 import { onboardingSchema, type OnboardingFormData } from '../utils/validations/onboarding';
@@ -227,7 +227,7 @@ export default function OnboardingScreen() {
                     maxLength={24}
                     returnKeyType="done"
                     onBlur={onBlur}
-                    onChangeText={(text) => onChange(formatGroupedAmountInput(text))}
+                    onChangeText={(text) => onChange(sanitizeGroupedAmountInput(text))}
                     value={value}
                     error={errors.balance?.message}
                   />

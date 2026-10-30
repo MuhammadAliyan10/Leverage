@@ -15,7 +15,7 @@ import { useAccounts } from '../hooks/queries/useAccounts';
 import { useAuth } from '../src/context/AuthContext';
 import { localDb } from '../src/db/local/client';
 import { ACCOUNT_TYPES, CURRENCIES, type AccountType, type CurrencyCode } from '../src/finance/domain';
-import { formatGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
+import { sanitizeGroupedAmountInput, formatMinorUnits, formatMinorUnitsForInput, parseMinorUnits } from '../src/finance/ledger';
 
 const ACCOUNT_TYPE_COLORS: Record<AccountType, string> = {
   cash: '#2D8CFF', bank: '#635BFF', savings: '#15966A', wallet: '#14B8A6', investment: '#A855F7', other: '#F59E0B',
@@ -191,7 +191,7 @@ export default function AccountsScreen() {
         <Text className="font-body mb-2 text-sm font-semibold text-gray-600 dark:text-neutral-300">Currency</Text>
         <View className="mb-3 flex-row flex-wrap">{currencyOptions.map((code) => <Pressable key={code} disabled={busy} accessibilityRole="radio" accessibilityState={{ checked: currency === code }} onPress={() => setCurrency(code)} className={`mb-2 mr-2 rounded-full px-3 py-2 ${currency === code ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body ${currency === code ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{code}</Text></Pressable>)}</View>
         <Text className="font-body mb-1 text-sm font-semibold text-gray-600 dark:text-neutral-300">Opening balance</Text>
-        <TextInput accessibilityLabel="Opening balance" value={openingBalance} onChangeText={(value) => { setOpeningBalance(formatGroupedAmountInput(value)); setFieldErrors((errors) => ({ ...errors, openingBalance: undefined })); }} editable={!busy} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#9ca3af" inputMode="decimal" className={`font-body rounded-md border bg-white px-4 py-3 text-base text-gray-900 dark:bg-neutral-800 dark:text-white ${fieldErrors.openingBalance ? 'mb-1 border-red-500 dark:border-red-500' : 'mb-4 border-gray-200 dark:border-neutral-700'}`} />
+        <TextInput accessibilityLabel="Opening balance" value={openingBalance} onChangeText={(value) => { setOpeningBalance(sanitizeGroupedAmountInput(value)); setFieldErrors((errors) => ({ ...errors, openingBalance: undefined })); }} editable={!busy} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#9ca3af" inputMode="decimal" className={`font-body rounded-md border bg-white px-4 py-3 text-base text-gray-900 dark:bg-neutral-800 dark:text-white ${fieldErrors.openingBalance ? 'mb-1 border-red-500 dark:border-red-500' : 'mb-4 border-gray-200 dark:border-neutral-700'}`} />
         {fieldErrors.openingBalance ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" className="font-body mb-4 text-xs text-red-600 dark:text-red-400">{fieldErrors.openingBalance}</Text> : null}
       </> : null}
       {!!selected && <Text className="font-body mb-3 text-xs leading-5 text-gray-500 dark:text-neutral-400">{editConstraintsQuery.isLoading ? 'Checking account history and sync settings…' : editConstraintsQuery.isError ? 'Could not verify edit limits. Try again before changing account details.' : financialFieldsLocked ? 'You can’t change the starting balance or currency after transactions exist or cloud sync is connected.' : 'After you record a transaction, the starting balance and currency stay fixed to protect the account history.'}</Text>}
