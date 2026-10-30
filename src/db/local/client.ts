@@ -46,7 +46,7 @@ import { getLocalAuthFailureMessage, LOCAL_PROFILE_NOT_FOUND_MESSAGE } from '../
 import { activeCloudUser, assertCloudAccountType, countLocalFinancialRecords, deferPendingCloudMutations, enqueueCloudMutation, nextCloudAccountRevision, normalizeSavingsEventReferences, releasePendingCloudMutations, retryEligibleRejectedCloudChanges, validateCloudChangePage, wakeSync, type OutboxMutation, type CloudAccountPayload, type CloudTransactionPayload } from './syncOutbox';
 import { executeSyncDiagnosticSql } from './syncSqliteDiagnostics';
 import { markTransactionCloudConfirmed } from './transactionSyncMetadata';
-import { authTraceEvent, authTraceOperation, getActiveAuthTraceId } from '../../security/authDiagnostics';
+import { authTraceOperation, getActiveAuthTraceId } from '../../security/authDiagnostics';
 import { createProjectsStore, type ProjectSql } from './projectsStore';
 
 type SqlExecutor = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getFirstAsync' | 'getAllAsync' | 'prepareAsync'>;

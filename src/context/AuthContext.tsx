@@ -183,9 +183,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => setSyncWakeHandler(null);
   }, [syncAndRefreshLocalQueries]);
 
+  const signedInProfileId = session.status === 'signedIn' ? session.user.id : null;
   useEffect(() => {
-    if (session.status !== 'signedIn' || !profileSettings.appLockEnabled) return;
-    const profileId = session.user.id;
+    if (!signedInProfileId || !profileSettings.appLockEnabled) return;
+    const profileId = signedInProfileId;
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'inactive' || state === 'background') {
         void appSettings.setLastBackgroundAt(profileId, Date.now()).catch(() => undefined);
@@ -194,7 +195,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     });
     return () => subscription.remove();
-  }, [session.status, session.status === 'signedIn' ? session.user.id : null, profileSettings.appLockEnabled]);
+  }, [signedInProfileId, profileSettings.appLockEnabled]);
 
   const cloudSyncOwnerId = session.status === 'signedIn' ? session.user.id : null;
   useEffect(() => {

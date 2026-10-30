@@ -1,6 +1,6 @@
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 import React, { useEffect, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Eye, EyeOff, Fingerprint, LockKeyhole } from 'lucide-react-native';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
@@ -48,47 +48,49 @@ export function LockScreen({ onUnlockPassword, onUnlockBiometric, checkBiometric
   };
 
   return (
-    <KeyboardAwareScrollView className="absolute inset-0 z-50 flex-1 bg-[#f8f9fc] dark:bg-neutral-950" contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
-      <View className="w-full max-w-[420px] rounded-md bg-white p-6 dark:bg-neutral-900">
-        <View className="mb-5 h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-          <LockKeyhole size={27} color={PRIMARY_COLOR} />
+    <View pointerEvents="auto" style={[StyleSheet.absoluteFill, { zIndex: 9999, elevation: 9999 }]}>
+      <KeyboardAwareScrollView className="absolute inset-0 z-50 flex-1 bg-[#f8f9fc] dark:bg-neutral-950" contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
+        <View className="w-full max-w-[420px] rounded-md bg-white p-6 dark:bg-neutral-900">
+          <View className="mb-5 h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
+            <LockKeyhole size={27} color={PRIMARY_COLOR} />
+          </View>
+          <Text className="font-heading text-2xl font-bold text-gray-900 dark:text-white">Welcome back</Text>
+          <Text className="font-body mt-2 text-sm leading-5 text-gray-600 dark:text-neutral-300">
+            Unlock this local profile with its password. A saved device session alone does not open your financial data.
+          </Text>
+
+          <Controller control={control} name="password" render={({ field: { onChange, onBlur, value } }) => (
+            <Input
+              label="Profile password"
+              placeholder="Enter your password"
+              variant="pill"
+              leadingIcon={<LockKeyhole size={17} color="#7b8495" />}
+              secureTextEntry={!showPassword}
+              autoCapitalize="none"
+              autoComplete="current-password"
+              textContentType="password"
+              returnKeyType="done"
+              onBlur={onBlur}
+              onChangeText={onChange}
+              onSubmitEditing={handleSubmit(submitPassword)}
+              value={value}
+              error={errors.password?.message}
+              trailingAction={<Pressable accessibilityRole="button" accessibilityLabel={showPassword ? 'Hide password' : 'Show password'} hitSlop={10} onPress={() => setShowPassword((visible) => !visible)} className="p-1">{showPassword ? <EyeOff size={19} color="#737d8d" /> : <Eye size={19} color="#737d8d" />}</Pressable>}
+            />
+          )} />
+
+          <Button title="Unlock with password" onPress={handleSubmit(submitPassword)} isLoading={isSubmitting} accessibilityRole="button" accessibilityLabel="Unlock Leverage with profile password" />
+          {biometricAvailable ? (
+            <Pressable accessibilityRole="button" accessibilityLabel="Unlock with biometrics" disabled={biometricBusy} onPress={() => void tryBiometric()} className="mt-3 min-h-12 flex-row items-center justify-center rounded-full border border-gray-200 dark:border-neutral-700">
+              <Fingerprint size={19} color={PRIMARY_COLOR} />
+              <Text className="font-body ml-2 font-semibold text-primary">{biometricBusy ? 'Waiting for device…' : 'Use biometrics'}</Text>
+            </Pressable>
+          ) : null}
+          <Text className="font-body mt-4 text-center text-xs leading-5 text-gray-500 dark:text-neutral-400">
+            Forgotten passwords cannot currently be reset. Your local financial records remain on this device.
+          </Text>
         </View>
-        <Text className="font-heading text-2xl font-bold text-gray-900 dark:text-white">Welcome back</Text>
-        <Text className="font-body mt-2 text-sm leading-5 text-gray-600 dark:text-neutral-300">
-          Unlock this local profile with its password. A saved device session alone does not open your financial data.
-        </Text>
-
-        <Controller control={control} name="password" render={({ field: { onChange, onBlur, value } }) => (
-          <Input
-            label="Profile password"
-            placeholder="Enter your password"
-            variant="pill"
-            leadingIcon={<LockKeyhole size={17} color="#7b8495" />}
-            secureTextEntry={!showPassword}
-            autoCapitalize="none"
-            autoComplete="current-password"
-            textContentType="password"
-            returnKeyType="done"
-            onBlur={onBlur}
-            onChangeText={onChange}
-            onSubmitEditing={handleSubmit(submitPassword)}
-            value={value}
-            error={errors.password?.message}
-            trailingAction={<Pressable accessibilityRole="button" accessibilityLabel={showPassword ? 'Hide password' : 'Show password'} hitSlop={10} onPress={() => setShowPassword((visible) => !visible)} className="p-1">{showPassword ? <EyeOff size={19} color="#737d8d" /> : <Eye size={19} color="#737d8d" />}</Pressable>}
-          />
-        )} />
-
-        <Button title="Unlock with password" onPress={handleSubmit(submitPassword)} isLoading={isSubmitting} accessibilityRole="button" accessibilityLabel="Unlock Leverage with profile password" />
-        {biometricAvailable ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="Unlock with biometrics" disabled={biometricBusy} onPress={() => void tryBiometric()} className="mt-3 min-h-12 flex-row items-center justify-center rounded-full border border-gray-200 dark:border-neutral-700">
-            <Fingerprint size={19} color={PRIMARY_COLOR} />
-            <Text className="font-body ml-2 font-semibold text-primary">{biometricBusy ? 'Waiting for device…' : 'Use biometrics'}</Text>
-          </Pressable>
-        ) : null}
-        <Text className="font-body mt-4 text-center text-xs leading-5 text-gray-500 dark:text-neutral-400">
-          Forgotten passwords cannot currently be reset. Your local financial records remain on this device.
-        </Text>
-      </View>
-    </KeyboardAwareScrollView>
+      </KeyboardAwareScrollView>
+    </View>
   );
 }

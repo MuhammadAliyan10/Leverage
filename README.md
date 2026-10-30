@@ -1,56 +1,119 @@
-# Welcome to your Expo app 👋
+# Leverage
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Leverage is a local-first personal finance app for tracking day-to-day money and understanding a household’s wider financial position. It is built with Expo SDK 57, React Native, TypeScript, SQLite, and an optional Neon-backed cloud service.
 
-## Get started
+> This repository is private. The MIT license is included for the project owner’s future open-source use; review the license and third-party asset licenses before making the repository public.
 
-1. Install dependencies
+## What the app includes
 
-   ```bash
-   npm install
-   ```
+- **Dashboard:** liquid funds, cash available to spend, recent activity, upcoming commitments, and spending trends.
+- **Transactions:** income, expenses, transfers, search, filters, and transaction history.
+- **Accounts:** multiple cash, bank, and wallet balances with account activity.
+- **Budgets and savings:** monthly category budgets, savings goals, and emergency-fund tracking.
+- **Recurring, bills, and debt:** scheduled items, obligations, and repayment plans.
+- **Assets and net worth:** physical assets, investments, liabilities, and account-based position summaries.
+- **Projects:** trip and group budgets, member contributions, pooled funds, expense splits, settlements, and project reports. Shared project collaboration requires the configured cloud services.
+- **Optional AI:** the existing Hono API can provide consent-gated AI features. Provider credentials are stored encrypted by that server; the app does not bundle provider API keys.
+- **Security and recovery:** local profile protection, biometric unlock where supported, encrypted backups, and recovery flows.
 
-2. Start the app
+Financial amounts are stored as integer minor units. Currency totals remain separate; the app does not silently convert currencies. See [the financial model](docs/financial-model.md) for ledger and reporting rules.
 
-   ```bash
-   npx expo start
-   ```
+## Data and service model
 
-In the output, you'll find options to open the app in a
+The app stores local profile and financial records in on-device SQLite. Core local workflows do not require a continuously running developer server. Cloud sign-in, supported account/transaction sync, and AI gateway features require the configured Neon services and the existing Hono API to be reachable. Shared project collaboration uses authenticated Neon Data API functions and the project database migrations. These are optional app integrations, not services started by `expo start`.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+The backend is in [`backend/`](backend/README.md). It is part of this repository and is the existing API for authentication and supported cloud operations; AI routes run in the same API process. Do not put database URLs, auth secrets, or AI encryption keys in Expo `EXPO_PUBLIC_*` variables. Public endpoint origins are configuration; secret credentials belong in the server’s secret manager.
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+Cloud scope and release limitations are documented in [backend/README.md](backend/README.md). A passing local test suite does not prove a production deployment, native release, database migration, or recovery procedure.
 
-## Get a fresh project
+## Requirements
 
-When you're ready, run:
+- Node.js **22.13 or newer** (Expo SDK 57’s minimum supported Node version).
+- npm, using the committed lockfile.
+- For native development builds: Android Studio/Android SDK for Android, or Xcode for iOS on macOS.
+- Expo account and EAS CLI access for hosted EAS builds.
 
-```bash
-npm run reset-project
+This app includes custom native functionality and uses `expo-dev-client`; **Expo Go is not the supported runtime**. Use an installed development build or a built app.
+
+## Install and run locally
+
+```sh
+npm ci
+npx expo start
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Open the project in an installed development build. To compile and install a native development build locally:
 
-### Other setup steps
+```sh
+npm run android
+# or, on macOS with Xcode installed
+npm run ios
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+Copy `.env.example` to `.env` only when local cloud/API configuration is needed. The example includes public endpoint configuration and placeholders; it contains no database password, auth secret, or AI provider key. Local-only `.env` files are ignored by Git.
 
-## Learn more
+## Backend setup
 
-To learn more about developing your project with Expo, look at the following resources:
+The backend is optional for local-only use. Cloud authentication, cloud features, invitations, and AI require a deployed/configured API and database. For isolated local backend development:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```sh
+cd backend
+cp .env.example .env
+npm ci
+npm run prisma:generate
+npm run dev
+```
 
-## Join the community
+Fill `.env` with disposable development services and secrets before starting it. Apply migrations only to a reviewed disposable development database:
 
-Join our community of developers creating universal apps.
+```sh
+npm run prisma:migrate:deploy
+```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Production migrations require a separate review and release operation. See [backend/README.md](backend/README.md) and [AI setup notes](docs/ai-foundation.md) for server configuration, security boundaries, and current cloud limitations.
+
+## Verify source
+
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run verify:source
+```
+
+`verify:source` runs the source checks, backend checks, and an Android JavaScript bundle export. It does **not** compile or launch a native Android/iOS app, contact a production Neon database, deploy the backend, or verify an EAS release. Use disposable accounts and data for integration checks.
+
+## Build and release
+
+EAS profiles are defined in [`eas.json`](eas.json):
+
+| Profile | Output | Intended use |
+| --- | --- | --- |
+| `development` | Android APK, development client | Native development; uses a separate disposable Android app identity. |
+| `preview` | Android APK | Internal preview; uses a separate disposable Android app identity. |
+| `production-apk` | Android APK | Internal distribution under the normal Leverage app identity. |
+| `production` | Android App Bundle | Store distribution under the normal Leverage app identity. |
+
+Before a production build, configure the required HTTPS API and Neon endpoint values in the EAS **production** environment. Server secrets must stay in the server’s secret manager; they must not be embedded in an app build. EAS manages the app version/build number according to `appVersionSource` and profile settings.
+
+Typical manual release commands (no GitHub Actions are configured):
+
+```sh
+eas build --profile production-apk --platform android
+# or for a store upload package
+eas build --profile production --platform android
+```
+
+Review the build identity, app version, signing credentials, configuration, and device behavior before sharing an APK or submitting a store bundle. Create a Git tag and GitHub Release only after the build has been reviewed; attach the generated package to the release rather than committing APK/AAB files to the repository.
+
+## Repository hygiene
+
+- Keep `.env` files, signing keys, certificates, local databases, build output, and device-specific editor/MCP settings out of Git.
+- Commit `.env.example` files with placeholders only.
+- Keep `package-lock.json` and `backend/package-lock.json` in sync with their package manifests.
+- Do not commit generated APK, AAB, IPA, or native build directories.
+- GitHub Actions are intentionally not used in this repository.
+
+## License
+
+Leverage source code is licensed under the MIT License. See [LICENSE](LICENSE). Third-party packages, fonts, and assets may have separate terms; their notices remain with the corresponding dependency or asset.

@@ -2,6 +2,12 @@
   "name": "houselog",
   "main": "expo-router/entry",
   "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MuhammadAliyan10/HouseLog.git"
+  },
   "dependencies": {
     "@better-auth/expo": "1.7.12",
     "@expo/ui": "~57.0.25",
@@ -79,6 +85,5 @@
   },
   "engines": {
     "node": ">=22.13.0"
-  },
-  "private": true
+  }
 }

@@ -1,7 +1,7 @@
 import { PRIMARY_COLOR } from '../src/constants/themeColors';
 import React, { createContext, useContext, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, Text, View, useColorScheme as useSystemColorScheme, useWindowDimensions } from 'react-native';
-import { BottomSheetTextInput as TextInput } from '@gorhom/bottom-sheet';
+import { ActivityIndicator, Alert, Platform, Pressable, Text, TextInput, View, useColorScheme as useSystemColorScheme, useWindowDimensions } from 'react-native';
+import { BottomSheetTextInput } from '@gorhom/bottom-sheet';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
@@ -19,6 +19,7 @@ import { localDb } from '../src/db/local/client';
 import { CURRENCIES, type CurrencyCode } from '../src/finance/domain';
 import { calculateQuantityMicros, formatQuantityMicros } from '../src/finance/assetsInvestments';
 import { formatGroupedAmountInput, formatMinorUnits, parseMinorUnits } from '../src/finance/ledger';
+import { KeyboardAwareScrollView } from '../components/ui/KeyboardAwareScrollView';
 
 type Section = 'overview' | 'assets' | 'investments';
 const ASSET_CATEGORIES = [['property','Property'],['vehicle','Vehicle'],['precious_metal','Gold & precious metals'],['valuable','Valuables & equipment'],['business_equity','Private business equity'],['other','Other']] as const;
@@ -34,9 +35,10 @@ function ChoiceRow<T extends string>({ values, selected, onSelect }: { values: r
   return <View className="mb-3 flex-row flex-wrap">{values.map(([value,label])=><Pressable key={value} disabled={busy} accessibilityRole="button" accessibilityState={{selected:selected===value,disabled:busy}} onPress={()=>onSelect(value)} className={`mb-2 mr-2 rounded-full px-3 py-2 ${selected===value ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body ${selected===value ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{label}</Text></Pressable>)}</View>;
 }
 
-function Field({ label, value, onChangeText, placeholder, keyboardType='default', amount=false }: {label:string;value:string;onChangeText:(value:string)=>void;placeholder?:string;keyboardType?:'default'|'decimal-pad'|'numeric';amount?:boolean}) {
+function Field({ label, value, onChangeText, placeholder, keyboardType='default', amount=false, bottomSheet=false }: {label:string;value:string;onChangeText:(value:string)=>void;placeholder?:string;keyboardType?:'default'|'decimal-pad'|'numeric';amount?:boolean;bottomSheet?:boolean}) {
   const busy = useContext(AssetActionBusyContext);
-  return <View className="mb-3"><Text className="font-body mb-1 text-xs font-semibold text-gray-600 dark:text-neutral-300">{label}</Text><TextInput editable={!busy} value={value} onChangeText={(text) => onChangeText(amount ? formatGroupedAmountInput(text) : text)} placeholder={placeholder} placeholderTextColor="#9ca3af" keyboardType={keyboardType} className="font-body rounded-xl border border-gray-200 bg-white px-4 py-3 text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" /></View>;
+  const InputComponent = bottomSheet ? BottomSheetTextInput : TextInput;
+  return <View className="mb-3"><Text className="font-body mb-1 text-xs font-semibold text-gray-600 dark:text-neutral-300">{label}</Text><InputComponent editable={!busy} value={value} onChangeText={(text) => onChangeText(amount ? formatGroupedAmountInput(text) : text)} placeholder={placeholder} placeholderTextColor="#9ca3af" keyboardType={keyboardType} className="font-body rounded-xl border border-gray-200 bg-white px-4 py-3 text-base text-gray-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-white" /></View>;
 }
 
 const AssetActionBusyContext = createContext(false);
@@ -92,7 +94,7 @@ export default function AssetsScreen() {
   return <AssetActionBusyContext.Provider value={busy}><SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Assets & net worth" onDone={()=>router.canGoBack()?router.back():router.replace('/(tabs)')}/>
     <View className="mx-5 mt-3 mb-3 flex-row rounded-xl bg-gray-100 p-1 dark:bg-neutral-800">{([['overview','Overview'],['assets','Assets'],['investments','Investments']] as const).map(([key,label])=><Pressable key={key} accessibilityRole="tab" accessibilityState={{selected:section===key}} onPress={()=>setSection(key)} className={`flex-1 items-center rounded-lg py-2 ${section===key?'bg-white shadow-sm dark:bg-neutral-700':''}`}><Text className={["font-body", (section===key?'font-bold text-primary':'font-semibold text-gray-500 dark:text-neutral-300')].filter(Boolean).join(' ')}>{label}</Text></Pressable>)}</View>
-    {query.isLoading?<View className="flex-1 items-center justify-center"><Text className="font-body text-gray-500 dark:text-neutral-400">Loading your financial position…</Text></View>:query.isError||!data?<View className="flex-1 items-center justify-center px-6"><Text className="font-body text-center font-semibold text-gray-800 dark:text-neutral-100">Net worth could not be calculated.</Text><Pressable onPress={()=>void query.refetch()} className="houselog-button mt-4 min-h-11 px-4 py-2"><Text className="font-body text-sm font-bold text-white">Retry</Text></Pressable></View>:<ScrollView className="flex-1 px-5" contentContainerStyle={{paddingTop:16,paddingBottom:40}} keyboardShouldPersistTaps="handled">
+    {query.isLoading?<View className="flex-1 items-center justify-center"><Text className="font-body text-gray-500 dark:text-neutral-400">Loading your financial position…</Text></View>:query.isError||!data?<View className="flex-1 items-center justify-center px-6"><Text className="font-body text-center font-semibold text-gray-800 dark:text-neutral-100">Net worth could not be calculated.</Text><Pressable onPress={()=>void query.refetch()} className="houselog-button mt-4 min-h-11 px-4 py-2"><Text className="font-body text-sm font-bold text-white">Retry</Text></Pressable></View>:<KeyboardAwareScrollView className="flex-1 px-5" contentContainerStyle={{paddingTop:16,paddingBottom:40}} keyboardShouldPersistTaps="handled">
       {section==='overview'&&<>
         <SectionHeading title="Estimated net worth" description="Balances are grouped by currency. No automatic exchange conversion is used." className="mb-3" />
         {data.positions.length===0?<View className="mb-5 rounded-md border border-gray-100 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900"><Text className="font-body font-semibold text-gray-800 dark:text-neutral-100">Your financial position will appear here.</Text><Text className="font-body mt-1 text-sm text-gray-500 dark:text-neutral-400">Add assets or investments, or record your accounts and debts.</Text></View>:data.positions.map((position)=><View key={position.currency} className="mb-4 rounded-md border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900"><View className="flex-row items-start justify-between"><View><Text className="font-body text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">{position.currency} · known net worth</Text><Text className="font-heading mt-1 text-2xl font-bold text-gray-900 dark:text-white">{formatMinorUnits(position.netWorthMinor,position.currency)}</Text></View><View className={`rounded-full px-2 py-1 ${BADGE_PRIMARY}`}><Text className={`font-body text-[10px] font-semibold ${BADGE_PRIMARY_TEXT}`}>ESTIMATE</Text></View></View><View className="my-4 h-px bg-gray-100 dark:bg-neutral-800"/><View className="flex-row flex-wrap">{[['Cash',position.cashMinor,PRIMARY_COLOR],['Investments',position.investmentsMinor,'#a78bfa'],['Physical assets',position.physicalAssetsMinor,'#fbbf24'],['Owed to you',position.receivablesMinor,'#38bdf8'],['Debts',position.liabilitiesMinor===0?0:-position.liabilitiesMinor,'#ef4444']].map(([label,value,color])=><View key={String(label)} className="mb-2 w-1/2 pr-2"><View className="rounded-md bg-gray-50 px-3 py-2.5 dark:bg-neutral-800"><View className="flex-row items-center"><View style={{width:7,height:7,borderRadius:4,backgroundColor:String(color)}}/><Text className="font-body ml-1.5 text-xs text-gray-500 dark:text-neutral-400">{label}</Text></View><Text className="font-body mt-1 text-sm font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(Number(value),position.currency)}</Text></View></View>)}</View><View className="mt-2 h-2 flex-row overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="bg-primary" style={{width:`${Math.min(100,Math.max(0,position.totalAssetsMinor?position.cashMinor*100/position.totalAssetsMinor:0))}%`}}/><View className="bg-violet-400" style={{width:`${Math.min(100,Math.max(0,position.totalAssetsMinor?position.investmentsMinor*100/position.totalAssetsMinor:0))}%`}}/><View className="bg-amber-400" style={{width:`${Math.min(100,Math.max(0,position.totalAssetsMinor?position.physicalAssetsMinor*100/position.totalAssetsMinor:0))}%`}}/><View className="bg-sky-400" style={{width:`${Math.min(100,Math.max(0,position.totalAssetsMinor?position.receivablesMinor*100/position.totalAssetsMinor:0))}%`}}/></View><View className="mt-2 flex-row flex-wrap"><Legend color={PRIMARY_COLOR} label="Cash"/><Legend color="#a78bfa" label="Investments"/><Legend color="#fbbf24" label="Physical assets"/><Legend color="#38bdf8" label="Owed to you"/></View></View>)}
@@ -115,30 +117,30 @@ export default function AssetsScreen() {
           {!!selectedHolding&&<View className="mb-4 rounded-md border border-gray-100 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900"><Pressable onPress={()=>setShowHoldingHistory(!showHoldingHistory)} className="mb-2 rounded-lg bg-gray-50 px-3 py-2"><Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">{showHoldingHistory?'Hide':'View'} investment history</Text></Pressable>{showHoldingHistory&&(holdingHistory.isLoading?<Text className="font-body text-xs text-gray-500 dark:text-neutral-400">Loading history…</Text>:(holdingHistory.data??[]).map((entry)=><View key={entry.id} className="flex-row justify-between py-1"><Text className="font-body text-xs capitalize text-gray-500 dark:text-neutral-400">{entry.eventDate.slice(0,10)} · {entry.eventType}</Text><Text className="font-body text-xs font-semibold text-gray-700 dark:text-neutral-200">{entry.eventType==='split'?`${entry.splitNumerator}:${entry.splitDenominator}`:entry.eventType==='dividend'?formatMinorUnits(entry.amountMinor,selectedPortfolioRow.currency):`${formatQuantityMicros(entry.quantityMicros)} @ ${formatMinorUnits(entry.unitPriceMinor,selectedPortfolioRow.currency)} · fees ${formatMinorUnits(entry.feeMinor,selectedPortfolioRow.currency)}`}</Text></View>))}<View className="mb-2 flex-row items-center"><ClipboardPen size={18} color={PRIMARY_COLOR}/><Text className="font-body ml-2 font-bold text-gray-900 dark:text-white">Record activity</Text></View><ChoiceRow values={([['buy','Buy'],['sell','Sell'],['split','Split'],['dividend','Dividend']] as const)} selected={tradeType} onSelect={setTradeType}/>{(tradeType==='buy'||tradeType==='sell')&&<><Field label="Quantity (up to 6 decimals)" value={quantity} onChangeText={setQuantity} keyboardType="decimal-pad"/><Field label={`Unit price (${selectedPortfolioRow.currency})`} value={unitPrice} onChangeText={setUnitPrice} keyboardType="decimal-pad" amount/><Field label="Brokerage fee" value={fee} onChangeText={setFee} keyboardType="decimal-pad" amount/></>}{tradeType==='dividend'&&<Field label={`Dividend amount (${selectedPortfolioRow.currency})`} value={dividend} onChangeText={setDividend} keyboardType="decimal-pad" amount/>}{tradeType==='split'&&<View className="flex-row"><View className="mr-2 flex-1"><Field label="New shares" value={splitNumerator} onChangeText={setSplitNumerator} keyboardType="numeric"/></View><View className="ml-2 flex-1"><Field label="Old shares" value={splitDenominator} onChangeText={setSplitDenominator} keyboardType="numeric"/></View></View>}<View className="flex-row"><Action label={busy?'Saving…':'Post activity'} onPress={postEvent}/></View><View className="mt-3 border-t border-gray-100 pt-3"><Field label={`Manual market price per unit (${selectedPortfolioRow.currency})`} value={marketPrice} onChangeText={setMarketPrice} keyboardType="decimal-pad" amount/><Action label="Update market price" secondary onPress={savePrice}/></View></View>}
         </>}
       </>}
-    </ScrollView>}
+    </KeyboardAwareScrollView>}
 
     <ActionSheet visible={assetForm || portfolioForm || holdingForm} title={assetForm ? assetId ? 'Edit asset' : 'Add asset' : portfolioForm ? 'New portfolio' : 'Add holding'} onClose={() => { if (!busy) { setAssetForm(false); setPortfolioForm(false); setHoldingForm(false); } }}>
       {assetForm && <>
-        <Field label="Name" value={assetName} onChangeText={setAssetName} placeholder="e.g. Family home" />
+        <Field label="Name" value={assetName} onChangeText={setAssetName} placeholder="e.g. Family home" bottomSheet />
         {!assetId && <>
         <Text className="font-body mb-2 text-xs font-semibold text-gray-600 dark:text-neutral-300">Asset category</Text>
         <ChoiceRow values={ASSET_CATEGORIES} selected={assetCategory} onSelect={setAssetCategory} />
         <Text className="font-body mb-2 text-xs font-semibold text-gray-600 dark:text-neutral-300">Currency</Text>
         <ChoiceRow values={currencies.map((currency) => [currency, currency] as const)} selected={assetCurrency} onSelect={setAssetCurrency} />
-        <Field label="Purchase / starting value" value={purchaseValue} onChangeText={setPurchaseValue} keyboardType="decimal-pad" placeholder="0.00" amount />
+        <Field label="Purchase / starting value" value={purchaseValue} onChangeText={setPurchaseValue} keyboardType="decimal-pad" placeholder="0.00" amount bottomSheet />
         <DatePickerField label="Purchase date" value={purchaseDate} onChangeText={setPurchaseDate} />
-        <Field label="Your ownership (%)" value={ownership} onChangeText={setOwnership} keyboardType="decimal-pad" placeholder="100" />
+        <Field label="Your ownership (%)" value={ownership} onChangeText={setOwnership} keyboardType="decimal-pad" placeholder="100" bottomSheet />
         <Text className="font-body mb-2 text-xs font-semibold text-gray-600 dark:text-neutral-300">Cash funding account (leave empty for an asset you already owned)</Text>
         <ChoiceRow values={[[ '', 'Already owned / no cash entry'] as const, ...cashChoices(assetCurrency).map((item) => [item.id, `${item.name} · ${item.currency}`] as const)]} selected={assetAccount} onSelect={setAssetAccount} />
         </>}
-        <Field label="Notes" value={assetNotes} onChangeText={setAssetNotes} placeholder="Optional" />
+        <Field label="Notes" value={assetNotes} onChangeText={setAssetNotes} placeholder="Optional" bottomSheet />
         <View className="mt-1 flex-row gap-3">
           <Action label={busy ? 'Saving…' : assetId ? 'Save changes' : 'Save asset'} onPress={saveAsset} loading drawerFooter className="m-0 min-h-12 flex-1 px-3" />
           <Action label="Cancel" secondary drawerFooter onPress={() => setAssetForm(false)} className="m-0 min-h-12 flex-1 px-3" />
         </View>
       </>}
       {portfolioForm && <>
-        <Field label="Portfolio name" value={portfolioName} onChangeText={setPortfolioName} placeholder="Long-term investments" />
+        <Field label="Portfolio name" value={portfolioName} onChangeText={setPortfolioName} placeholder="Long-term investments" bottomSheet />
         <Text className="font-body mb-2 text-xs font-semibold text-gray-600 dark:text-neutral-300">Portfolio currency</Text>
         <ChoiceRow values={currencies.map((currency) => [currency, currency] as const)} selected={portfolioCurrency} onSelect={setPortfolioCurrency} />
         <Text className="font-body mb-2 text-xs font-semibold text-gray-600 dark:text-neutral-300">Cash account · same currency required</Text>
@@ -149,8 +151,8 @@ export default function AssetsScreen() {
         </View>
       </>}
       {holdingForm && <>
-        <Field label="Ticker / symbol" value={symbol} onChangeText={setSymbol} placeholder="e.g. ENGRO" />
-        <Field label="Name" value={holdingName} onChangeText={setHoldingName} />
+        <Field label="Ticker / symbol" value={symbol} onChangeText={setSymbol} placeholder="e.g. ENGRO" bottomSheet />
+        <Field label="Name" value={holdingName} onChangeText={setHoldingName} bottomSheet />
         <Text className="font-body mb-2 text-xs font-semibold text-gray-600 dark:text-neutral-300">Investment type</Text>
         <ChoiceRow values={INVESTMENT_CATEGORIES} selected={holdingCategory} onSelect={setHoldingCategory} />
         <View className="mt-1 flex-row gap-3">

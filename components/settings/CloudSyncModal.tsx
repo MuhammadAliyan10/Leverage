@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { ActivityIndicator, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Modal, Pressable, Text, TextInput, View } from 'react-native';
 import { KeyboardAwareScrollView } from '../ui/KeyboardAwareScrollView';
 import { cloudApiConfigured, cloudFetch, getCloudAuthClient } from '../../src/cloud/authClient';
 import { localDb } from '../../src/db/local/client';

@@ -5,7 +5,7 @@ import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Notifications from 'expo-notifications';
 import { useEffect, useRef } from 'react';
-import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Toast from 'react-native-toast-message';
@@ -170,14 +170,6 @@ function RootNavigator() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      {session.status === 'locked' && (
-        <LockScreen
-          onUnlockPassword={unlockWithPassword}
-          onUnlockBiometric={async () => profileSettings.biometricUnlockEnabled && (await authenticateBiometric()) && unlockAfterBiometric()}
-          checkBiometricAvailability={biometricAvailability}
-          biometricEnabled={profileSettings.biometricUnlockEnabled}
-        />
-      )}
       <Stack>
         <Stack.Screen name="(auth)" options={{ headerShown: false }} />
         <Stack.Screen name="(auth)/restore" options={{ headerShown: false }} />
@@ -187,12 +179,20 @@ function RootNavigator() {
         <Stack.Screen name="savings" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="accounts" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="account/[id]" options={{ headerShown: false }} />
-        <Stack.Screen name="obligations" options={{ headerShown: false, presentation: 'modal' }} />
+        <Stack.Screen name="obligations" options={{ headerShown: false, presentation: Platform.OS === 'android' ? 'card' : 'modal' }} />
         <Stack.Screen name="assets" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="projects/index" options={{ headerShown: false }} />
         <Stack.Screen name="projects/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="native-verification" options={{ headerShown: false, presentation: 'modal' }} />
       </Stack>
+      {session.status === 'locked' && (
+        <LockScreen
+          onUnlockPassword={unlockWithPassword}
+          onUnlockBiometric={async () => profileSettings.biometricUnlockEnabled && (await authenticateBiometric()) && unlockAfterBiometric()}
+          checkBiometricAvailability={biometricAvailability}
+          biometricEnabled={profileSettings.biometricUnlockEnabled}
+        />
+      )}
       <Toast />
     </GestureHandlerRootView>
   );

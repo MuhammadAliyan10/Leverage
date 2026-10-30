@@ -72,6 +72,9 @@ coverage/
 .vscode/
 .agents/
 .codex/
+.claude/
+.windsurf/
 backend/
 tests/
 docs/
+poc/

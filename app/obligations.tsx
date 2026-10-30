@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import * as Crypto from 'expo-crypto';
-import { Pressable, ScrollView, Text, View } from 'react-native';
-import { BottomSheetTextInput as TextInput } from '@gorhom/bottom-sheet';
+import { Pressable, Text, TextInput, View } from 'react-native';
+import { BottomSheetTextInput } from '@gorhom/bottom-sheet';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { DoneHeader } from '../components/ui/DoneHeader';
@@ -18,6 +18,7 @@ import { formatGroupedAmountInput, formatMinorUnits, parseMinorUnits } from '../
 import type { RecurrenceFrequency } from '../src/finance/recurrence';
 import { calculateDebtPositions } from '../src/finance/debtPosition';
 import { cancelBillReminder, scheduleBillReminder } from '../src/security/localReminders';
+import { KeyboardAwareScrollView } from '../components/ui/KeyboardAwareScrollView';
 
 type BillRecord = Awaited<ReturnType<typeof localDb.obligations.bills.list>>[number];
 type BillPaymentRecord = Awaited<ReturnType<typeof localDb.obligations.bills.history>>[number];
@@ -42,9 +43,10 @@ function Choice({ label, selected, onPress }: {label:string;selected:boolean;onP
   const busy = useContext(ObligationBusyContext);
   return <Pressable disabled={busy} accessibilityRole="button" accessibilityState={{ selected, disabled: busy, busy }} onPress={onPress} className={`mr-2 mt-2 rounded-full px-3 py-2 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL} ${busy ? 'opacity-60' : ''}`}><Text className={`font-body text-xs ${selected ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{label}</Text></Pressable>;
 }
-function Field({ value, onChangeText, placeholder, numeric = false, amount = false }: {value:string;onChangeText:(value:string)=>void;placeholder:string;numeric?:boolean;amount?:boolean}) {
+function Field({ value, onChangeText, placeholder, numeric = false, amount = false, bottomSheet = true }: {value:string;onChangeText:(value:string)=>void;placeholder:string;numeric?:boolean;amount?:boolean;bottomSheet?:boolean}) {
   const busy = useContext(ObligationBusyContext);
-  return <View className="mt-2"><Text className="font-body mb-1 text-xs font-semibold text-gray-600 dark:text-neutral-300">{placeholder}</Text><TextInput editable={!busy} accessibilityLabel={placeholder} value={value} onChangeText={(text) => onChangeText(amount ? formatGroupedAmountInput(text) : text)} placeholder={placeholder} keyboardType={numeric?'decimal-pad':'default'} inputMode={numeric?'decimal':'text'} className="font-body rounded-xl bg-gray-100 px-3 py-3 text-gray-900 dark:bg-neutral-800 dark:text-white" /></View>;
+  const InputComponent = bottomSheet ? BottomSheetTextInput : TextInput;
+  return <View className="mt-2"><Text className="font-body mb-1 text-xs font-semibold text-gray-600 dark:text-neutral-300">{placeholder}</Text><InputComponent editable={!busy} accessibilityLabel={placeholder} value={value} onChangeText={(text) => onChangeText(amount ? formatGroupedAmountInput(text) : text)} placeholder={placeholder} keyboardType={numeric?'decimal-pad':'default'} inputMode={numeric?'decimal':'text'} className="font-body rounded-xl bg-gray-100 px-3 py-3 text-gray-900 dark:bg-neutral-800 dark:text-white" /></View>;
 }
 function Card({ title, children }: {title:string;children:React.ReactNode}) {
   return <View className="mb-4 rounded-md border border-gray-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900"><SectionHeading title={title} size="compact" className="mb-3"/>{children}</View>;
@@ -226,7 +228,7 @@ export default function ObligationsScreen() {
 
   return <ObligationBusyContext.Provider value={busy}><SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
     <DoneHeader title="Recurring & Debt" onDone={closeObligations} />
-    <ScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{paddingBottom:32}}>
+    <KeyboardAwareScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{paddingBottom:32}}>
       {query.isLoading||accountQuery.isLoading?<Text className="font-body py-4 text-gray-500">Loading obligations…</Text>:null}
       {!!feedback?<Text accessibilityRole={feedback.error?'alert':'text'} accessibilityLiveRegion="polite" className={`font-body mb-3 rounded-xl p-3 text-sm ${feedback.error?'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-200':'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-200'}`}>{feedback.message}</Text>:null}
       {query.isError?<View className="mb-3 rounded-xl bg-red-50 p-3 dark:bg-red-950"><Text className="font-body text-sm text-red-700 dark:text-red-200">{query.error.message}</Text><Pressable accessibilityRole="button" onPress={()=>void query.refetch()} className="mt-2 self-start"><Text className="font-body font-semibold text-primary">Try again</Text></Pressable></View>:null}
@@ -285,7 +287,7 @@ export default function ObligationsScreen() {
         <Text className="font-body mt-2 text-xs text-gray-500">Money you borrow adds to what you owe. Money you lend adds to what others owe you. Neither counts as income or spending.</Text>
       </Card>
       <Card title="Repayment schedules · planned only">
-        <Field value={scheduleCount} onChangeText={setScheduleCount} placeholder={`Number of ${repaymentFrequency} installments`} numeric/>
+        <Field value={scheduleCount} onChangeText={setScheduleCount} placeholder={`Number of ${repaymentFrequency} installments`} numeric bottomSheet={false}/>
         <DatePickerField label="First due date" value={repaymentStart} onChangeText={setRepaymentStart}/>
         <View className="flex-row flex-wrap"><Choice label="Monthly" selected={repaymentFrequency==='monthly'} onPress={()=>setRepaymentFrequency('monthly')}/><Choice label="Yearly" selected={repaymentFrequency==='yearly'} onPress={()=>setRepaymentFrequency('yearly')}/></View>
         <View className="flex-row flex-wrap"><Choice label="No interest" selected={scheduleMethod==='none'} onPress={()=>setScheduleMethod('none')}/><Choice label="Fixed interest" selected={scheduleMethod==='fixed'} onPress={()=>setScheduleMethod('fixed')}/><Choice label="Declining balance" selected={scheduleMethod==='declining'} onPress={()=>setScheduleMethod('declining')}/></View>
@@ -293,7 +295,7 @@ export default function ObligationsScreen() {
         {query.data?.repaymentSchedules.map((schedule)=><View key={schedule.id} className="mt-3 rounded-md bg-gray-50 p-3 dark:bg-neutral-800"><Text className="font-body font-semibold text-gray-900 dark:text-white">{schedule.counterparty} · {schedule.status} · {schedule.frequency}</Text>{schedule.installments.slice(0,12).map((installment)=><Text key={installment.sequence} className="font-body mt-1 text-xs text-gray-600 dark:text-neutral-300">{installment.dueDate} · {installment.status} · principal {formatMinorUnits(installment.principalMinor,schedule.currency)} + interest {formatMinorUnits(installment.interestMinor,schedule.currency)} · remaining {formatMinorUnits(installment.remainingPrincipalMinor,schedule.currency)}</Text>)}{schedule.status==='active'?<Choice label="Cancel plan" selected={false} onPress={()=>void run(()=>localDb.obligations.debts.cancelRepaymentSchedule(user!.id,schedule.id),'Repayment plan cancelled. Posted history is unchanged.')}/>:null}</View>)}
       </Card>
       {accounts.length===0?<Text className="font-body mb-3 text-amber-700">Create an account before recording scheduled cash movements or debts.</Text>:null}
-    </ScrollView>
+    </KeyboardAwareScrollView>
     <ActionSheet visible={activeRecurringDrawer!==null} title={recurringDrawerTitle} onClose={()=>setActiveRecurringDrawer(null)}>
       {!!feedback?<Text accessibilityRole={feedback.error?'alert':'text'} accessibilityLiveRegion="polite" className={`font-body mb-3 rounded-xl p-3 text-sm ${feedback.error?'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-200':'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-200'}`}>{feedback.message}</Text>:null}
       {activeRecurringDrawer==='subscription'?<>
