@@ -25,11 +25,11 @@ export interface OutboxMutation {
   cloudUserId: string;
   entityType: 'account' | 'transaction' | 'budget' | 'savings_goal' | 'savings_goal_event' | 'emergency_config' | 'emergency_event' | 'recurring_schedule' | 'schedule_occurrence'
     | 'bill' | 'bill_payment' | 'bill_payment_correction' | 'debt' | 'debt_event' | 'debt_interest_event' | 'debt_event_correction' | 'debt_repayment_schedule'
-    | 'asset' | 'asset_valuation' | 'asset_activity' | 'investment_portfolio' | 'investment_holding' | 'investment_event' | 'investment_price';
+    | 'asset' | 'asset_valuation' | 'asset_activity' | 'investment_portfolio' | 'investment_holding' | 'investment_event' | 'investment_price' | 'project';
   entityId: string;
   operation: 'account.create' | 'account.update' | 'account.archive' | 'transaction.create' | 'budget.create' | 'budget.revise' | 'budget.archive'
     | 'saving.goal.create' | 'saving.goal.update' | 'saving.goal.event' | 'emergency.config.save' | 'emergency.event'
-    | 'recurring.schedule.create' | 'recurring.schedule.update' | 'schedule.occurrence.create' | 'schedule.occurrence.resolve' | 'domain.create' | 'domain.update';
+    | 'recurring.schedule.create' | 'recurring.schedule.update' | 'schedule.occurrence.create' | 'schedule.occurrence.resolve' | 'domain.create' | 'domain.update' | 'project.create' | 'project.mutate';
   payload: Record<string, unknown>;
   dependencyEntityId?: string | null;
   attemptCount?: number;

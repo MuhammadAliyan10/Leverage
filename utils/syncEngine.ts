@@ -103,6 +103,8 @@ async function upload(ownerId: string, cloudUserId: string, signal: AbortSignal)
       case 'schedule.occurrence.resolve': path = `/api/v1/finance/recurring-schedules/${encodeURIComponent(String(mutation.payload.scheduleId))}/occurrences/${encodeURIComponent(mutation.entityId)}`; method = 'PUT'; body = JSON.stringify(mutation.payload); break;
       case 'domain.create': path = '/api/v1/finance/domain-records'; method = 'POST'; body = JSON.stringify(mutation.payload); break;
       case 'domain.update': path = `/api/v1/finance/domain-records/${encodeURIComponent(mutation.entityId)}`; method = 'PATCH'; body = JSON.stringify(mutation.payload); break;
+      case 'project.create': path = '/api/v1/projects'; method = 'POST'; body = JSON.stringify(mutation.payload); break;
+      case 'project.mutate': path = `/api/v1/projects/${encodeURIComponent(mutation.entityId)}/mutations`; method = 'POST'; body = JSON.stringify(mutation.payload); break;
       default: throw new Error('The local outbox contains an unsupported operation.');
     }
     try {

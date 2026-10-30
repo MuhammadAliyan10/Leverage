@@ -1,6 +1,6 @@
 import { resolveClassification } from '../../finance/domain.ts';
 
-export const LOCAL_DATABASE_VERSION = 17;
+export const LOCAL_DATABASE_VERSION = 18;
 
 export interface MigrationDatabase {
   execAsync(source: string): Promise<void>;
@@ -1845,6 +1845,7 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
     if (currentVersion < 15) await migrateOnboardingRequirementV15(database);
     if (currentVersion < 16) await migrateProjectsV16(database);
     if (currentVersion < 17) await migrateProjectsV17(database);
+    if (currentVersion < 18) await migrateSharedProjectSyncV18(database);
     // No server acknowledgement can be verified for the legacy sync flags.
     await database.execAsync('UPDATE Account SET synced = 0 WHERE synced != 0');
     await database.execAsync('UPDATE "Transaction" SET synced = 0 WHERE synced != 0');
@@ -1863,6 +1864,50 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
     }
     await database.execAsync(`PRAGMA user_version = ${LOCAL_DATABASE_VERSION}`);
   });
+}
+
+/** Adds project mutations to the durable outbox without changing queued history. */
+async function migrateSharedProjectSyncV18(database: MigrationDatabase): Promise<void> {
+  await database.execAsync(`
+    PRAGMA legacy_alter_table=ON;
+    ALTER TABLE CloudEntityMap RENAME TO CloudEntityMap_v17;
+    CREATE TABLE CloudEntityMap (
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget','savings_goal','savings_goal_event','emergency_config','emergency_event','recurring_schedule','schedule_occurrence','bill','bill_payment','bill_payment_correction','debt','debt_event','debt_interest_event','debt_event_correction','debt_repayment_schedule','asset','asset_valuation','asset_activity','investment_portfolio','investment_holding','investment_event','investment_price','project')),
+      localId TEXT NOT NULL, cloudId TEXT NOT NULL, serverRevision INTEGER,
+      PRIMARY KEY(ownerId,entityType,localId), UNIQUE(ownerId,entityType,cloudId)
+    );
+    INSERT INTO CloudEntityMap SELECT * FROM CloudEntityMap_v17;
+    DROP TABLE CloudEntityMap_v17;
+    DROP INDEX IF EXISTS SyncOutbox_ready_idx;
+    DROP INDEX IF EXISTS SyncOutbox_entity_idx;
+    ALTER TABLE SyncOutbox RENAME TO SyncOutbox_v17;
+    CREATE TABLE SyncOutbox (
+      mutationId TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      cloudUserId TEXT NOT NULL,
+      entityType TEXT NOT NULL CHECK(entityType IN ('account','transaction','budget','savings_goal','savings_goal_event','emergency_config','emergency_event','recurring_schedule','schedule_occurrence','bill','bill_payment','bill_payment_correction','debt','debt_event','debt_interest_event','debt_event_correction','debt_repayment_schedule','asset','asset_valuation','asset_activity','investment_portfolio','investment_holding','investment_event','investment_price','project')),
+      entityId TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('account.create','account.update','account.archive','transaction.create','budget.create','budget.revise','budget.archive','saving.goal.create','saving.goal.update','saving.goal.event','emergency.config.save','emergency.event','recurring.schedule.create','recurring.schedule.update','schedule.occurrence.create','schedule.occurrence.resolve','domain.create','domain.update','project.create','project.mutate')),
+      payloadVersion INTEGER NOT NULL CHECK(payloadVersion=1), payloadJson TEXT NOT NULL CHECK(json_valid(payloadJson)),
+      dependencyEntityId TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','in_flight','confirmed','rejected')),
+      attemptCount INTEGER NOT NULL DEFAULT 0 CHECK(attemptCount>=0 AND attemptCount<=20), nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+      leaseUntil TEXT, lastErrorCategory TEXT, serverAckJson TEXT CHECK(serverAckJson IS NULL OR json_valid(serverAckJson)),
+      createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, UNIQUE(ownerId,mutationId)
+    );
+    INSERT INTO SyncOutbox SELECT * FROM SyncOutbox_v17;
+    DROP TABLE SyncOutbox_v17;
+    CREATE INDEX SyncOutbox_ready_idx ON SyncOutbox(ownerId,status,nextAttemptAt,createdAt,mutationId);
+    CREATE INDEX SyncOutbox_entity_idx ON SyncOutbox(ownerId,entityType,entityId,createdAt);
+    DROP TRIGGER IF EXISTS SyncOutbox_immutable_confirmed;
+    CREATE TRIGGER SyncOutbox_immutable_confirmed BEFORE UPDATE ON SyncOutbox WHEN OLD.status='confirmed' AND (
+      NEW.mutationId IS NOT OLD.mutationId OR NEW.ownerId IS NOT OLD.ownerId OR NEW.cloudUserId IS NOT OLD.cloudUserId OR
+      NEW.entityType IS NOT OLD.entityType OR NEW.entityId IS NOT OLD.entityId OR NEW.operation IS NOT OLD.operation OR
+      NEW.payloadVersion IS NOT OLD.payloadVersion OR NEW.payloadJson IS NOT OLD.payloadJson OR NEW.status IS NOT OLD.status OR NEW.serverAckJson IS NOT OLD.serverAckJson
+    ) BEGIN SELECT RAISE(ABORT,'confirmed sync mutations are immutable'); END;
+    PRAGMA legacy_alter_table=OFF;
+  `);
 }
 
 /** Adds an offline project workspace without altering the existing personal ledger. */

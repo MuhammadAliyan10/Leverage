@@ -121,7 +121,7 @@ test('fresh databases receive the same schema without creating sample financial 
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM Account').get().count, 0);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM "Transaction"').get().count, 0);
   assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
-  assert.equal(LOCAL_DATABASE_VERSION, 17);
+  assert.equal(LOCAL_DATABASE_VERSION, 18);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ProfileSetup'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='AuthLoginAttempt'").get());
   assert.ok(database.prepare('PRAGMA table_info(Account)').all().some((column) => column.name === 'archivedAt'));
@@ -159,7 +159,7 @@ test('v9 to v12 cloud migrations preserve account mappings and pending queue row
   removeExtendedSyncTriggers(database);
   database.exec('PRAGMA user_version=9');
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version,17);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,18);
   assert.deepEqual({...database.prepare('SELECT cloudId,serverRevision FROM CloudEntityMap WHERE ownerId=? AND localId=?').get('v9-user','account-1')},{cloudId:'cloud-account-1',serverRevision:4});
   assert.deepEqual({...database.prepare('SELECT mutationId,entityType,operation,payloadJson,status FROM SyncOutbox WHERE mutationId=?').get('tx-pending-v9')},
     {mutationId:'tx-pending-v9',entityType:'transaction',operation:'transaction.create',payloadJson:'{"id":"tx-1"}',status:'pending'});
@@ -201,7 +201,7 @@ test('schema v4 upgrades through v5 to v6 transactionally and leaves existing fi
   removeExtendedSyncTriggers(database);
   database.exec('PRAGMA user_version=4');
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version,17);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,18);
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM User WHERE id=?').get('u').n,1);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtEventCorrection'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='DebtInterestEvent'").get());
@@ -221,7 +221,7 @@ test('a schema v5 database receives v6 asset and investment tables without chang
   removeExtendedSyncTriggers(database);
   database.exec('PRAGMA user_version=5');
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version,17);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version,18);
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM "Transaction" WHERE id=\'t\'').get().n,1);
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='InvestmentEvent'").get());
   database.close();
@@ -233,7 +233,7 @@ test('budget, goal and emergency-fund migration is repeatable and protects profi
   const adapter = migrationAdapter(database);
   await migrateLocalDatabase(adapter);
   await migrateLocalDatabase(adapter);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 17);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 18);
 
   database.prepare(`INSERT INTO Budget
     (id, ownerId, categoryId, amountMinor, currency, periodStart, periodEnd, rolloverPolicy, revision, createdAt)
@@ -407,7 +407,7 @@ test('the supported v7 to v8 upgrade preserves posted financial values and insta
   const after = database.prepare('SELECT id,ownerId,amountMinor,type,accountId,date FROM "Transaction" WHERE id=?').get('tx-1');
   assert.deepEqual([after.id,after.ownerId,after.amountMinor,after.type,after.accountId], [before.id,before.ownerId,before.amountMinor,before.type,before.accountId]);
   assert.equal(after.date, '2026-02-01T12:00:00.000Z');
-    assert.equal(database.prepare('PRAGMA user_version').get().user_version, 17);
+    assert.equal(database.prepare('PRAGMA user_version').get().user_version, 18);
   assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
   database.close();
 });

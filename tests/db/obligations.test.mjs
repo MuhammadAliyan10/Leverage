@@ -28,7 +28,7 @@ test('released migrations preserve v1-v5 paths and roll back new schema on late 
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='Asset'").get().n,0);
   adapter.getFirstAsync=get;
   await migrateLocalDatabase(adapter);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version,17);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version,18);
   db.close();
 });
 

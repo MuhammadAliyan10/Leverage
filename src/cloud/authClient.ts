@@ -204,6 +204,31 @@ export async function cloudFetch(ownerId: string, path: string, init: RequestIni
       p_expected_current_balance_minor: request.currentBalanceMinor,
       p_commit: request.commit,
     };
+  } else if (path === '/api/v1/projects' && (init.method ?? 'GET') === 'POST') {
+    const body: unknown = init.body ? JSON.parse(String(init.body)) : null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return jsonResponse(400, { error: { code: 'INVALID_PROJECT_CREATE', message: 'Project creation request is invalid.' } });
+    const request = body as Record<string, unknown>;
+    if (!request.project || typeof request.project !== 'object' || Array.isArray(request.project) || typeof request.ownerMemberId !== 'string') return jsonResponse(400, { error: { code: 'INVALID_PROJECT_CREATE', message: 'Project creation request is invalid.' } });
+    rpc = 'mizan_project_create'; payload = { p_project: request.project, p_owner_member_id: request.ownerMemberId, p_idempotency_key: headers.get('Idempotency-Key') };
+  } else if (path === '/api/v1/projects/invitations' && (init.method ?? 'GET') === 'POST') {
+    const body: unknown = init.body ? JSON.parse(String(init.body)) : null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return jsonResponse(400, { error: { code: 'INVALID_PROJECT_INVITATION', message: 'Invitation request is invalid.' } });
+    const request = body as Record<string, unknown>;
+    if (typeof request.projectId !== 'string' || typeof request.email !== 'string' || typeof request.role !== 'string' || typeof request.token !== 'string' || typeof request.memberId !== 'string') return jsonResponse(400, { error: { code: 'INVALID_PROJECT_INVITATION', message: 'Invitation request is invalid.' } });
+    rpc = 'mizan_project_invite'; payload = { p_project_id: request.projectId, p_email: request.email, p_role: request.role, p_token: request.token, p_member_id: request.memberId };
+  } else if (path === '/api/v1/projects/invitations/accept' && (init.method ?? 'GET') === 'POST') {
+    const body: unknown = init.body ? JSON.parse(String(init.body)) : null;
+    if (!body || typeof body !== 'object' || Array.isArray(body) || typeof (body as Record<string, unknown>).token !== 'string') return jsonResponse(400, { error: { code: 'INVALID_PROJECT_INVITATION', message: 'Invitation acceptance is invalid.' } });
+    rpc = 'mizan_project_accept'; payload = { p_token: (body as Record<string, unknown>).token };
+  } else if (/^\/api\/v1\/projects\/[^/]+\/mutations$/.test(path) && (init.method ?? 'GET') === 'POST') {
+    const body: unknown = init.body ? JSON.parse(String(init.body)) : null;
+    const projectId = decodeURIComponent(path.split('/')[3] ?? '');
+    if (!projectId || !body || typeof body !== 'object' || Array.isArray(body) || typeof (body as Record<string, unknown>).operation !== 'string' || !(body as Record<string, unknown>).payload || typeof (body as Record<string, unknown>).payload !== 'object') return jsonResponse(400, { error: { code: 'INVALID_PROJECT_MUTATION', message: 'Project update is invalid.' } });
+    const request = body as Record<string, unknown>;
+    rpc = 'mizan_project_apply'; payload = { p_project_id: projectId, p_operation: request.operation, p_payload: request.payload, p_idempotency_key: headers.get('Idempotency-Key') };
+  } else if (/^\/api\/v1\/projects\/[^/]+\/members\/[^/]+$/.test(path) && (init.method ?? 'GET') === 'DELETE') {
+    const segments = path.split('/').map(decodeURIComponent);
+    rpc = 'mizan_project_remove_member'; payload = { p_project_id: segments[3], p_member_id: segments[5] };
   } else {
     const mutation = mutationFor(path, init.method ?? 'GET');
     if (!mutation) return jsonResponse(404, { error: { code: 'UNSUPPORTED_CLOUD_OPERATION', message: 'This cloud operation is not supported.' } });

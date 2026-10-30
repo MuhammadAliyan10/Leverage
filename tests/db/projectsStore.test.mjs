@@ -105,11 +105,38 @@ test('group-fund contributions are capital, while fund spending reduces cash onc
     assert.equal(project.remainingBudgetMinor,4_000_000);
     assert.deepEqual(Object.fromEntries((await store.contributionTotals('owner','trip')).map(({memberId,amountMinor})=>[memberId,amountMinor])),{ali:3_000_000,ahmed:4_000_000,usman:2_000_000});
     assert.deepEqual((await adapter.getAllAsync('SELECT amountMinor FROM ProjectExpenseShare WHERE expenseId=? ORDER BY rowid',['hotel'])).map((row)=>row.amountMinor),[666_666,666_666,666_668]);
-    assert.deepEqual((await store.memberBalances('owner','trip')).map(({balanceMinor})=>balanceMinor),[0,0,0]);
+    const ownership=await store.memberBalances('owner','trip');
+    assert.deepEqual(Object.fromEntries(ownership.map(({memberId,balanceMinor})=>[memberId,balanceMinor])),{ahmed:3_333_334,ali:2_333_334,usman:1_333_332});
+    assert.equal(ownership.reduce((total,{balanceMinor})=>total+balanceMinor,0),(await store.get('owner','trip')).fundBalanceMinor);
     await store.addRefund({id:'refund',idempotencyKey:'refund-key',ownerId:'owner',projectId:'trip',expenseId:'hotel',amountMinor:10_000,currency:'PKR',occurredAt:'2026-10-03T12:00:00.000Z'});
     assert.equal((await store.get('owner','trip')).refundMinor,10_000);
     assert.equal((await store.get('owner','trip')).fundBalanceMinor,7_010_000);
+    const refundedOwnership=await store.memberBalances('owner','trip');
+    assert.equal(refundedOwnership.reduce((total,{balanceMinor})=>total+balanceMinor,0),7_010_000);
+    await assert.rejects(store.addCashEvent({id:'excess-withdrawal',idempotencyKey:'excess-withdrawal-key',ownerId:'owner',projectId:'trip',memberId:'ahmed',eventType:'withdrawal',amountMinor:4_000_000,currency:'PKR',occurredAt:'2026-10-04T00:00:00.000Z'}),/remaining project-fund ownership/);
+    await store.addCashEvent({id:'member-withdrawal',idempotencyKey:'member-withdrawal-key',ownerId:'owner',projectId:'trip',memberId:'ali',eventType:'withdrawal',amountMinor:1_000_000,currency:'PKR',occurredAt:'2026-10-04T00:00:00.000Z'});
+    const afterWithdrawal=await store.memberBalances('owner','trip');
+    assert.equal(afterWithdrawal.find(({memberId})=>memberId==='ali')?.balanceMinor,1_336_668);
+    assert.equal(afterWithdrawal.reduce((total,{balanceMinor})=>total+balanceMinor,0),(await store.get('owner','trip')).fundBalanceMinor);
     await assert.rejects(store.addRefund({id:'over-refund',idempotencyKey:'over-refund-key',ownerId:'owner',projectId:'trip',expenseId:'hotel',amountMinor:2_000_000,currency:'PKR',occurredAt:'2026-10-03T12:00:00.000Z'}),/cannot exceed/);
     await assert.rejects(store.addExpense({id:'too-much',ownerId:'owner',projectId:'trip',amountMinor:8_000_000,currency:'PKR',occurredAt:'2026-10-03T12:00:00.000Z',category:'Travel',description:'Excessive',payerMemberId:'ali',fundingSource:'group_fund',splitMethod:'equal',participants:[{memberId:'ali'}],recordedByMemberId:'ali'}),/not have enough recorded balance/);
+  }finally{database.close();}
+});
+
+test('project creation and offline financial actions enqueue idempotent shareable mutations without personal ledger references',async()=>{
+  const {database,adapter}=setup();
+  try{
+    await migrateLocalDatabase(adapter);
+    const members=await seedUser(adapter);const queued=[];
+    const store=createProjectsStore(adapter,async(work)=>{let result;await adapter.withTransactionAsync(async()=>{result=await work(adapter);});return result;},undefined,undefined,undefined,async(_sql,input)=>queued.push(structuredClone(input)));
+    await store.create({id:'offline-trip',ownerId:'owner',name:'Offline trip',kind:'shared',currency:'PKR',startDate:'2026-10-01',budgetMinor:600_000,members});
+    await store.addCashEvent({id:'offline-cash',idempotencyKey:'offline-cash-key',ownerId:'owner',projectId:'offline-trip',memberId:'ali',eventType:'contribution',amountMinor:300_000,currency:'PKR',occurredAt:'2026-10-01T00:00:00.000Z'});
+    await store.addExpense({id:'offline-hotel',ownerId:'owner',projectId:'offline-trip',amountMinor:90_000,currency:'PKR',occurredAt:'2026-10-02T00:00:00.000Z',category:'Stay',description:'Hotel',payerMemberId:'ali',fundingSource:'group_fund',splitMethod:'equal',participants:members.map(({id})=>({memberId:id})),recordedByMemberId:'ali'});
+    assert.deepEqual(queued.map(({operation})=>operation),['project.create','project.mutate','project.mutate','project.mutate','project.mutate']);
+    const expenseMutation=queued.find((entry)=>entry.payload.operation==='project.expense');
+    assert.equal(expenseMutation.payload.payload.shares.reduce((sum,share)=>sum+Number(share.amountMinor),0),90_000);
+    assert.equal('accountId' in expenseMutation.payload.payload,false);
+    assert.equal('transactionId' in expenseMutation.payload.payload,false);
+    assert.equal(queued.filter((entry)=>entry.operation==='project.mutate').every((entry)=>entry.projectId==='offline-trip'),true);
   }finally{database.close();}
 });

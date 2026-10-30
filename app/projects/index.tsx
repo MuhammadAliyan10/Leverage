@@ -1,6 +1,6 @@
 import * as Crypto from 'expo-crypto';
 import { useFocusEffect, useRouter, type Href } from 'expo-router';
-import { Plus, FolderKanban, ArrowRight, X } from 'lucide-react-native';
+import { Plus, FolderKanban, ArrowRight, ArrowLeft, X } from 'lucide-react-native';
 import { useCallback, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -50,7 +50,7 @@ export default function ProjectsScreen() {
   };
 
   return <SafeAreaView edges={['left','right','bottom']} className="flex-1 bg-gray-50 dark:bg-neutral-950">
-    <GlobalHeader title="Projects" description="Keep each activity's money in one place" onRightPress={()=>setShowCreate(true)} RightIcon={<Plus size={21} color="#635bff"/>} rightActionLabel="Create project" />
+    <GlobalHeader title="Projects" description="Keep each activity's money in one place" onLeftPress={()=>router.canGoBack()?router.back():router.replace('/(tabs)')} LeftIcon={<ArrowLeft size={20} color="#635bff"/>} leftActionLabel="Back to home" onRightPress={()=>setShowCreate(true)} RightIcon={<Plus size={21} color="#635bff"/>} rightActionLabel="Create project" />
     <ScrollView contentContainerStyle={{padding:20,paddingBottom:36}}>
       <View className="mb-4 rounded-md border border-violet-100 bg-violet-50 p-4 dark:border-violet-900 dark:bg-violet-950/30">
         <Text className="font-body text-sm font-bold text-gray-900 dark:text-white">A clear view of each project</Text>

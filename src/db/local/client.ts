@@ -642,10 +642,17 @@ async function postProjectAccountRefund(sql:ProjectSql,input:{ownerId:string;ref
   return transactionId;
 }
 
+const queueProjectCloudMutation = async(sql:ProjectSql,input:{ownerId:string;projectId:string;mutationId:string;operation:string;payload:Record<string,unknown>}):Promise<void>=>{
+  const executor=sql as SqlExecutor;
+  const cloudUserId=await activeCloudUser(executor,input.ownerId);
+  if(!cloudUserId)return;
+  await enqueueCloudMutation(executor,{mutationId:input.mutationId,ownerId:input.ownerId,cloudUserId,entityType:'project',entityId:input.projectId,operation:input.operation as OutboxMutation['operation'],payload:input.payload});
+  setTimeout(()=>wakeSync(input.ownerId),0);
+};
 const projectsStore = createProjectsStore(projectDb, async (work) => {
   const database = await getDb();
   return withLocalWrite(database, (transaction) => work(transaction));
-},postProjectAccountExpense,wakeSync,postProjectAccountRefund);
+},postProjectAccountExpense,wakeSync,postProjectAccountRefund,queueProjectCloudMutation);
 
 export const localDb = {
   projects: projectsStore,
@@ -799,12 +806,46 @@ export const localDb = {
             }
           }
         }
+        // Projects already present when a profile first links to Neon are
+        // imported through the same ordered, idempotent project mutation queue.
+        const projects=await transaction.getAllAsync<{id:string;name:string;description:string;kind:string;currency:string;startDate:string;endDate:string|null;budgetMinor:number|null;status:string}>('SELECT id,name,description,kind,currency,startDate,endDate,budgetMinor,status FROM Project WHERE ownerId=? ORDER BY createdAt,id',[ownerId]);
+        let importedProjectRecords=0;
+        for(const project of projects){
+          const mapped=await transaction.getFirstAsync<{localId:string}>("SELECT localId FROM CloudEntityMap WHERE ownerId=? AND entityType='project' AND localId=?",[ownerId,project.id]);
+          const pending=await transaction.getFirstAsync<{mutationId:string}>("SELECT mutationId FROM SyncOutbox WHERE ownerId=? AND entityType='project' AND entityId=? AND operation='project.create' AND status IN ('pending','in_flight','confirmed') LIMIT 1",[ownerId,project.id]);
+          if(mapped||pending)continue;
+          if(!isCurrencyCode(project.currency)||!['personal','shared','work','custom'].includes(project.kind)||!['planned','active','completed','archived'].includes(project.status))throw new Error(`Project ${project.name} cannot be safely imported to cloud.`);
+          const members=await transaction.getAllAsync<{id:string;displayName:string;role:string;identityType:string;cloudUserId:string|null;status:string;targetContributionMinor:number|null;createdAt:string}>('SELECT id,displayName,role,identityType,cloudUserId,status,targetContributionMinor,createdAt FROM ProjectMember WHERE ownerId=? AND projectId=? ORDER BY createdAt,id',[ownerId,project.id]);
+          importedProjectRecords+=1+members.length;
+          const owner=members.find(member=>member.role==='owner'&&member.status==='active');if(!owner)throw new Error(`Project ${project.name} has no active owner participant.`);
+          await enqueueCloudMutation(transaction,{mutationId:`import.project.create:${project.id}`,ownerId,cloudUserId,entityType:'project',entityId:project.id,operation:'project.create',payload:{project:{id:project.id,name:project.name,description:project.description,kind:project.kind,currency:project.currency,startDate:project.startDate,endDate:project.endDate,budgetMinor:project.budgetMinor==null?null:String(project.budgetMinor)},ownerMemberId:owner.id},now});
+          for(const member of members.filter(candidate=>candidate.id!==owner.id&&candidate.status==='active')){
+            if(member.identityType==='registered'||member.cloudUserId)continue;
+            await enqueueCloudMutation(transaction,{mutationId:`import.project.member:${member.id}`,ownerId,cloudUserId,entityType:'project',entityId:project.id,operation:'project.mutate',payload:{operation:'project.member.add',payload:{id:`import.project.member:${member.id}`,memberId:member.id,displayName:member.displayName,role:member.role,targetContributionMinor:member.targetContributionMinor==null?null:String(member.targetContributionMinor)}},now});
+          }
+          const cash=await transaction.getAllAsync<{id:string;memberId:string|null;eventType:string;amountMinor:number;currency:string;occurredAt:string;note:string;createdAt:string}>('SELECT id,memberId,eventType,amountMinor,currency,occurredAt,note,createdAt FROM ProjectCashEvent WHERE ownerId=? AND projectId=? ORDER BY createdAt,id',[ownerId,project.id]);
+          importedProjectRecords+=cash.length;
+          for(const event of cash){if(!event.memberId||!['contribution','revenue','withdrawal'].includes(event.eventType))throw new Error(`Project ${project.name} contains a cash movement without an owner participant.`);await enqueueCloudMutation(transaction,{mutationId:`import.project.cash:${event.id}`,ownerId,cloudUserId,entityType:'project',entityId:project.id,operation:'project.mutate',payload:{operation:`project.${event.eventType}`,payload:{id:event.id,memberId:event.memberId,amountMinor:String(event.amountMinor),currency:event.currency,occurredAt:event.occurredAt,note:event.note}},now});}
+          const expenses=await transaction.getAllAsync<{id:string;amountMinor:number;currency:string;occurredAt:string;category:string;description:string;note:string;payerMemberId:string;fundingSource:string;splitMethod:string;recordedByMemberId:string;createdAt:string}>('SELECT id,amountMinor,currency,occurredAt,category,description,note,payerMemberId,fundingSource,splitMethod,recordedByMemberId,createdAt FROM ProjectExpense WHERE ownerId=? AND projectId=? ORDER BY createdAt,id',[ownerId,project.id]);
+          importedProjectRecords+=expenses.length;
+          for(const expense of expenses){const shares=await transaction.getAllAsync<{memberId:string;amountMinor:number}>('SELECT memberId,amountMinor FROM ProjectExpenseShare WHERE ownerId=? AND projectId=? AND expenseId=? ORDER BY rowid',[ownerId,project.id,expense.id]);importedProjectRecords+=shares.length;await enqueueCloudMutation(transaction,{mutationId:`import.project.expense:${expense.id}`,ownerId,cloudUserId,entityType:'project',entityId:project.id,operation:'project.mutate',payload:{operation:'project.expense',payload:{id:expense.id,amountMinor:String(expense.amountMinor),currency:expense.currency,occurredAt:expense.occurredAt,category:expense.category,description:expense.description,note:expense.note,payerMemberId:expense.payerMemberId,fundingSource:expense.fundingSource,splitMethod:expense.splitMethod,recordedByMemberId:expense.recordedByMemberId,splitInputs:shares.map(share=>({memberId:share.memberId,value:share.amountMinor})),shares:shares.map(share=>({memberId:share.memberId,amountMinor:String(share.amountMinor)}))}},now});}
+          const refunds=await transaction.getAllAsync<{id:string;expenseId:string;amountMinor:number;currency:string;occurredAt:string;note:string;createdAt:string}>('SELECT id,expenseId,amountMinor,currency,occurredAt,note,createdAt FROM ProjectExpenseRefund WHERE ownerId=? AND projectId=? ORDER BY createdAt,id',[ownerId,project.id]);
+          importedProjectRecords+=refunds.length;
+          for(const refund of refunds)await enqueueCloudMutation(transaction,{mutationId:`import.project.refund:${refund.id}`,ownerId,cloudUserId,entityType:'project',entityId:project.id,operation:'project.mutate',payload:{operation:'project.refund',payload:{id:refund.id,expenseId:refund.expenseId,amountMinor:String(refund.amountMinor),currency:refund.currency,occurredAt:refund.occurredAt,note:refund.note}},now});
+          const settlements=await transaction.getAllAsync<{id:string;fromMemberId:string;toMemberId:string;amountMinor:number;currency:string;occurredAt:string;note:string;createdAt:string}>('SELECT id,fromMemberId,toMemberId,amountMinor,currency,occurredAt,note,createdAt FROM ProjectSettlement WHERE ownerId=? AND projectId=? ORDER BY createdAt,id',[ownerId,project.id]);
+          importedProjectRecords+=settlements.length;
+          for(const settlement of settlements)await enqueueCloudMutation(transaction,{mutationId:`import.project.settlement:${settlement.id}`,ownerId,cloudUserId,entityType:'project',entityId:project.id,operation:'project.mutate',payload:{operation:'project.settlement',payload:{id:settlement.id,fromMemberId:settlement.fromMemberId,toMemberId:settlement.toMemberId,amountMinor:String(settlement.amountMinor),currency:settlement.currency,occurredAt:settlement.occurredAt,note:settlement.note}},now});
+          const budgets=await transaction.getAllAsync<{id:string;category:string;amountMinor:number;currency:string}>('SELECT id,category,amountMinor,currency FROM ProjectBudget WHERE ownerId=? AND projectId=? ORDER BY category',[ownerId,project.id]);
+          importedProjectRecords+=budgets.length;
+          for(const budget of budgets)await enqueueCloudMutation(transaction,{mutationId:`import.project.budget:${budget.id}:${budget.amountMinor}`,ownerId,cloudUserId,entityType:'project',entityId:project.id,operation:'project.mutate',payload:{operation:'project.budget.set',payload:{id:budget.id,category:budget.category,amountMinor:String(budget.amountMinor),currency:budget.currency}},now});
+          if(project.status==='completed'||project.status==='archived')await enqueueCloudMutation(transaction,{mutationId:`import.project.status:${project.id}`,ownerId,cloudUserId,entityType:'project',entityId:project.id,operation:'project.mutate',payload:{operation:project.status==='completed'?'project.complete':'project.archive',payload:{id:`import.project.status:${project.id}`}},now});
+        }
         const total = await countLocalFinancialRecords(transaction, ownerId);
         const correctionLinks = await transaction.getFirstAsync<{count:number}>(`SELECT
           (SELECT COUNT(*) FROM BillPaymentCorrectionReplacement r JOIN BillPaymentCorrection c ON c.id=r.correctionId WHERE c.ownerId=?) +
           (SELECT COUNT(*) FROM DebtEventCorrectionReplacement r JOIN DebtEventCorrection c ON c.id=r.correctionId WHERE c.ownerId=?) AS count`,[ownerId,ownerId]);
         const importedCore = accounts.length + entries.length;
-        return { unsupportedRecords: Math.max(0, total - importedCore - importedScheduleRecords - importedOccurrenceRecords - importedDomainRecords - (correctionLinks?.count ?? 0)) };
+        return { unsupportedRecords: Math.max(0, total - importedCore - importedScheduleRecords - importedOccurrenceRecords - importedDomainRecords - importedProjectRecords - (correctionLinks?.count ?? 0)) };
       });
       wakeSync(ownerId);
       return result;
@@ -945,16 +986,24 @@ export const localDb = {
           FROM SyncOutbox WHERE ownerId=? AND cloudUserId=? AND status='pending' AND nextAttemptAt<=? AND attemptCount<20
           ORDER BY CASE
             WHEN operation='account.create' THEN 0
-            WHEN operation IN ('budget.create','saving.goal.create','emergency.config.save') THEN 1
+            WHEN operation='project.create' THEN 1
+            WHEN operation IN ('budget.create','saving.goal.create','emergency.config.save') THEN 2
             WHEN operation='recurring.schedule.create' AND json_extract(payloadJson,'$.scheduleType')!='bill' THEN 1
-            WHEN operation='transaction.create' AND json_extract(payloadJson,'$.correctionOfId') IS NULL AND json_extract(payloadJson,'$.type') NOT IN ('refund','reversal') THEN 2
-            WHEN operation='transaction.create' AND json_extract(payloadJson,'$.correctionOfId') IS NULL THEN 3
-            WHEN operation='domain.create' AND entityType IN ('bill','debt','asset','investment_portfolio') THEN 4
-            WHEN operation='recurring.schedule.create' THEN 5
-            WHEN operation='transaction.create' THEN 5
-            WHEN operation='domain.create' AND entityType IN ('bill_payment','debt_event','debt_interest_event','debt_repayment_schedule','asset_valuation','asset_activity','investment_holding') THEN 6
-            WHEN operation='domain.create' THEN 7 WHEN operation='domain.update' THEN 8
-            WHEN operation='schedule.occurrence.create' THEN 9 ELSE 10 END,createdAt,mutationId LIMIT 1`, [ownerId,cloudUserId,now]);
+            WHEN operation='transaction.create' AND json_extract(payloadJson,'$.correctionOfId') IS NULL AND json_extract(payloadJson,'$.type') NOT IN ('refund','reversal') THEN 3
+            WHEN operation='transaction.create' AND json_extract(payloadJson,'$.correctionOfId') IS NULL THEN 4
+            WHEN operation='domain.create' AND entityType IN ('bill','debt','asset','investment_portfolio') THEN 5
+            WHEN operation='recurring.schedule.create' THEN 6
+            WHEN operation='transaction.create' THEN 6
+            WHEN operation='domain.create' AND entityType IN ('bill_payment','debt_event','debt_interest_event','debt_repayment_schedule','asset_valuation','asset_activity','investment_holding') THEN 7
+            WHEN operation='project.mutate' AND json_extract(payloadJson,'$.operation')='project.member.add' THEN 8
+            WHEN operation='project.mutate' AND json_extract(payloadJson,'$.operation') IN ('project.contribution','project.revenue','project.withdrawal') THEN 9
+            WHEN operation='project.mutate' AND json_extract(payloadJson,'$.operation')='project.expense' THEN 10
+            WHEN operation='project.mutate' AND json_extract(payloadJson,'$.operation')='project.refund' THEN 11
+            WHEN operation='project.mutate' AND json_extract(payloadJson,'$.operation')='project.settlement' THEN 12
+            WHEN operation='project.mutate' AND json_extract(payloadJson,'$.operation')='project.budget.set' THEN 13
+            WHEN operation='project.mutate' THEN 14
+            WHEN operation='domain.create' THEN 15 WHEN operation='domain.update' THEN 16
+            WHEN operation='schedule.occurrence.create' THEN 17 ELSE 18 END,createdAt,mutationId LIMIT 1`, [ownerId,cloudUserId,now]);
         if (!row) return null;
         let payload: Record<string, unknown>;
         try { payload = JSON.parse(row.payloadJson) as Record<string, unknown>; }
@@ -1000,6 +1049,15 @@ export const localDb = {
           }
           const normalizedJson = JSON.stringify(payload);
           if (normalizedJson !== row.payloadJson) await transaction.runAsync('UPDATE SyncOutbox SET payloadJson=?,updatedAt=? WHERE mutationId=? AND ownerId=?', [normalizedJson,nowIso,row.mutationId,ownerId]);
+        }
+        if(row.operation==='project.mutate'){
+          const projectMapping=await transaction.getFirstAsync<{cloudId:string}>("SELECT cloudId FROM CloudEntityMap WHERE ownerId=? AND entityType='project' AND localId=?",[ownerId,row.entityId]);
+          if(!projectMapping){
+            const projectPending=await transaction.getFirstAsync<{mutationId:string}>("SELECT mutationId FROM SyncOutbox WHERE ownerId=? AND entityType='project' AND entityId=? AND operation='project.create' AND status IN ('pending','in_flight')",[ownerId,row.entityId]);
+            if(projectPending)return null;
+            await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',lastErrorCategory='project_dependency_missing',updatedAt=? WHERE mutationId=?",[nowIso,row.mutationId]);
+            return null;
+          }
         }
         if (row.operation === 'transaction.create') {
           const accountIds = [payload.accountId, payload.toAccountId].filter((id): id is string => typeof id === 'string');
@@ -1127,6 +1185,7 @@ export const localDb = {
         if (row.entityType === 'emergency_event') await transaction.runAsync('UPDATE EmergencyFundEvent SET synced=1 WHERE id=? AND ownerId=?', [row.entityId,ownerId]);
         if (row.entityType === 'recurring_schedule') await transaction.runAsync('UPDATE RecurringSchedule SET synced=1 WHERE id=? AND ownerId=?', [row.entityId,ownerId]);
         if (row.entityType === 'schedule_occurrence') await transaction.runAsync('UPDATE ScheduleOccurrence SET synced=1 WHERE id=? AND ownerId=?', [row.entityId,ownerId]);
+        if(row.entityType==='project'&&row.operation==='project.create') await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'project',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,row.entityId,typeof data.projectId==='string'?data.projectId:row.entityId,revision]);
       });
     },
     fail: async ({ ownerId, mutationId, category, retryAt, permanent = false, now = new Date().toISOString() }: { ownerId:string;mutationId:string;category:string;retryAt?:number;permanent?:boolean;now?:string }): Promise<void> => {
@@ -1333,6 +1392,52 @@ export const localDb = {
             else await applySql.runAsync('UPDATE ScheduleOccurrence SET status=?,transactionId=?,resolvedAt=?,synced=1 WHERE id=? AND ownerId=?',[status,transactionId,resolvedAt,id,ownerId]);
             await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'schedule_occurrence',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
             await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='schedule_occurrence' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
+          } else if(change.entityType==='project') {
+            if(!change.payload||typeof change.payload!=='object'||Array.isArray(change.payload))throw new Error('A cloud project change has an invalid payload.');
+            const outer=change.payload as Record<string,unknown>;
+            const p=(outer.project&&typeof outer.project==='object'&&!Array.isArray(outer.project)?outer.project:outer) as Record<string,unknown>;
+            const id=String(p.id??change.entityId??'');
+            const name=String(p.name??''),description=typeof p.description==='string'?p.description:'',kind=String(p.kind??'shared'),currency=String(p.currency??''),startDate=String(p.startDate??''),endDate=typeof p.endDate==='string'?p.endDate:null;
+            const budgetRaw=p.budgetMinor, budget=budgetRaw==null?null:Number(budgetRaw);
+            const status=String(p.status??'active');
+            if(!id||id!==change.entityId||!name.trim()||name.length>100||description.length>2000||!['personal','shared','work','custom'].includes(kind)||!isCurrencyCode(currency)||!/^\d{4}-\d{2}-\d{2}$/.test(startDate)||(endDate!==null&&!/^\d{4}-\d{2}-\d{2}$/.test(endDate))||(budget!==null&&(!Number.isSafeInteger(budget)||budget<0))||!['planned','active','completed','archived'].includes(status))throw new Error('A cloud project contains unsupported data.');
+            const existing=await applySql.getFirstAsync<{ownerId:string}>('SELECT ownerId FROM Project WHERE id=?',[id]);
+            if(existing&&existing.ownerId!==ownerId)throw new Error('A cloud project ID collides with another local profile.');
+            if(!existing)await applySql.runAsync('INSERT INTO Project(id,ownerId,name,description,kind,status,currency,startDate,endDate,budgetMinor,createdAt,updatedAt,archivedAt) VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?)',[id,ownerId,name,description,kind,status,currency,startDate,endDate,budget,now,now,status==='archived'?now:null]);
+            else await applySql.runAsync('UPDATE Project SET name=?,description=?,kind=?,status=?,currency=?,startDate=?,endDate=?,budgetMinor=?,updatedAt=?,archivedAt=? WHERE id=? AND ownerId=?',[name,description,kind,status,currency,startDate,endDate,budget,now,status==='archived'?now:null,id,ownerId]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'project',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
+            const ownerMemberId=typeof outer.ownerMemberId==='string'?outer.ownerMemberId:null;
+            if(ownerMemberId){const local=await applySql.getFirstAsync<{name:string}>('SELECT name FROM User WHERE id=?',[ownerId]);await applySql.runAsync("INSERT INTO ProjectMember(id,ownerId,projectId,displayName,role,identityType,cloudUserId,status,createdAt) VALUES(?,?,?,?,'owner','registered',?,'active',?) ON CONFLICT(id) DO UPDATE SET displayName=excluded.displayName,role='owner',identityType='registered',cloudUserId=excluded.cloudUserId,status='active'",[ownerMemberId,ownerId,id,local?.name??name,cloudUserId,now]);}
+          } else if(change.entityType==='project_member') {
+            if(!change.payload||typeof change.payload!=='object'||Array.isArray(change.payload))throw new Error('A cloud project-member change has an invalid payload.');
+            const p=change.payload as Record<string,unknown>,projectId=String(p.projectId??''),id=String(p.memberId??'');
+            const role=String(p.role??''),status=String(p.status??'');
+            if(!projectId||!id||!['owner','editor','viewer'].includes(role)||!['active','removed'].includes(status)||typeof p.displayName!=='string'||!p.displayName.trim()||p.displayName.length>100)throw new Error('A cloud project member contains unsupported data.');
+            const project=await applySql.getFirstAsync<{id:string}>('SELECT id FROM Project WHERE id=? AND ownerId=?',[projectId,ownerId]);if(!project)throw new Error('A project member arrived before its project.');
+            const target=p.targetContributionMinor==null?null:Number(p.targetContributionMinor);if(target!==null&&(!Number.isSafeInteger(target)||target<0))throw new Error('A cloud member contribution target is invalid.');
+            await applySql.runAsync("INSERT INTO ProjectMember(id,ownerId,projectId,displayName,role,identityType,cloudUserId,status,createdAt,targetContributionMinor) VALUES(?,?,?,?,?,'registered',?,?,?,?) ON CONFLICT(id) DO UPDATE SET displayName=excluded.displayName,role=excluded.role,identityType='registered',cloudUserId=excluded.cloudUserId,status=excluded.status,targetContributionMinor=excluded.targetContributionMinor WHERE ProjectMember.ownerId=excluded.ownerId AND ProjectMember.projectId=excluded.projectId",[id,ownerId,projectId,p.displayName,role,typeof p.userId==='string'?p.userId:null,status,now,target]);
+          } else if(change.entityType==='project_event') {
+            if(!change.payload||typeof change.payload!=='object'||Array.isArray(change.payload))throw new Error('A cloud project event has an invalid payload.');
+            const outer=change.payload as Record<string,unknown>, p=(outer.payload&&typeof outer.payload==='object'&&!Array.isArray(outer.payload)?outer.payload:{}) as Record<string,unknown>;
+            const projectId=String(outer.projectId??''),id=String(outer.id??change.entityId??''),kind=String(outer.kind??'');
+            const project=await applySql.getFirstAsync<{currency:string}>('SELECT currency FROM Project WHERE id=? AND ownerId=?',[projectId,ownerId]);if(!project)throw new Error('A project event arrived before its project.');
+            const exists=await applySql.getFirstAsync<{id:string}>('SELECT id FROM ProjectCashEvent WHERE id=? UNION SELECT id FROM ProjectExpense WHERE id=? UNION SELECT id FROM ProjectExpenseRefund WHERE id=? UNION SELECT id FROM ProjectSettlement WHERE id=?',[id,id,id,id]);
+            if(!exists){
+              if(['project.contribution','project.revenue','project.withdrawal'].includes(kind)){
+                await applySql.runAsync('INSERT INTO ProjectCashEvent(id,ownerId,projectId,memberId,eventType,amountMinor,currency,occurredAt,note,idempotencyKey,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?,?)',[id,ownerId,projectId,typeof p.memberId==='string'?p.memberId:null,kind.slice('project.'.length),Number(p.amountMinor),project.currency,String(p.occurredAt??now),String(p.note??''),String(p.idempotencyKey??id),now]);
+              }else if(kind==='project.expense'){
+                await applySql.runAsync('INSERT INTO ProjectExpense(id,ownerId,projectId,amountMinor,currency,occurredAt,category,description,note,payerMemberId,fundingSource,splitMethod,recordedByMemberId,createdAt,accountId,transactionId) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)',[id,ownerId,projectId,Number(p.amountMinor),project.currency,String(p.occurredAt),String(p.category),String(p.description),String(p.note??''),String(p.payerMemberId),String(p.fundingSource),String(p.splitMethod),String(p.recordedByMemberId??p.payerMemberId),now]);
+                if(!Array.isArray(p.shares))throw new Error('A cloud project expense has no allocations.');for(const share of p.shares){if(!share||typeof share!=='object'||Array.isArray(share))throw new Error('A cloud project allocation is invalid.');const s=share as Record<string,unknown>;await applySql.runAsync('INSERT INTO ProjectExpenseShare(expenseId,ownerId,projectId,memberId,amountMinor) VALUES(?,?,?,?,?)',[id,ownerId,projectId,String(s.memberId),Number(s.amountMinor)]);}
+              }else if(kind==='project.refund'){
+                const expense=String(p.expenseId??'');await applySql.runAsync('INSERT INTO ProjectExpenseRefund(id,ownerId,projectId,expenseId,amountMinor,currency,occurredAt,note,idempotencyKey,createdAt,transactionId) VALUES(?,?,?,?,?,?,?,?,?,?,NULL)',[id,ownerId,projectId,expense,Number(p.amountMinor),project.currency,String(p.occurredAt??now),String(p.note??''),String(p.idempotencyKey??id),now]);
+              }else if(kind==='project.settlement'){
+                await applySql.runAsync('INSERT INTO ProjectSettlement(id,ownerId,projectId,fromMemberId,toMemberId,amountMinor,currency,occurredAt,note,idempotencyKey,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?,?)',[id,ownerId,projectId,String(p.fromMemberId),String(p.toMemberId),Number(p.amountMinor),project.currency,String(p.occurredAt??now),String(p.note??''),String(p.idempotencyKey??id),now]);
+              }else if(kind==='project.budget.set'&&typeof p.category==='string'){
+                await applySql.runAsync('INSERT INTO ProjectBudget(id,ownerId,projectId,category,amountMinor,currency,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(projectId,category) DO UPDATE SET amountMinor=excluded.amountMinor,updatedAt=excluded.updatedAt WHERE ProjectBudget.ownerId=excluded.ownerId',[String(p.id??id),ownerId,projectId,p.category,Number(p.amountMinor),project.currency,now,now]);
+              }
+            }
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'project_event',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
+            await applySql.runAsync('UPDATE Project SET updatedAt=? WHERE id=? AND ownerId=?',[now,projectId,ownerId]);
           } else if (change.entityType === 'budget') {
             if (!change.payload || typeof change.payload !== 'object' || Array.isArray(change.payload)) throw new Error('A cloud budget change has an invalid payload.');
             const p = change.payload as Record<string,unknown>;
