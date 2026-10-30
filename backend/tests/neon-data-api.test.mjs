@@ -9,8 +9,8 @@ const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const db = await PGlite.create();
 await db.exec(`CREATE ROLE anonymous; CREATE ROLE authenticated; CREATE SCHEMA auth; CREATE SCHEMA neon_auth;
   CREATE FUNCTION auth.user_id() RETURNS text LANGUAGE sql STABLE AS $$ SELECT NULLIF(current_setting('test.neon_user_id',true),'') $$;
-  CREATE TABLE neon_auth."user" (id text PRIMARY KEY,email text,name text);
-  INSERT INTO neon_auth."user" VALUES ('neon-user-1','one@example.invalid','One'),('neon-user-2','two@example.invalid','Two');`);
+  CREATE TABLE neon_auth."user" (id uuid PRIMARY KEY,email text,name text);
+  INSERT INTO neon_auth."user" VALUES ('11111111-1111-4111-8111-111111111111','one@example.invalid','One'),('22222222-2222-4222-8222-222222222222','two@example.invalid','Two');`);
 const root = resolve(project, 'prisma/migrations');
 for (const folder of (await readdir(root, { withFileTypes: true })).filter((x) => x.isDirectory()).map((x) => x.name).sort()) {
   await db.exec(await readFile(resolve(root, folder, 'migration.sql'), 'utf8'));
@@ -22,7 +22,7 @@ async function rpc(operation, id, payload, key) {
 }
 
 test('Neon RPC bridge posts accounts and transactions atomically with idempotent receipts and ordered changes', async () => {
-  await db.query("SELECT set_config('test.neon_user_id','neon-user-1',false)");
+  await db.query("SELECT set_config('test.neon_user_id','11111111-1111-4111-8111-111111111111',false)");
   const accountId = '11111111-1111-4111-8111-111111111111';
   const account = { id: accountId, name: 'Main bank', type: 'bank', currency: 'PKR', openingBalanceMinor: '100000' };
   const created = await rpc('account.create', accountId, account, 'account-create-one');
@@ -43,14 +43,14 @@ test('Neon RPC bridge posts accounts and transactions atomically with idempotent
   assert.equal(changes.rows[0].result.nextCursor, '1');
   assert.equal(changes.rows[0].result.hasMore, true);
 
-  await db.query("SELECT set_config('test.neon_user_id','neon-user-2',false)");
-  const otherIdentity = (await db.query('SELECT public.mizan_sync_identity() AS result')).rows[0].result;
-  assert.equal(otherIdentity.userId, 'neon-user-2');
-  assert.equal((await db.query(`SELECT count(*)::int AS n FROM public."FinanceAccount" WHERE "userId"='neon-user-1'`)).rows[0].n, 3);
+  await db.query("SELECT set_config('test.neon_user_id','22222222-2222-4222-8222-222222222222',false)");
+  const otherIdentity = (await db.query('SELECT public.leverage_sync_identity() AS result')).rows[0].result;
+  assert.equal(otherIdentity.userId, '22222222-2222-4222-8222-222222222222');
+  assert.equal((await db.query(`SELECT count(*)::int AS n FROM public."FinanceAccount" WHERE "userId"='11111111-1111-4111-8111-111111111111'`)).rows[0].n, 3);
 });
 
 test('Neon transaction RPC preserves transfer, partial-refund, and correction constraints', async () => {
-  await db.query("SELECT set_config('test.neon_user_id','neon-user-1',false)");
+  await db.query("SELECT set_config('test.neon_user_id','11111111-1111-4111-8111-111111111111',false)");
   const accountId = '11111111-1111-4111-8111-111111111111';
   const secondId = '33333333-3333-4333-8333-333333333333';
   await rpc('account.create', secondId, { id: secondId, name: 'Savings', type: 'savings', currency: 'PKR', openingBalanceMinor: '0' }, 'account-create-two');
@@ -72,14 +72,52 @@ test('Neon transaction RPC preserves transfer, partial-refund, and correction co
   await rpc('transaction.create', replacementId, { id: replacementId, type: 'income', amountMinor: '9500', currency: 'PKR', classificationId: 'salary', categoryLabel: 'Salary', accountId, correctionOfId: incomeId, occurredAt: '2026-10-24T14:02:00.000Z', taxStatus: 'taxable' }, 'replacement-1');
 
   const sums = await db.query(`SELECT
-    (SELECT count(*)::int FROM public."FinanceTransaction" WHERE "userId"='neon-user-1' AND type='refund') AS refunds,
-    (SELECT count(*)::int FROM public."FinanceTransaction" WHERE "userId"='neon-user-1' AND type='transfer') AS transfers,
-    (SELECT count(*)::int FROM public."FinanceTransaction" WHERE "userId"='neon-user-1' AND "correctionOfId"=$1) AS replacements`, [incomeId]);
+    (SELECT count(*)::int FROM public."FinanceTransaction" WHERE "userId"='11111111-1111-4111-8111-111111111111' AND type='refund') AS refunds,
+    (SELECT count(*)::int FROM public."FinanceTransaction" WHERE "userId"='11111111-1111-4111-8111-111111111111' AND type='transfer') AS transfers,
+    (SELECT count(*)::int FROM public."FinanceTransaction" WHERE "userId"='11111111-1111-4111-8111-111111111111' AND "correctionOfId"=$1) AS replacements`, [incomeId]);
   assert.deepEqual(sums.rows[0], { refunds: 2, transfers: 1, replacements: 1 });
 });
 
+test('account reconciliation verifies the original cloud history and records only a receipt', async () => {
+  const userId = 'abababab-abab-4bab-8bab-abababababab';
+  const accountId = 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd';
+  const payload = { id: accountId, name: 'Wallet Cash', type: 'cash', currency: 'PKR', openingBalanceMinor: '170000' };
+  const mutationId = 'wallet-cash-original-mutation';
+  await db.query("SELECT set_config('test.neon_user_id',$1,false)", [userId]);
+  await db.query('INSERT INTO public."User"(id,name,email,"updatedAt") VALUES($1,$2,$3,now())', [userId,'Test user',`${userId}@example.invalid`]);
+  await db.query(`INSERT INTO public."FinanceAccount"(id,"userId",name,type,currency,"openingBalanceMinor","updatedAt")
+    VALUES($1,$2,$3,$4,$5,$6,now())`, [accountId,userId,payload.name,payload.type,payload.currency,170000]);
+  await db.query('UPDATE public."User" SET "syncRevision"=1 WHERE id=$1', [userId]);
+  await db.query(`INSERT INTO public."ChangeLog"(cursor,"userId","entityType","entityId",revision,payload)
+    VALUES(1,$1,'account',$2,1,$3::jsonb)`, [userId,accountId,JSON.stringify({ ...payload, revision:1, archivedAt:null })]);
+
+  const preview = (await db.query(`SELECT public.mizan_reconcile_account_create($1,$2,$3::jsonb,$4,false) AS result`, [accountId,mutationId,JSON.stringify(payload),'170000'])).rows[0].result;
+  assert.equal(preview.status, 'verified');
+  assert.equal(preview.eligible, true);
+  assert.equal(preview.account.openingBalanceMinor, '170000');
+  assert.equal(preview.account.currentBalanceMinor, '170000');
+  assert.deepEqual(preview.evidence, { ownerMatches:true,creationRecordMatches:true,creationRecordCount:1,receiptStatus:'missing',openingBalanceIsAccountField:true });
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM public."MutationReceipt" WHERE "userId"=$1 AND "idempotencyKey"=$2',[userId,mutationId])).rows[0].n,0);
+
+  const reconciled = (await db.query(`SELECT public.mizan_reconcile_account_create($1,$2,$3::jsonb,$4,true) AS result`, [accountId,mutationId,JSON.stringify(payload),'170000'])).rows[0].result;
+  assert.equal(reconciled.status, 'reconciled');
+  assert.equal(reconciled.ack.data.id, accountId);
+  assert.equal(reconciled.evidence.receiptStatus, 'matching');
+  const repeated = (await db.query(`SELECT public.mizan_reconcile_account_create($1,$2,$3::jsonb,$4,true) AS result`, [accountId,mutationId,JSON.stringify(payload),'170000'])).rows[0].result;
+  assert.equal(repeated.status, 'reconciled');
+  assert.deepEqual(repeated.ack, reconciled.ack);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM public."FinanceAccount" WHERE "userId"=$1 AND id=$2',[userId,accountId])).rows[0].n,1);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM public."FinanceTransaction" WHERE "userId"=$1 AND "accountId"=$2',[userId,accountId])).rows[0].n,0);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM public."MutationReceipt" WHERE "userId"=$1 AND "idempotencyKey"=$2',[userId,mutationId])).rows[0].n,1);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM public."ChangeLog" WHERE "userId"=$1 AND "entityType"=\'account\' AND "entityId"=$2',[userId,accountId])).rows[0].n,1);
+
+  const mismatch = (await db.query(`SELECT public.mizan_reconcile_account_create($1,$2,$3::jsonb,$4,true) AS result`, [accountId,mutationId,JSON.stringify({ ...payload,openingBalanceMinor:'170001' }),'170000'])).rows[0].result;
+  assert.equal(mismatch.status, 'conflict');
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM public."MutationReceipt" WHERE "userId"=$1 AND "idempotencyKey"=$2',[userId,mutationId])).rows[0].n,1);
+});
+
 test('Neon RPC persists budgets, savings, emergency funds, and recurring schedule history', async () => {
-  await db.query("SELECT set_config('test.neon_user_id','neon-user-1',false)");
+  await db.query("SELECT set_config('test.neon_user_id','11111111-1111-4111-8111-111111111111',false)");
   const accountId = '11111111-1111-4111-8111-111111111111';
   const budgetId = 'b1111111-1111-4111-8111-111111111111';
   const budget = { id: budgetId, categoryId: 'food', amountMinor: '50000', currency: 'PKR', periodStart: '2026-10-01', periodEnd: '2026-11-01', rolloverPolicy: 'reset' };
@@ -107,7 +145,7 @@ test('Neon RPC persists budgets, savings, emergency funds, and recurring schedul
   const resolved = await rpc('schedule.occurrence.resolve', occurrenceId, { id: occurrenceId, scheduleId, status: 'skipped', resolvedAt: '2026-10-24T01:00:00Z', expectedRevision: 1 }, 'occurrence-resolve');
   assert.equal(resolved.data.status, 'skipped');
 
-  const types = await db.query(`SELECT "entityType",count(*)::int AS n FROM public."ChangeLog" WHERE "userId"='neon-user-1' GROUP BY "entityType"`);
+  const types = await db.query(`SELECT "entityType",count(*)::int AS n FROM public."ChangeLog" WHERE "userId"='11111111-1111-4111-8111-111111111111' GROUP BY "entityType"`);
   const totals = Object.fromEntries(types.rows.map((row) => [row.entityType, row.n]));
   assert.equal(totals.budget, 3);
   assert.equal(totals.savings_goal, 1);
@@ -117,7 +155,7 @@ test('Neon RPC persists budgets, savings, emergency funds, and recurring schedul
 });
 
 test('Neon RPC synchronizes obligations, assets and investments with owner-scoped linked records and replay safety', async () => {
-  await db.query("SELECT set_config('test.neon_user_id','neon-user-1',false)");
+  await db.query("SELECT set_config('test.neon_user_id','11111111-1111-4111-8111-111111111111',false)");
   const accountId='11111111-1111-4111-8111-111111111111';
   const billId='e1111111-1111-4111-8111-111111111111';
   const bill={entityType:'bill',id:billId,parentType:null,parentId:null,accountId,transactionId:null,scheduleId:null,data:{id:billId,name:'Power',categoryId:'utilities',amountMinor:'5000',currency:'PKR',dueDate:'2026-11-01',accountId,status:'upcoming'}};
@@ -164,11 +202,11 @@ test('Neon RPC synchronizes obligations, assets and investments with owner-scope
   const debtEventId='efffffff-ffff-4fff-8fff-ffffffffffff';
   await rpc('domain.create',debtEventId,{entityType:'debt_event',id:debtEventId,parentType:'debt',parentId:debtId,accountId,transactionId:debtCashTx,scheduleId:null,data:{id:debtEventId,debtId,eventType:'borrow',principalMinor:'50000',interestMinor:'0',accountId,transactionId:debtCashTx,eventDate:'2026-10-24',idempotencyKey:'borrow-1'}},'debt-event-linked');
 
-  const rows=await db.query(`SELECT "entityType",count(*)::int AS n FROM public."FinanceDomainRecord" WHERE "userId"='neon-user-1' GROUP BY "entityType" ORDER BY "entityType"`);
+  const rows=await db.query(`SELECT "entityType",count(*)::int AS n FROM public."FinanceDomainRecord" WHERE "userId"='11111111-1111-4111-8111-111111111111' GROUP BY "entityType" ORDER BY "entityType"`);
   assert.deepEqual(rows.rows.map((row)=>[row.entityType,row.n]),[['asset',1],['asset_activity',1],['asset_valuation',1],['bill',1],['bill_payment',1],['debt',1],['debt_event',1],['investment_event',1],['investment_holding',1],['investment_portfolio',1]]);
-  await db.query("SELECT set_config('test.neon_user_id','neon-user-2',false)");
+  await db.query("SELECT set_config('test.neon_user_id','22222222-2222-4222-8222-222222222222',false)");
   await assert.rejects(rpc('domain.create','cross-owner',{entityType:'asset_valuation',id:'cross-owner',parentType:'asset',parentId:assetId,accountId:null,transactionId:null,scheduleId:null,data:{id:'cross-owner',assetId,valueMinor:'1',valuationDate:'2026-10-24',source:'manual',idempotencyKey:'x'}},'cross-owner-domain'),/foreign key|violates/);
-  await db.query("SELECT set_config('test.neon_user_id','neon-user-1',false)");
+  await db.query("SELECT set_config('test.neon_user_id','11111111-1111-4111-8111-111111111111',false)");
   const feed=await db.query(`SELECT public.mizan_sync_changes(0,500) AS result`);
   assert.ok(feed.rows[0].result.data.some((entry)=>entry.entityType==='bill_payment'&&entry.payload.id===paymentId));
 });

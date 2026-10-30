@@ -2,8 +2,8 @@ import { PRIMARY_COLOR } from '../../src/constants/themeColors';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useRouter } from 'expo-router';
-import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Bell, BriefcaseBusiness, Landmark, Plus, RefreshCw, Wallet } from 'lucide-react-native';
+import { useFocusEffect, useRouter, type Href } from 'expo-router';
+import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Bell, BriefcaseBusiness, FolderKanban, Landmark, Plus, RefreshCw, Wallet } from 'lucide-react-native';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
 import { SectionHeading } from '../../components/ui/SectionHeading';
 import { useDashboardMetrics, type DashboardChartPoint, type DashboardFilter } from '../../hooks/queries/useDashboardMetrics';
@@ -178,6 +178,11 @@ export default function DashboardScreen() {
   return <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
     <GlobalHeader title="Home" description="Your finances at a glance" RightIcon={<Bell size={21} color={PRIMARY_COLOR} />} onRightPress={() => router.push('/obligations')} rightActionLabel="Open upcoming obligations" />
     <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Open projects workspace" onPress={() => router.push('/projects' as Href)} className="mt-5 flex-row items-center rounded-md border border-violet-100 bg-violet-50 p-4 dark:border-violet-900 dark:bg-violet-950/40">
+          <View className="mr-3 h-10 w-10 items-center justify-center rounded-md bg-white dark:bg-neutral-900"><FolderKanban size={20} color={PRIMARY_COLOR} /></View>
+          <View className="flex-1"><Text className="font-body text-sm font-bold text-gray-900 dark:text-white">Projects</Text><Text className="font-body mt-0.5 text-xs text-gray-600 dark:text-neutral-300">Track shared and personal activity spending</Text></View>
+          <Plus size={19} color={PRIMARY_COLOR} />
+        </Pressable>
       {isFetching ? <Text accessibilityLiveRegion="polite" className="font-body mt-2 text-right text-xs text-gray-500 dark:text-neutral-400">Updating…</Text> : null}
       {isError ? <View accessibilityLiveRegion="assertive" className="mt-3 flex-row items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-900 dark:bg-amber-950">
         <Text className="font-body mr-3 flex-1 text-xs leading-4 text-amber-900 dark:text-amber-100">Could not refresh. Showing the last successful summary.</Text>

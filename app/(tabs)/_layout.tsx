@@ -1,7 +1,7 @@
 import { Tabs } from 'expo-router';
 import { Home, ListOrdered, Plus, PieChart, Settings } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
-import { Platform, Pressable, StyleSheet, View, useColorScheme as useSystemColorScheme } from 'react-native';
+import { Platform, Pressable, StatusBar, StyleSheet, View, useColorScheme as useSystemColorScheme } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '../../src/constants/theme';
 import { PRIMARY_COLOR } from '../../src/constants/themeColors';
@@ -23,6 +23,8 @@ export default function TabsLayout() {
   const tabBarSurface = isDark ? '#171717' : '#f3f2ff';
 
   return (
+    <>
+    <StatusBar backgroundColor={tabBarSurface} barStyle={isDark ? 'light-content' : 'dark-content'} />
     <Tabs
       screenListeners={{
         tabPress: () => {
@@ -132,6 +134,7 @@ export default function TabsLayout() {
         }}
       />
     </Tabs>
+    </>
   );
 }
 

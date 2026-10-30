@@ -1,4 +1,4 @@
-export const INSIGHTS_PERIODS = ['This month', 'Last month', 'Last 3 months', 'Last 6 months', 'This year', 'Custom'] as const;
+export const INSIGHTS_PERIODS = ['Last 7 days', 'This month', 'Last month', 'Last 3 months', 'Last 6 months', 'This year', 'Custom'] as const;
 export type InsightsPeriod = (typeof INSIGHTS_PERIODS)[number];
 
 export interface InsightsDateRange { start: Date; end: Date }
@@ -18,7 +18,11 @@ export function getInsightsPeriodRanges(period: InsightsPeriod, now = new Date()
   let currentStart: Date;
   let previousStart: Date;
   let previousEnd: Date;
-  if (period === 'This month') {
+  if (period === 'Last 7 days') {
+    currentStart = addCalendarDays(tomorrow, -7);
+    previousStart = addCalendarDays(currentStart, -7);
+    previousEnd = currentStart;
+  } else if (period === 'This month') {
     currentStart = monthStart(now.getFullYear(), now.getMonth());
     previousStart = addCalendarMonths(currentStart, -1);
     previousEnd = new Date(previousStart.getFullYear(), previousStart.getMonth(), Math.min(now.getDate(), new Date(previousStart.getFullYear(), previousStart.getMonth() + 1, 0).getDate()) + 1);

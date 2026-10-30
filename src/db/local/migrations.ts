@@ -1,6 +1,6 @@
 import { resolveClassification } from '../../finance/domain.ts';
 
-export const LOCAL_DATABASE_VERSION = 14;
+export const LOCAL_DATABASE_VERSION = 17;
 
 export interface MigrationDatabase {
   execAsync(source: string): Promise<void>;
@@ -1842,6 +1842,9 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
     if (currentVersion < 12) await migrateRecurringScheduleSyncV12(database);
     if (currentVersion < 13) await migrateExtendedFinanceSyncV13(database);
     if (currentVersion < 14) await migrateAccountActivityIndexesV14(database);
+    if (currentVersion < 15) await migrateOnboardingRequirementV15(database);
+    if (currentVersion < 16) await migrateProjectsV16(database);
+    if (currentVersion < 17) await migrateProjectsV17(database);
     // No server acknowledgement can be verified for the legacy sync flags.
     await database.execAsync('UPDATE Account SET synced = 0 WHERE synced != 0');
     await database.execAsync('UPDATE "Transaction" SET synced = 0 WHERE synced != 0');
@@ -1862,10 +1865,212 @@ export async function migrateLocalDatabase(database: MigrationDatabase): Promise
   });
 }
 
+/** Adds an offline project workspace without altering the existing personal ledger. */
+async function migrateProjectsV16(database: MigrationDatabase): Promise<void> {
+  await database.execAsync(`
+    CREATE TABLE IF NOT EXISTS Project (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL REFERENCES User(id) ON DELETE RESTRICT,
+      name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),
+      description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 2000),
+      kind TEXT NOT NULL CHECK(kind IN ('personal','shared','work','custom')),
+      status TEXT NOT NULL CHECK(status IN ('planned','active','completed','archived')),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      startDate TEXT NOT NULL,
+      endDate TEXT,
+      budgetMinor INTEGER CHECK(budgetMinor IS NULL OR (typeof(budgetMinor)='integer' AND budgetMinor >= 0 AND budgetMinor <= 9007199254740991)),
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      archivedAt TEXT,
+      UNIQUE(id,ownerId),
+      CHECK(endDate IS NULL OR endDate >= startDate),
+      CHECK((status='archived') = (archivedAt IS NOT NULL))
+    );
+    CREATE INDEX IF NOT EXISTS Project_owner_status_updated_idx ON Project(ownerId,status,updatedAt DESC,id);
+    CREATE TABLE IF NOT EXISTS ProjectMember (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL,
+      projectId TEXT NOT NULL,
+      displayName TEXT NOT NULL CHECK(length(trim(displayName)) BETWEEN 1 AND 100),
+      role TEXT NOT NULL CHECK(role IN ('owner','editor','viewer')),
+      identityType TEXT NOT NULL CHECK(identityType IN ('local','registered')),
+      cloudUserId TEXT,
+      status TEXT NOT NULL CHECK(status IN ('active','removed')),
+      createdAt TEXT NOT NULL,
+      FOREIGN KEY(projectId,ownerId) REFERENCES Project(id,ownerId) ON DELETE RESTRICT,
+      UNIQUE(id,projectId,ownerId),
+      CHECK((identityType='local' AND cloudUserId IS NULL) OR (identityType='registered' AND cloudUserId IS NOT NULL))
+    );
+    CREATE INDEX IF NOT EXISTS ProjectMember_project_status_idx ON ProjectMember(ownerId,projectId,status,createdAt,id);
+    CREATE TABLE IF NOT EXISTS ProjectExpense (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL,
+      projectId TEXT NOT NULL,
+      amountMinor INTEGER NOT NULL CHECK(typeof(amountMinor)='integer' AND amountMinor > 0 AND amountMinor <= 9007199254740991),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      occurredAt TEXT NOT NULL,
+      category TEXT NOT NULL CHECK(length(trim(category)) BETWEEN 1 AND 80),
+      description TEXT NOT NULL CHECK(length(trim(description)) BETWEEN 1 AND 200),
+      note TEXT NOT NULL DEFAULT '' CHECK(length(note) <= 2000),
+      payerMemberId TEXT NOT NULL,
+      fundingSource TEXT NOT NULL CHECK(fundingSource IN ('member','group_fund')),
+      splitMethod TEXT NOT NULL CHECK(splitMethod IN ('equal','percentage','fixed','weighted','individual')),
+      recordedByMemberId TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      FOREIGN KEY(projectId,ownerId) REFERENCES Project(id,ownerId) ON DELETE RESTRICT,
+      FOREIGN KEY(payerMemberId,projectId,ownerId) REFERENCES ProjectMember(id,projectId,ownerId) ON DELETE RESTRICT,
+      FOREIGN KEY(recordedByMemberId,projectId,ownerId) REFERENCES ProjectMember(id,projectId,ownerId) ON DELETE RESTRICT,
+      UNIQUE(id,projectId,ownerId)
+    );
+    CREATE INDEX IF NOT EXISTS ProjectExpense_project_date_idx ON ProjectExpense(ownerId,projectId,occurredAt DESC,id);
+    CREATE INDEX IF NOT EXISTS ProjectExpense_project_category_idx ON ProjectExpense(ownerId,projectId,category,occurredAt);
+    CREATE TABLE IF NOT EXISTS ProjectExpenseShare (
+      expenseId TEXT NOT NULL,
+      ownerId TEXT NOT NULL,
+      projectId TEXT NOT NULL,
+      memberId TEXT NOT NULL,
+      amountMinor INTEGER NOT NULL CHECK(typeof(amountMinor)='integer' AND amountMinor >= 0 AND amountMinor <= 9007199254740991),
+      PRIMARY KEY(expenseId,memberId),
+      FOREIGN KEY(expenseId,projectId,ownerId) REFERENCES ProjectExpense(id,projectId,ownerId) ON DELETE RESTRICT,
+      FOREIGN KEY(memberId,projectId,ownerId) REFERENCES ProjectMember(id,projectId,ownerId) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS ProjectExpenseShare_member_idx ON ProjectExpenseShare(ownerId,projectId,memberId,expenseId);
+    CREATE TABLE IF NOT EXISTS ProjectExpenseRefund (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL,
+      projectId TEXT NOT NULL,
+      expenseId TEXT NOT NULL,
+      amountMinor INTEGER NOT NULL CHECK(typeof(amountMinor)='integer' AND amountMinor > 0 AND amountMinor <= 9007199254740991),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      occurredAt TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '' CHECK(length(note) <= 1000),
+      idempotencyKey TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      FOREIGN KEY(projectId,ownerId) REFERENCES Project(id,ownerId) ON DELETE RESTRICT,
+      FOREIGN KEY(expenseId,projectId,ownerId) REFERENCES ProjectExpense(id,projectId,ownerId) ON DELETE RESTRICT,
+      UNIQUE(ownerId,idempotencyKey)
+    );
+    CREATE INDEX IF NOT EXISTS ProjectExpenseRefund_expense_idx ON ProjectExpenseRefund(ownerId,projectId,expenseId,occurredAt,id);
+    CREATE TABLE IF NOT EXISTS ProjectCashEvent (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL,
+      projectId TEXT NOT NULL,
+      memberId TEXT,
+      eventType TEXT NOT NULL CHECK(eventType IN ('contribution','revenue','withdrawal')),
+      amountMinor INTEGER NOT NULL CHECK(typeof(amountMinor)='integer' AND amountMinor > 0 AND amountMinor <= 9007199254740991),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      occurredAt TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '' CHECK(length(note) <= 1000),
+      idempotencyKey TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      FOREIGN KEY(projectId,ownerId) REFERENCES Project(id,ownerId) ON DELETE RESTRICT,
+      FOREIGN KEY(memberId,projectId,ownerId) REFERENCES ProjectMember(id,projectId,ownerId) ON DELETE RESTRICT,
+      UNIQUE(ownerId,idempotencyKey)
+    );
+    CREATE INDEX IF NOT EXISTS ProjectCashEvent_project_date_idx ON ProjectCashEvent(ownerId,projectId,occurredAt,id);
+    CREATE TABLE IF NOT EXISTS ProjectSettlement (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL,
+      projectId TEXT NOT NULL,
+      fromMemberId TEXT NOT NULL,
+      toMemberId TEXT NOT NULL,
+      amountMinor INTEGER NOT NULL CHECK(typeof(amountMinor)='integer' AND amountMinor > 0 AND amountMinor <= 9007199254740991),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      occurredAt TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '' CHECK(length(note) <= 1000),
+      idempotencyKey TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      FOREIGN KEY(projectId,ownerId) REFERENCES Project(id,ownerId) ON DELETE RESTRICT,
+      FOREIGN KEY(fromMemberId,projectId,ownerId) REFERENCES ProjectMember(id,projectId,ownerId) ON DELETE RESTRICT,
+      FOREIGN KEY(toMemberId,projectId,ownerId) REFERENCES ProjectMember(id,projectId,ownerId) ON DELETE RESTRICT,
+      UNIQUE(ownerId,idempotencyKey),
+      CHECK(fromMemberId <> toMemberId)
+    );
+    CREATE INDEX IF NOT EXISTS ProjectSettlement_project_date_idx ON ProjectSettlement(ownerId,projectId,occurredAt,id);
+    CREATE TABLE IF NOT EXISTS ProjectBudget (
+      id TEXT PRIMARY KEY NOT NULL,
+      ownerId TEXT NOT NULL,
+      projectId TEXT NOT NULL,
+      category TEXT,
+      amountMinor INTEGER NOT NULL CHECK(typeof(amountMinor)='integer' AND amountMinor >= 0 AND amountMinor <= 9007199254740991),
+      currency TEXT NOT NULL CHECK(currency IN ('PKR','USD','GBP','EUR','AED','SAR')),
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      FOREIGN KEY(projectId,ownerId) REFERENCES Project(id,ownerId) ON DELETE RESTRICT,
+      UNIQUE(projectId,category)
+    );
+    CREATE INDEX IF NOT EXISTS ProjectBudget_owner_project_idx ON ProjectBudget(ownerId,projectId,category);
+    CREATE TRIGGER IF NOT EXISTS ProjectExpense_append_only_update
+      BEFORE UPDATE ON ProjectExpense BEGIN SELECT RAISE(ABORT,'project expense history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectExpense_append_only_delete
+      BEFORE DELETE ON ProjectExpense BEGIN SELECT RAISE(ABORT,'project expense history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectExpenseShare_append_only_update
+      BEFORE UPDATE ON ProjectExpenseShare BEGIN SELECT RAISE(ABORT,'project expense allocation history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectExpenseShare_append_only_delete
+      BEFORE DELETE ON ProjectExpenseShare BEGIN SELECT RAISE(ABORT,'project expense allocation history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectExpenseRefund_append_only_update
+      BEFORE UPDATE ON ProjectExpenseRefund BEGIN SELECT RAISE(ABORT,'project refund history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectExpenseRefund_append_only_delete
+      BEFORE DELETE ON ProjectExpenseRefund BEGIN SELECT RAISE(ABORT,'project refund history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectCashEvent_append_only_update
+      BEFORE UPDATE ON ProjectCashEvent BEGIN SELECT RAISE(ABORT,'project cash history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectCashEvent_append_only_delete
+      BEFORE DELETE ON ProjectCashEvent BEGIN SELECT RAISE(ABORT,'project cash history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectSettlement_append_only_update
+      BEFORE UPDATE ON ProjectSettlement BEGIN SELECT RAISE(ABORT,'project settlement history is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectSettlement_append_only_delete
+      BEFORE DELETE ON ProjectSettlement BEGIN SELECT RAISE(ABORT,'project settlement history is immutable'); END;
+  `);
+}
+
+/** Adds optional participant contribution targets without rewriting existing project history. */
+async function migrateProjectsV17(database: MigrationDatabase): Promise<void> {
+  const memberColumns = await columnsFor(database, 'ProjectMember');
+  await addColumnIfMissing(database, 'ProjectMember', memberColumns, 'targetContributionMinor', 'INTEGER CHECK(targetContributionMinor IS NULL OR (typeof(targetContributionMinor)=\'integer\' AND targetContributionMinor >= 0 AND targetContributionMinor <= 9007199254740991))');
+  const expenseColumns = await columnsFor(database, 'ProjectExpense');
+  await addColumnIfMissing(database, 'ProjectExpense', expenseColumns, 'accountId', 'TEXT');
+  await addColumnIfMissing(database, 'ProjectExpense', expenseColumns, 'transactionId', 'TEXT');
+  const refundColumns = await columnsFor(database, 'ProjectExpenseRefund');
+  await addColumnIfMissing(database, 'ProjectExpenseRefund', refundColumns, 'transactionId', 'TEXT');
+  await database.execAsync(`
+    CREATE INDEX IF NOT EXISTS ProjectMember_project_target_idx ON ProjectMember(ownerId,projectId,status,targetContributionMinor);
+    CREATE UNIQUE INDEX IF NOT EXISTS ProjectExpense_transaction_unique_idx ON ProjectExpense(ownerId,transactionId) WHERE transactionId IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS ProjectExpenseRefund_transaction_unique_idx ON ProjectExpenseRefund(ownerId,transactionId) WHERE transactionId IS NOT NULL;
+    CREATE TRIGGER IF NOT EXISTS ProjectExpense_account_link_insert
+    BEFORE INSERT ON ProjectExpense
+    WHEN (NEW.accountId IS NULL) <> (NEW.transactionId IS NULL)
+      OR (NEW.transactionId IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM "Transaction" t JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId
+        WHERE t.id=NEW.transactionId AND t.ownerId=NEW.ownerId AND t.type='Expense'
+          AND t.accountId=NEW.accountId AND t.amountMinor=NEW.amountMinor AND a.currency=NEW.currency
+      ))
+    BEGIN SELECT RAISE(ABORT,'project expense account link does not match its personal transaction'); END;
+    CREATE TRIGGER IF NOT EXISTS ProjectExpenseRefund_account_link_insert
+    BEFORE INSERT ON ProjectExpenseRefund
+    WHEN (NEW.transactionId IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM ProjectExpense e JOIN "Transaction" t ON t.id=NEW.transactionId AND t.ownerId=NEW.ownerId
+      WHERE e.id=NEW.expenseId AND e.ownerId=NEW.ownerId AND e.projectId=NEW.projectId
+        AND e.transactionId IS NOT NULL AND t.type='Refund' AND t.reversalOfId=e.transactionId
+        AND t.amountMinor=NEW.amountMinor AND t.date=NEW.occurredAt AND t.accountId=e.accountId
+    ))
+    BEGIN SELECT RAISE(ABORT,'project refund account link does not match its personal refund transaction'); END;
+  `);
+}
+
 /** Adds covering indexes for account-specific transaction history and movement summaries. */
 async function migrateAccountActivityIndexesV14(database: MigrationDatabase): Promise<void> {
   await database.execAsync(`
     CREATE INDEX IF NOT EXISTS Transaction_owner_account_history_idx ON "Transaction"(ownerId,accountId,date DESC,id DESC);
     CREATE INDEX IF NOT EXISTS Transaction_owner_destination_history_idx ON "Transaction"(ownerId,toAccountId,date DESC,id DESC);
+  `);
+}
+
+/** Persist first-run onboarding only for profiles created by this app installation. */
+async function migrateOnboardingRequirementV15(database: MigrationDatabase): Promise<void> {
+  await database.execAsync(`
+    CREATE TABLE IF NOT EXISTS OnboardingRequirement (
+      ownerId TEXT PRIMARY KEY NOT NULL REFERENCES User(id) ON DELETE CASCADE,
+      requiredAt TEXT NOT NULL
+    );
   `);
 }

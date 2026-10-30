@@ -42,6 +42,19 @@ export function computeRetryDelayMs(attempt: number, random = Math.random): numb
   return Math.round(base * (0.5 + random()));
 }
 
+/** Pause the remaining profile queue after an API-wide failure; explicit manual sync releases it. */
+export async function deferPendingCloudMutations(sql: SyncSql, ownerId: string, now = Date.now(), delayMs = 24 * 60 * 60 * 1000): Promise<void> {
+  if (!ownerId.trim() || !Number.isSafeInteger(now) || now < 0 || !Number.isSafeInteger(delayMs) || delayMs < 60_000 || delayMs > 7 * 24 * 60 * 60 * 1000) {
+    throw new Error('Cloud queue pause settings are invalid.');
+  }
+  await sql.runAsync("UPDATE SyncOutbox SET nextAttemptAt=MAX(nextAttemptAt,?),updatedAt=? WHERE ownerId=? AND status='pending'", [now + delayMs,new Date(now).toISOString(),ownerId]);
+}
+
+export async function releasePendingCloudMutations(sql: SyncSql, ownerId: string, now = Date.now()): Promise<void> {
+  if (!ownerId.trim() || !Number.isSafeInteger(now) || now < 0) throw new Error('Cloud queue retry settings are invalid.');
+  await sql.runAsync("UPDATE SyncOutbox SET nextAttemptAt=0,updatedAt=? WHERE ownerId=? AND status='pending'", [new Date(now).toISOString(),ownerId]);
+}
+
 export function validateCloudChangePage(currentCursor: string, nextCursor: string, changes: readonly Record<string, unknown>[]): void {
   const validCursor = (value: string) => /^(0|[1-9]\d{0,18})$/.test(value);
   if (!validCursor(currentCursor) || !validCursor(nextCursor)) throw new Error('The cloud synchronization cursor is invalid.');
@@ -102,7 +115,15 @@ export async function countLocalFinancialRecords(sql: SyncSql, ownerId: string):
     (SELECT COUNT(*) FROM InvestmentPortfolio WHERE ownerId=?) +
     (SELECT COUNT(*) FROM InvestmentHolding WHERE ownerId=?) +
     (SELECT COUNT(*) FROM InvestmentEvent WHERE ownerId=?) +
-    (SELECT COUNT(*) FROM InvestmentPrice WHERE ownerId=?) AS count`, Array.from({ length: 26 }, () => ownerId));
+    (SELECT COUNT(*) FROM InvestmentPrice WHERE ownerId=?) +
+    (SELECT COUNT(*) FROM Project WHERE ownerId=?) +
+    (SELECT COUNT(*) FROM ProjectMember WHERE ownerId=?) +
+    (SELECT COUNT(*) FROM ProjectExpense WHERE ownerId=?) +
+    (SELECT COUNT(*) FROM ProjectExpenseShare WHERE ownerId=?) +
+    (SELECT COUNT(*) FROM ProjectExpenseRefund WHERE ownerId=?) +
+    (SELECT COUNT(*) FROM ProjectCashEvent WHERE ownerId=?) +
+    (SELECT COUNT(*) FROM ProjectSettlement WHERE ownerId=?) +
+    (SELECT COUNT(*) FROM ProjectBudget WHERE ownerId=?) AS count`, Array.from({ length: 34 }, () => ownerId));
   const count = row?.count;
   if (!Number.isSafeInteger(count) || (count as number) < 0) throw new Error('Local financial history could not be verified safely.');
   return count as number;
@@ -132,6 +153,78 @@ export async function assertCloudAccountType(sql: SyncSql, ownerId: string, type
   if (await activeCloudUser(sql, ownerId) && !['cash', 'bank', 'wallet', 'savings'].includes(type)) {
     throw new Error('This account type is not supported by cloud sync yet. It was not saved.');
   }
+}
+
+export type SavingsEventReferenceResult =
+  | { status: 'ready'; payload: Record<string, unknown> }
+  | { status: 'waiting' }
+  | { status: 'missing'; category: string };
+
+/**
+ * Resolve savings-event references from either their device ID or an already
+ * normalized cloud ID. Outbox payloads are persisted after normalization, so
+ * retries must accept both forms without changing the mutation identity.
+ */
+export async function normalizeSavingsEventReferences(
+  sql: SyncSql,
+  ownerId: string,
+  source: Record<string, unknown>,
+): Promise<SavingsEventReferenceResult> {
+  const payload = { ...source };
+  const references: { key: string; entityType: string; category: string }[] = [
+    { key: 'goalId', entityType: 'savings_goal', category: 'saving_goal_dependency_missing' },
+    { key: 'accountId', entityType: 'account', category: 'account_dependency_missing' },
+    { key: 'transactionId', entityType: 'transaction', category: 'transaction_dependency_missing' },
+    { key: 'sourceAccountId', entityType: 'account', category: 'account_dependency_missing' },
+    { key: 'destinationAccountId', entityType: 'account', category: 'account_dependency_missing' },
+  ];
+  for (const reference of references) {
+    const inputId = payload[reference.key];
+    if (inputId == null) continue;
+    if (typeof inputId !== 'string' || !inputId) return { status: 'missing', category: reference.category };
+    const mapping = await sql.getFirstAsync<{ cloudId: string }>(
+      `SELECT cloudId FROM CloudEntityMap
+       WHERE ownerId=? AND entityType=? AND (localId=? OR cloudId=?)
+       ORDER BY CASE WHEN localId=? THEN 0 ELSE 1 END LIMIT 1`,
+      [ownerId, reference.entityType, inputId, inputId, inputId],
+    );
+    if (mapping) {
+      payload[reference.key] = mapping.cloudId;
+      continue;
+    }
+    const pending = await sql.getFirstAsync<{ mutationId: string }>(
+      `SELECT mutationId FROM SyncOutbox
+       WHERE ownerId=? AND entityType=? AND entityId=? AND status IN ('pending','in_flight') LIMIT 1`,
+      [ownerId, reference.entityType, inputId],
+    );
+    if (pending) return { status: 'waiting' };
+    return { status: 'missing', category: reference.category };
+  }
+  return { status: 'ready', payload };
+}
+
+/** Retry transient failures and dependency failures only after every linked
+ * savings record has a confirmed cloud identity mapping. */
+export async function retryEligibleRejectedCloudChanges(
+  sql: SyncSql,
+  ownerId: string,
+  cloudUserId: string,
+  now = new Date().toISOString(),
+): Promise<number> {
+  const safeCategories = ['AUTH_REQUIRED','session_expired','network_or_timeout','DATABASE_UNAVAILABLE'];
+  const result = await sql.runAsync(`UPDATE SyncOutbox AS o SET status='pending',attemptCount=0,nextAttemptAt=0,leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=?
+    WHERE ownerId=? AND cloudUserId=? AND status='rejected' AND (
+      lastErrorCategory IN (${safeCategories.map(() => '?').join(',')})
+      OR (lastErrorCategory='saving_goal_dependency_missing' AND entityType='savings_goal_event' AND operation='saving.goal.event'
+        AND EXISTS (SELECT 1 FROM CloudEntityMap m WHERE m.ownerId=o.ownerId AND m.entityType='savings_goal' AND (m.localId=json_extract(o.payloadJson,'$.goalId') OR m.cloudId=json_extract(o.payloadJson,'$.goalId')))
+        AND (json_type(o.payloadJson,'$.accountId') IS NULL OR json_type(o.payloadJson,'$.accountId')='null' OR EXISTS (SELECT 1 FROM CloudEntityMap m WHERE m.ownerId=o.ownerId AND m.entityType='account' AND (m.localId=json_extract(o.payloadJson,'$.accountId') OR m.cloudId=json_extract(o.payloadJson,'$.accountId'))))
+        AND (json_type(o.payloadJson,'$.transactionId') IS NULL OR json_type(o.payloadJson,'$.transactionId')='null' OR EXISTS (SELECT 1 FROM CloudEntityMap m WHERE m.ownerId=o.ownerId AND m.entityType='transaction' AND (m.localId=json_extract(o.payloadJson,'$.transactionId') OR m.cloudId=json_extract(o.payloadJson,'$.transactionId'))))
+        AND (json_type(o.payloadJson,'$.sourceAccountId') IS NULL OR json_type(o.payloadJson,'$.sourceAccountId')='null' OR EXISTS (SELECT 1 FROM CloudEntityMap m WHERE m.ownerId=o.ownerId AND m.entityType='account' AND (m.localId=json_extract(o.payloadJson,'$.sourceAccountId') OR m.cloudId=json_extract(o.payloadJson,'$.sourceAccountId'))))
+        AND (json_type(o.payloadJson,'$.destinationAccountId') IS NULL OR json_type(o.payloadJson,'$.destinationAccountId')='null' OR EXISTS (SELECT 1 FROM CloudEntityMap m WHERE m.ownerId=o.ownerId AND m.entityType='account' AND (m.localId=json_extract(o.payloadJson,'$.destinationAccountId') OR m.cloudId=json_extract(o.payloadJson,'$.destinationAccountId'))))
+      )
+    )`, [now,ownerId,cloudUserId,...safeCategories]);
+  const changes = result && typeof result === 'object' && 'changes' in result ? Number(result.changes) : 0;
+  return Number.isSafeInteger(changes) && changes > 0 ? changes : 0;
 }
 
 export async function nextCloudAccountRevision(sql: SyncSql, ownerId: string, accountId: string): Promise<number> {

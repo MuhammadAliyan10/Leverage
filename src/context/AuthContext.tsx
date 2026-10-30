@@ -15,13 +15,27 @@ import { getLocalAuthFailureMessage } from '../security/localAuthError';
 import { cancelCloudSync, syncOfflineData } from '../../utils/syncEngine';
 import { setSyncWakeHandler } from '../db/local/syncOutbox';
 import { clearNeonToken, cloudApiConfigured, getCloudAuthClient } from '../cloud/authClient';
+import { authTraceEvent, authTraceOperation, finishAuthTrace } from '../security/authDiagnostics';
 
 const SESSION_KEY = 'houselog_user_id';
 const SIGNED_OUT_KEY = 'houselog_signed_out';
+const AUTH_OPERATION_DEADLINE_MS = 25_000;
 type SessionUser = Omit<DbUser, 'passwordHash'>;
+
+/** Also bounds auth-client storage hooks, which run after the HTTP request resolves. */
+function withAuthenticationDeadline<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    operation,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Neon Auth did not finish within 25 seconds. Check the connection and try again.')), AUTH_OPERATION_DEADLINE_MS);
+    }),
+  ]).finally(() => { if (timer) clearTimeout(timer); });
+}
 
 export type AuthSession =
   | { status: 'restoring' }
+  | { status: 'restoreError'; message: string }
   | { status: 'signedOut'; notice?: string }
   | { status: 'locked'; user: SessionUser; notice?: string }
   | { status: 'signedIn'; user: SessionUser; notice?: string };
@@ -32,6 +46,7 @@ interface AuthContextValue {
   user: SessionUser | null;
   isLoading: boolean;
   restoreError: string | null;
+  retrySessionRestore: () => void;
   sessionNotice: string | null;
   appearance: AppearancePreference;
   profileSettings: ProfileSettings;
@@ -39,7 +54,7 @@ interface AuthContextValue {
   updateAppearance: (appearance: AppearancePreference) => Promise<void>;
   updateProfileSettings: (patch: Partial<ProfileSettings>) => Promise<void>;
   switchLocalProfile: (profileId: string) => Promise<void>;
-  signIn: (email: string, password: string, rememberMe: boolean) => Promise<{ success: boolean; error?: string; passwordUpgradePending?: boolean }>;
+  signIn: (email: string, password: string, rememberMe: boolean, traceId?: string) => Promise<{ success: boolean; error?: string; passwordUpgradePending?: boolean }>;
   signUp: (fullName: string, email: string, password: string, rememberMe: boolean) => Promise<{ success: boolean; error?: string; notice?: string }>;
   signOut: () => Promise<void>;
   lock: () => void;
@@ -53,14 +68,29 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-async function readSessionId(): Promise<{ userId: string | null; signedOutMarker: boolean }> {
+async function readSessionId(onStage?: (stage: string) => void): Promise<{ userId: string | null; signedOutMarker: boolean }> {
   if (Platform.OS === 'web') {
     if (typeof window === 'undefined') return { userId: null, signedOutMarker: false };
     const signedOutMarker = window.localStorage.getItem(SIGNED_OUT_KEY) === '1';
     return { userId: signedOutMarker ? null : window.localStorage.getItem(SESSION_KEY) ?? window.sessionStorage.getItem(SESSION_KEY), signedOutMarker };
   }
+  onStage?.('secure_signed_out_marker_read');
   const signedOutMarker = await SecureStore.getItemAsync(SIGNED_OUT_KEY) === '1';
-  return { userId: signedOutMarker ? null : await SecureStore.getItemAsync(SESSION_KEY), signedOutMarker };
+  if (signedOutMarker) return { userId: null, signedOutMarker };
+  onStage?.('secure_session_id_read');
+  return { userId: await SecureStore.getItemAsync(SESSION_KEY), signedOutMarker };
+}
+
+function sanitizedRestoreError(error: unknown): { errorName: string; errorCode?: string; errorKind: string } {
+  const value = error as { name?: unknown; code?: unknown; message?: unknown } | null;
+  const errorName = typeof value?.name === 'string' && /^[A-Za-z][A-Za-z0-9_.]{0,39}$/.test(value.name) ? value.name : 'Error';
+  const errorCode = typeof value?.code === 'string' && /^[A-Z0-9_.-]{1,40}$/i.test(value.code) ? value.code : undefined;
+  const message = typeof value?.message === 'string' ? value.message.toLowerCase() : '';
+  const errorKind = /keychain|secure.?store/.test(message) ? 'secure_storage'
+    : /sqlite|database|cipher|decrypt/.test(message) ? 'local_database'
+      : /network|fetch|connect|dns|socket/.test(message) ? 'network'
+        : 'operation_failed';
+  return { errorName, ...(errorCode ? { errorCode } : {}), errorKind };
 }
 
 async function persistSession(userId: string, rememberMe: boolean): Promise<void> {
@@ -101,9 +131,18 @@ async function persistSignedOut(): Promise<void> {
   await SecureStore.deleteItemAsync(SESSION_KEY);
 }
 
-async function attachAuthenticatedCloudProfile(ownerId: string, cloudUserId: string, email: string, password: string): Promise<string | undefined> {
-  const imported = await localDb.cloudIdentity.linkProfileAndQueueCoreImport({ ownerId, cloudUserId });
-  await localDb.user.setPasswordAfterCloudAuthentication({ ownerId, cloudUserId, email, password });
+async function attachAuthenticatedCloudProfile(
+  ownerId: string,
+  cloudUserId: string,
+  email: string,
+  password: string,
+  traceId?: string,
+  localPasswordAlreadySet = false,
+): Promise<string | undefined> {
+  const imported = await authTraceOperation(traceId, 'SQLITE_IDENTITY_LINK', () => localDb.cloudIdentity.linkProfileAndQueueCoreImport({ ownerId, cloudUserId }));
+  if (!localPasswordAlreadySet) {
+    await authTraceOperation(traceId, 'SQLITE_LOCAL_CREDENTIAL_UPDATE', () => localDb.user.setPasswordAfterCloudAuthentication({ ownerId, cloudUserId, email, password }));
+  }
   return imported.unsupportedRecords > 0
     ? `Cloud account linked and cash ledger import queued. ${imported.unsupportedRecords} other financial records remain on this device and are not cloud-synced yet.`
     : undefined;
@@ -114,6 +153,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const { setColorScheme } = useColorScheme();
   const setColorSchemeRef = useRef(setColorScheme);
   const [session, setSessionState] = useState<AuthSession>({ status: 'restoring' });
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [appearance, setAppearance] = useState<AppearancePreference>('system');
   const [profileSettings, setProfileSettings] = useState<ProfileSettings>({ ...DEFAULT_PROFILE_SETTINGS });
   const [pendingProfileEmail, setPendingProfileEmail] = useState<string | null>(null);
@@ -142,6 +182,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => setSyncWakeHandler(null);
   }, [syncAndRefreshLocalQueries]);
 
+  useEffect(() => {
+    if (session.status !== 'signedIn' || !profileSettings.appLockEnabled) return;
+    const profileId = session.user.id;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'inactive' || state === 'background') {
+        void appSettings.setLastBackgroundAt(profileId, Date.now()).catch(() => undefined);
+      } else if (state === 'active') {
+        void appSettings.clearLastBackgroundAt(profileId).catch(() => undefined);
+      }
+    });
+    return () => subscription.remove();
+  }, [session.status, session.status === 'signedIn' ? session.user.id : null, profileSettings.appLockEnabled]);
+
   const cloudSyncOwnerId = session.status === 'signedIn' ? session.user.id : null;
   useEffect(() => {
     if (!cloudSyncOwnerId) return;
@@ -162,6 +215,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let active = true;
     void (async () => {
+      let restoreStage = 'appearance_preferences';
       let appearanceNotice: string | undefined;
       try {
         const savedAppearance = await appSettings.getAppearance();
@@ -174,127 +228,159 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (active) setColorSchemeRef.current('system');
       }
       try {
-        const stored = await readSessionId();
+        restoreStage = 'secure_session_read';
+        const stored = await readSessionId((stage) => { restoreStage = stage; });
         if (!stored.userId) {
           if (active) setSession({ status: 'signedOut', ...(appearanceNotice ? { notice: appearanceNotice } : {}) });
           return;
         }
+        restoreStage = 'local_profile_database_read';
         const found = await localDb.user.findById(stored.userId);
         if (!active) return;
         const decision = decideRestoredSession({ savedUserId: stored.userId, signedOutMarker: stored.signedOutMarker, profileExists: found !== null });
         if (decision === 'signedOut' || !found) {
-          let notice = 'Your saved profile is unavailable. Sign in again.';
-          if (Platform.OS === 'web') {
-            window.localStorage.removeItem(SESSION_KEY);
-            window.sessionStorage.removeItem(SESSION_KEY);
+          // A saved session pointer with a missing profile is not evidence that the
+          // user logged out. Keep it intact and offer recovery instead of showing
+          // the login form or silently discarding the device session.
+          if (stored.signedOutMarker) {
+            setSession({ status: 'signedOut' });
           } else {
-            try {
-              await SecureStore.setItemAsync(SIGNED_OUT_KEY, '1');
-              await SecureStore.deleteItemAsync(SESSION_KEY);
-            } catch {
-              notice += ' Secure storage could not clear the stale session; verify sign-in is required before using this device.';
-            }
+            console.error('[Leverage] Session restore stopped', JSON.stringify({ stage: 'local_profile_missing', platform: Platform.OS }));
+            setSession({ status: 'restoreError', message: 'This device could not find the profile attached to its saved session. Your cloud account and local records were not deleted. Retry, or choose “Sign out” to sign in online and download your cloud profile.' });
           }
-          setSession({ status: 'signedOut', notice });
           return;
         }
         // Remember me persists the local session across a browser refresh or app restart.
         // The inactivity lock below still protects a session after an extended absence.
         let savedProfileSettings = { ...DEFAULT_PROFILE_SETTINGS };
         let settingsNotice: string | undefined;
+        restoreStage = 'profile_security_preferences';
         try { savedProfileSettings = await appSettings.getProfile(found.id); }
         catch { settingsNotice = 'Security preferences could not be read. Leverage is locked until you verify this profile password.'; }
         if (!active) return;
         setProfileSettings(savedProfileSettings);
         const notice = settingsNotice ?? appearanceNotice;
+        restoreStage = 'session_policy';
         const restoredStatus = decideRestoredSession({
           savedUserId: stored.userId,
           signedOutMarker: stored.signedOutMarker,
           profileExists: true,
           appLockEnabled: settingsNotice !== undefined || savedProfileSettings.appLockEnabled,
-          // Web refreshes are navigation, not a fresh native launch. Keep the
-          // remembered browser session open; Android/iOS still cold-start locked.
-          coldStartLockRequired: Platform.OS !== 'web',
+          lastBackgroundAt: await appSettings.getLastBackgroundAt(found.id).catch(() => null),
         });
+        if (restoredStatus === 'signedIn') await appSettings.clearLastBackgroundAt(found.id).catch(() => undefined);
         if (restoredStatus === 'locked') {
           setSession({ status: 'locked', user: found, ...(notice ? { notice } : { notice: 'Unlock Leverage to continue.' }) });
         } else {
           setSession({ status: 'signedIn', user: found, ...(notice ? { notice } : {}) });
         }
-      } catch {
-        if (active) setSession({ status: 'signedOut', notice: 'Your saved session could not be restored. Sign in again; your records were not changed.' });
+      } catch (error) {
+        if (active) {
+          console.error('[Leverage] Session restore failed', JSON.stringify({ stage: restoreStage, platform: Platform.OS, ...sanitizedRestoreError(error) }));
+          setSession({ status: 'restoreError', message: 'Leverage could not reopen the saved profile on this device. Your saved session and financial records were not intentionally changed. Tap Retry. If this continues, use the encrypted backup recovery option or choose Sign out to authenticate online again.' });
+        }
       }
     })();
     return () => { active = false; };
+  }, [setSession, restoreAttempt]);
+
+  const retrySessionRestore = useCallback(() => {
+    setSession({ status: 'restoring' });
+    setRestoreAttempt((attempt) => attempt + 1);
   }, [setSession]);
 
-  const signIn = async (email: string, password: string, rememberMe: boolean) => {
-    if (operationRef.current) return { success: false, error: 'Authentication is already in progress. Please wait.' };
+  const signIn = async (email: string, password: string, rememberMe: boolean, traceId?: string) => {
+    if (operationRef.current) {
+      authTraceEvent('LOGIN_REJECTED_CONCURRENT', {}, traceId);
+      finishAuthTrace(false, 'concurrent_auth_operation', traceId);
+      return { success: false, error: 'Authentication is already in progress. Please wait.' };
+    }
     operationRef.current = true;
     const operation = ++sequenceRef.current;
+    let loginSuccess = false;
     try {
       let result: Awaited<ReturnType<typeof localDb.user.signIn>>;
       let cloudLinkNotice: string | undefined;
-      const network = await Network.getNetworkStateAsync().catch(() => null);
+      let localPasswordAlreadySet = false;
+      const network = await authTraceOperation(traceId, 'NETWORK_CHECK', () => Network.getNetworkStateAsync()).catch(() => null);
       const online = network?.isConnected === true && network.isInternetReachable !== false;
       if (!online) {
-        result = await localDb.user.signIn(email, password);
+        result = await authTraceOperation(traceId, 'SQLITE_OFFLINE_AUTH', () => localDb.user.signIn(email, password));
         if (!result.success) return { success: false, error: 'This device has no saved profile for offline sign-in. Connect to the internet and sign in once first.' };
       } else {
         if (!cloudApiConfigured) return { success: false, error: 'Cloud sign-in is not configured in this app build. No local-only sign-in was attempted while online.' };
 
         // Keep the existing device ID for auth-session storage, but do not create a
         // local profile until Neon has authenticated these credentials.
-        let localUser = await localDb.user.findByEmail(email);
+        let localUser = await authTraceOperation(traceId, 'SQLITE_PROFILE', () => localDb.user.findByEmail(email));
         const ownerId = localUser?.id ?? Crypto.randomUUID();
         const cloud = getCloudAuthClient(ownerId);
         let remote: Awaited<ReturnType<typeof cloud.signIn.email>>;
         try {
-          remote = await cloud.signIn.email({ email: email.trim().toLowerCase(), password, rememberMe });
+          remote = await authTraceOperation(traceId, 'NEON_AUTH', () => withAuthenticationDeadline(cloud.signIn.email({ email: email.trim().toLowerCase(), password, rememberMe })));
         } catch (error) {
+          if (error instanceof Error && error.message.startsWith('Neon Auth did not finish')) {
+            return { success: false, error: 'Cloud sign-in timed out after 25 seconds. Check your connection and try again.' };
+          }
           return { success: false, error: `Cloud sign-in could not reach Neon Auth: ${error instanceof Error ? error.message : 'Check your internet connection and try again.'}` };
         }
         if (remote.error || !remote.data?.user?.id) {
+          authTraceEvent('NEON_AUTH_REJECTED', {
+            hasHttpStatus: typeof remote.error?.status === 'number',
+            ...(typeof remote.error?.status === 'number' ? { httpStatus: remote.error.status } : {}),
+            hasErrorCode: typeof remote.error?.code === 'string',
+          }, traceId);
           return { success: false, error: remote.error?.message ?? 'Cloud sign-in did not return an authenticated account.' };
         }
 
         if (!localUser) {
           const displayName = email.trim().split('@')[0] || 'Leverage user';
-          const local = await localDb.user.register(displayName, email, password, ownerId);
+          const local = await authTraceOperation(traceId, 'SQLITE_PROFILE_CREATE', () => localDb.user.register(displayName, email, password, ownerId));
           if (!local.success) {
             await cloud.signOut().catch(() => undefined);
             return { success: false, error: `Cloud sign-in succeeded, but this device could not prepare its local profile: ${local.error} Your cloud account is unchanged; resolve local storage and sign in again.` };
           }
           localUser = local.user;
+          localPasswordAlreadySet = true;
         }
 
         try {
-          cloudLinkNotice = await attachAuthenticatedCloudProfile(localUser.id, remote.data.user.id, email, password);
+          cloudLinkNotice = await attachAuthenticatedCloudProfile(localUser.id, remote.data.user.id, email, password, traceId, localPasswordAlreadySet);
         } catch (error) {
           await cloud.signOut().catch(() => undefined);
           return { success: false, error: error instanceof Error ? `${error.message} Cloud authentication succeeded; sign in again to retry linking this device.` : 'Cloud authentication succeeded, but this device could not be linked. Sign in again to retry.' };
         }
-        const refreshed = await localDb.user.findById(localUser.id);
+        const refreshed = await authTraceOperation(traceId, 'SQLITE_PROFILE_RELOAD', () => localDb.user.findById(localUser!.id));
         if (!refreshed) return { success: false, error: 'Cloud authentication succeeded, but the local profile could not be loaded. Your cloud account is unchanged.' };
         result = { success: true, user: refreshed, passwordUpgradePending: false };
       }
       let notice: string | undefined = typeof cloudLinkNotice === 'string' ? cloudLinkNotice : undefined;
       let savedProfileSettings = { ...DEFAULT_PROFILE_SETTINGS };
-      try { savedProfileSettings = await appSettings.getProfile(result.user.id); }
+      try { savedProfileSettings = await authTraceOperation(traceId, 'PROFILE_SETTINGS', () => appSettings.getProfile(result.user.id)); }
       catch { notice = 'Signed in, but profile preferences could not be loaded. Defaults are active for this session.'; }
-      try { await localDb.user.claimLegacyData(result.user.id); }
+      try { await authTraceOperation(traceId, 'SQLITE_LEGACY_CLAIM', () => localDb.user.claimLegacyData(result.user.id)); }
       catch { notice ??= 'Signed in. Older unassigned records could not be linked and were left unchanged.'; }
-      try { await persistSession(result.user.id, rememberMe); }
+      try { await authTraceOperation(traceId, 'SESSION_STORAGE', () => persistSession(result.user.id, rememberMe)); }
       catch { notice = 'Signed in for this session, but the saved sign-in preference could not be updated. You may need to sign in again after closing Leverage.'; }
       if (sequenceRef.current !== operation) return { success: false, error: 'Sign-in was cancelled. Please try again.' };
+      await appSettings.clearLastBackgroundAt(result.user.id).catch(() => undefined);
       queryClient.clear();
       setProfileSettings(savedProfileSettings);
       setPendingProfileEmail(null);
       setSession({ status: 'signedIn', user: result.user, ...(notice ? { notice } : {}) });
+      authTraceEvent('AUTH_STATE_UPDATE', { status: 'signedIn' }, traceId);
+      authTraceEvent('AUTH_CONTEXT_RETURN', { success: true }, traceId);
+      loginSuccess = true;
       return { success: true, passwordUpgradePending: result.passwordUpgradePending };
     } catch (error) {
+      authTraceEvent('LOGIN_ERROR', { errorKind: error instanceof Error ? 'operation_failed' : 'unknown' }, traceId);
+      finishAuthTrace(false, 'sign_in_failed', traceId);
       return { success: false, error: getLocalAuthFailureMessage(error, 'sign-in') };
-    } finally { if (sequenceRef.current === operation) operationRef.current = false; }
+    } finally {
+      if (sequenceRef.current === operation) operationRef.current = false;
+      authTraceEvent('AUTH_OPERATION_FINALLY', { success: loginSuccess }, traceId);
+      if (!loginSuccess && traceId) finishAuthTrace(false, 'sign_in_not_completed', traceId);
+    }
   };
 
   const signUp = async (fullName: string, email: string, password: string, rememberMe: boolean) => {
@@ -315,8 +401,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const cloud = getCloudAuthClient(ownerId);
       let remote: Awaited<ReturnType<typeof cloud.signUp.email>>;
       try {
-        remote = await cloud.signUp.email({ name: fullName, email: email.trim().toLowerCase(), password });
+        remote = await withAuthenticationDeadline(cloud.signUp.email({ name: fullName, email: email.trim().toLowerCase(), password }));
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith('Neon Auth did not finish')) {
+          return { success: false, error: 'Cloud registration timed out after 25 seconds. Your account may have been created; try signing in before registering again.' };
+        }
         return { success: false, error: `Cloud registration could not reach Neon Auth: ${error instanceof Error ? error.message : 'Check your internet connection and try again.'}` };
       }
       if (remote.error || !remote.data?.user?.id) {
@@ -324,6 +413,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       let profile = existing;
+      let localPasswordAlreadySet = false;
       if (!profile) {
         const local = await localDb.user.register(fullName, email, password, ownerId);
         if (!local.success) {
@@ -331,15 +421,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return { success: false, error: `Your cloud account was created, but this device could not save its local profile: ${local.error} Fix local storage, then sign in to finish linking this device.` };
         }
         profile = local.user;
+        localPasswordAlreadySet = true;
       }
 
       let cloudLinkNotice: string | undefined;
       try {
-        cloudLinkNotice = await attachAuthenticatedCloudProfile(profile.id, remote.data.user.id, email, password);
+        cloudLinkNotice = await attachAuthenticatedCloudProfile(profile.id, remote.data.user.id, email, password, undefined, localPasswordAlreadySet);
       } catch (error) {
         await cloud.signOut().catch(() => undefined);
         return { success: false, error: error instanceof Error ? `${error.message} Your cloud account remains created; sign in again to retry linking this device.` : 'Your cloud account remains created, but this device could not be linked. Sign in again to retry.' };
       }
+      try { await localDb.user.requireOnboarding(profile.id); }
+      catch { cloudLinkNotice ??= 'Your cloud account is connected. First-run setup could not be saved on this device; you can create an account from the dashboard.'; }
       const authenticatedLocalProfile = await localDb.user.findById(profile.id);
       if (!authenticatedLocalProfile) return { success: false, error: 'Cloud account created, but the device profile could not be loaded. Sign in again to retry.' };
       const result: Awaited<ReturnType<typeof localDb.user.register>> = { success: true, user: authenticatedLocalProfile, passwordUpgradePending: false };
@@ -358,6 +451,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try { await persistSession(result.user.id, rememberMe); }
       catch { notice += ' This profile was created successfully, but the sign-in preference could not be saved. Continue this session or sign in again later.'; }
       if (sequenceRef.current !== operation) return { success: false, error: 'Sign-up was cancelled. Your profile may already exist; try signing in.' };
+      await appSettings.clearLastBackgroundAt(result.user.id).catch(() => undefined);
       queryClient.clear();
       setProfileSettings(initialSettings);
       setPendingProfileEmail(null);
@@ -453,6 +547,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (latest.status !== 'locked' || latest.user.id !== locked.user.id) {
       return { success: false, error: 'The active profile changed. Please reopen its unlock screen and try again.' };
     }
+    await appSettings.clearLastBackgroundAt(locked.user.id).catch(() => undefined);
     queryClient.clear();
     setSession({ status: 'signedIn', user: locked.user });
     return { success: true };
@@ -486,10 +581,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [queryClient, setSession]);
 
   const currentUser = session.status === 'signedIn' ? session.user : null;
-  const restoreError = session.status === 'signedOut' && session.notice?.includes('could not be restored') ? session.notice : null;
-  const sessionNotice = session.status === 'signedIn' || session.status === 'locked' || session.status === 'signedOut' ? session.notice === restoreError ? null : session.notice ?? null : null;
+  const restoreError = session.status === 'restoreError' ? session.message : null;
+  const sessionNotice = session.status === 'signedIn' || session.status === 'locked' || session.status === 'signedOut' ? session.notice ?? null : null;
   const value: AuthContextValue = {
-    session, status: session.status, user: currentUser, isLoading: session.status === 'restoring', restoreError, sessionNotice,
+    session, status: session.status, user: currentUser, isLoading: session.status === 'restoring', restoreError, retrySessionRestore, sessionNotice,
     appearance, profileSettings, pendingProfileEmail, updateAppearance, updateProfileSettings, switchLocalProfile,
     signIn, signUp, signOut, lock, unlockWithPassword, unlockAfterBiometric, changePassword, updateProfileName, listProfiles, restoreBackup,
   };

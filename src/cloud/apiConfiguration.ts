@@ -50,6 +50,38 @@ export function resolveNeonDataApiUrl(value: string | undefined): string | null 
   return resolveNeonEndpoint(value, '/neondb/rest/v1');
 }
 
+/** Map Neon/Postgres failures to safe, actionable categories without displaying SQL details. */
+export function classifyNeonDataApiFailure(status: number, body: unknown): string {
+  const error = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+  const nested = error.error && typeof error.error === 'object' ? error.error as Record<string, unknown> : {};
+  const code = typeof error.code === 'string' ? error.code : typeof nested.code === 'string' ? nested.code : '';
+  const message = (typeof error.message === 'string' ? error.message : typeof nested.message === 'string' ? nested.message : '').toLowerCase();
+  if (code.startsWith('UNSUPPORTED_')) return code;
+  if (code === 'PGRST202') return 'CLOUD_RPC_SIGNATURE_MISSING';
+  // 42883 covers both undefined functions and undefined operators. Neon can
+  // return it with HTTP 404 even after the RPC function was successfully found.
+  if (code === '42883' && message.includes('operator does not exist')) return 'CLOUD_SCHEMA_TYPE_MISMATCH';
+  if (code === '42883' && message.includes('function')) return 'CLOUD_FUNCTION_UNDEFINED';
+  if (status === 401 || code === '28000' || message.includes('authentication credentials')) return 'AUTH_REQUIRED';
+  if (status === 403 || code === '42501') return 'CLOUD_PERMISSION_DENIED';
+  // A unique-constraint violation is not necessarily an idempotency conflict.
+  // The finance RPC also raises 23505 when an entity ID is already present,
+  // which is materially different: compare that cloud row before treating the
+  // queued create as confirmed.
+  if (message.includes('idempotency key reused')) return 'DUPLICATE_OR_IDEMPOTENCY_CONFLICT';
+  if (code === '23505' || (status === 409 && message.includes('duplicate key'))) return 'CLOUD_RECORD_ALREADY_EXISTS';
+  if (status === 409) return 'CLOUD_RECORD_CONFLICT';
+  if (code === '23503' || message.includes('foreign key')) return 'RELATED_RECORD_MISSING';
+  if (code === '23514' || message.includes('check constraint') || message.includes('financial rule')) return 'FINANCIAL_RULE_REJECTED';
+  if (code === '22023' || code.startsWith('22') || message.includes('invalid account') || message.includes('invalid transaction') || message.includes('unsupported transaction classification')) return 'INVALID_FINANCIAL_RECORD';
+  if (code === '40001' || message.includes('revision conflict')) return 'FINANCIAL_RECORD_CONFLICT';
+  if (message.includes('schema cache') || message.includes('could not find the function')) return 'CLOUD_FUNCTION_MISSING';
+  if (status === 408 || status === 429 || status >= 500) return 'DATABASE_UNAVAILABLE';
+  if (status === 404) return 'CLOUD_ENDPOINT_NOT_FOUND';
+  if (status === 400) return 'NEON_REQUEST_REJECTED';
+  return 'SERVER_REJECTED';
+}
+
 /** Stop production EAS builds before bundling if cloud auth/sync would be compiled disabled. */
 export function assertProductionCloudApiConfigured(profile: string | undefined, value: string | undefined): void {
   if (profile !== 'production' && profile !== 'production-apk') return;

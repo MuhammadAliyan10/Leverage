@@ -22,6 +22,12 @@ test('period windows respect local calendar boundaries and compare like-length p
   assert.equal(year.current.start.getFullYear(), 2026);
   assert.equal(year.previous.start.getFullYear(), 2025);
   assert.equal(year.previous.end.getMonth(), 5);
+
+  const week = getInsightsPeriodRanges('Last 7 days', now);
+  assert.equal(calendarDaysInRange(week.current), 7);
+  assert.equal(calendarDaysInRange(week.previous), 7);
+  assert.equal(week.current.end.getDate(), 1);
+  assert.equal(week.previous.end.getTime(), week.current.start.getTime());
 });
 
 test('daily average rounds integer minor units and handles signed net refunds', () => {

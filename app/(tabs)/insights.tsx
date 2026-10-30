@@ -2,13 +2,14 @@ import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { PieChart } from 'react-native-gifted-charts';
-import Svg, { Circle, Line, Path, Text as SvgText } from 'react-native-svg';
-import { ArrowUpRight, BriefcaseBusiness, Car, ChartNoAxesCombined, CircleEllipsis, Coffee, CreditCard, Gift, Globe2, HandCoins, Heart, Home, ReceiptText, RefreshCw, ShoppingBag, ShoppingCart, TrendingDown, TrendingUp, Wallet } from 'lucide-react-native';
+import Svg, { Circle, Line, Path, Rect, Text as SvgText } from 'react-native-svg';
+import { ArrowUpRight, BriefcaseBusiness, Car, ChartNoAxesCombined, CircleEllipsis, Coffee, CreditCard, Filter, Gift, Globe2, HandCoins, Heart, Home, ReceiptText, RefreshCw, ShoppingBag, ShoppingCart, TrendingDown, TrendingUp, Wallet } from 'lucide-react-native';
 import type { LucideIcon } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useColorScheme } from 'nativewind';
 import { GlobalHeader } from '../../components/ui/GlobalHeader';
-import { BADGE_NEUTRAL, BADGE_NEUTRAL_TEXT, BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../../components/ui/badgeStyles';
+import { ActionSheet } from '../../components/ui/ActionSheet';
+import { BADGE_PRIMARY, BADGE_PRIMARY_TEXT } from '../../components/ui/badgeStyles';
 import { SectionHeading } from '../../components/ui/SectionHeading';
 import { DatePickerField } from '../../components/ui/DatePickerField';
 import { useInsightsMetrics } from '../../hooks/queries/useInsightsMetrics';
@@ -35,6 +36,10 @@ const INCOME_STYLE: Record<string, { color: string; icon: LucideIcon }> = {
 };
 const GREEN = '#15966A';
 const ORANGE = '#EF8B36';
+const REPORT_VIEWS = [
+  ['overview', 'Dashboard'], ['review', 'Review'], ['income', 'Income statement'], ['cashflow', 'Cash flow'], ['balance', 'Balance sheet'],
+] as const;
+type ReportView = (typeof REPORT_VIEWS)[number][0];
 
 function safeRatio(numerator: number, denominator: number): number {
   return denominator > 0 ? Math.min(1, Math.max(0, numerator / denominator)) : 0;
@@ -42,6 +47,12 @@ function safeRatio(numerator: number, denominator: number): number {
 
 function dateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function dateFilterKey(value: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : dateKey(date);
 }
 
 function parseDateKey(value: string): Date | undefined {
@@ -75,9 +86,16 @@ export default function InsightsScreen() {
   const [period, setPeriod] = useState<InsightsPeriod>('This month');
   const [customStartDate, setCustomStartDate] = useState(() => dateKey(new Date(new Date().getFullYear(), new Date().getMonth(), 1)));
   const [customEndDate, setCustomEndDate] = useState(() => dateKey(new Date()));
-  const [reportView, setReportView] = useState<'review' | 'overview' | 'income' | 'cashflow' | 'balance'>('review');
+  const [reportView, setReportView] = useState<ReportView>('overview');
   const [currencyPreference, setCurrencyPreference] = useState<string | null>(null);
-  const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
+  const [filtersVisible, setFiltersVisible] = useState(false);
+  const [draftPeriod, setDraftPeriod] = useState<InsightsPeriod>(period);
+  const [draftStartDate, setDraftStartDate] = useState(customStartDate);
+  const [draftEndDate, setDraftEndDate] = useState(customEndDate);
+  const [draftReportView, setDraftReportView] = useState<ReportView>(reportView);
+  const [draftCurrency, setDraftCurrency] = useState<string | null>(currencyPreference);
+  const [selectedTrendId, setSelectedTrendId] = useState<string | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const { colorScheme } = useColorScheme();
   const router = useRouter();
   const { width } = useWindowDimensions();
@@ -86,10 +104,10 @@ export default function InsightsScreen() {
   const dataQuery = useInsightsMetrics(period, currencyPreference, customDates);
   const data = dataQuery.data;
   const periodLabel = period === 'Custom' ? `${formatDateOnly(customStartDate)} – ${formatDateOnly(customEndDate)}` : period;
-  const selectedPoint = data?.monthReportRows.find((point) => point.id === selectedMonth) ?? data?.monthReportRows.at(-1);
   const selectedLiquidity = data?.liquidity.find((position) => position.currency === data.currency);
   const selectedNetWorth = data?.netWorth.find((position) => position.currency === data.currency);
   const cashFlowSections = useMemo(() => data ? calculateCashFlowSections(data.reportRows, data.currency, data.currentRange) : [], [data]);
+  const cashFlowMax = Math.max(1, ...cashFlowSections.flatMap((section) => [section.inflowsMinor, section.outflowsMinor]));
   const cashFlowNet = cashFlowSections.reduce((sum, section) => sum + BigInt(section.netMinor), 0n);
   const cashFlowNetMinor = cashFlowNet <= BigInt(Number.MAX_SAFE_INTEGER) && cashFlowNet >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(cashFlowNet) : null;
   const activityScale = data ? Math.max(Math.abs(data.report.incomeMinor), Math.abs(data.report.expenseMinor), 1) : 1;
@@ -105,13 +123,25 @@ export default function InsightsScreen() {
     return largest;
   }, [data]);
 
-  const pieData = useMemo(() => (data?.categories ?? []).filter((item) => item.amountMinor > 0).map((item) => {
-    const style = categoryStyle(item.category);
-    return { value: item.amountMinor / 100, color: style.color, text: CLASSIFICATIONS[item.category as keyof typeof CLASSIFICATIONS]?.label ?? item.category };
-  }), [data?.categories]);
+  const pieData = useMemo(() => {
+    const positive = (data?.categories ?? []).filter((item) => item.amountMinor > 0);
+    const ranked = positive.slice(0, 5);
+    const remainder = positive.slice(5).reduce((sum, item) => sum + item.amountMinor, 0);
+    const compact = [...ranked.map((item) => ({ category: item.category, amountMinor: item.amountMinor })), ...(remainder > 0 ? [{ category: 'other', amountMinor: remainder }] : [])];
+    return compact.map((item) => ({
+      category: item.category,
+      value: item.amountMinor / 100,
+      color: item.category === 'other' ? '#64748B' : categoryStyle(item.category).color,
+      text: item.category === 'other' ? 'Other' : CLASSIFICATIONS[item.category as keyof typeof CLASSIFICATIONS]?.label ?? item.category,
+      onPress: () => setSelectedCategory(item.category),
+    }));
+  }, [data?.categories]);
 
-  const goTransactions = (filters: { categoryId?: string; currency?: string; startDate?: string; endDate?: string } = {}) => {
-    router.push({ pathname: '/transactions', params: Object.fromEntries(Object.entries(filters).filter(([, value]) => !!value)) });
+  const goTransactions = (filters: { accountId?: string; categoryId?: string; currency?: string; startDate?: string; endDate?: string } = {}) => {
+    const params = Object.fromEntries(Object.entries(filters).filter(([, value]) => !!value).map(([key, value]) => [
+      key, key === 'startDate' || key === 'endDate' ? dateFilterKey(value!) : value,
+    ]));
+    router.push({ pathname: '/transactions', params });
   };
 
   const goExpenseDay = (expense: { category: string; date: string }) => {
@@ -122,40 +152,87 @@ export default function InsightsScreen() {
     goTransactions({ categoryId: expense.category, currency: data?.currency, startDate: dayKey(start), endDate: dayKey(end) });
   };
 
-  const monthlyMax = Math.max(1, ...(data?.monthReportRows ?? []).flatMap((point) => [point.incomeMinor, point.expenseMinor]));
   const trendPoints = data?.spendingTrend ?? [];
-  const highestTrend = trendPoints.reduce<(typeof trendPoints)[number] | null>((top, current) => !top || current.amountMinor > top.amountMinor ? current : top, null);
-  const trendFrequency = period === 'This month' || period === 'Last month' ? 'day' : 'month';
+  const selectedTrend = trendPoints.find((point) => point.id === selectedTrendId) ?? trendPoints.at(-1);
+  const financialPoints = data?.financialTrend ?? [];
+  const selectedFinancialPoint = financialPoints.find((point) => point.id === selectedTrendId) ?? financialPoints.at(-1);
   const spendingShare = data && data.report.incomeMinor > 0 ? data.report.expenseMinor / data.report.incomeMinor : null;
   const spendingShareLabel = spendingShare === null ? '—' : spendingShare > 1 ? '>100%' : `${Math.round(Math.max(0, spendingShare) * 100)}%`;
   const trendChartWidth = Math.max(240, width - 64);
+  const reportViewLabel = REPORT_VIEWS.find(([key]) => key === reportView)?.[1] ?? 'Review';
+  const activeFilterCount = Number(period !== 'This month') + Number(reportView !== 'overview') + Number(!!currencyPreference);
+
+  const openFilters = () => {
+    setDraftPeriod(period);
+    setDraftStartDate(customStartDate);
+    setDraftEndDate(customEndDate);
+    setDraftReportView(reportView);
+    setDraftCurrency(currencyPreference);
+    setFiltersVisible(true);
+  };
+
+  const applyFilters = () => {
+    if (draftPeriod === 'Custom') {
+      const start = parseDateKey(draftStartDate);
+      const end = parseDateKey(draftEndDate);
+      if (!start || !end || start > end) return;
+    }
+    setPeriod(draftPeriod);
+    setCustomStartDate(draftStartDate);
+    setCustomEndDate(draftEndDate);
+    setReportView(draftReportView);
+    setCurrencyPreference(draftCurrency);
+    setSelectedTrendId(null);
+    setSelectedCategory(null);
+    setFiltersVisible(false);
+  };
+
+  const selectPeriod = (nextPeriod: InsightsPeriod) => {
+    if (nextPeriod === 'Custom') {
+      setDraftPeriod('Custom');
+      setDraftStartDate(customStartDate);
+      setDraftEndDate(customEndDate);
+      setDraftReportView(reportView);
+      setDraftCurrency(currencyPreference);
+      setFiltersVisible(true);
+      return;
+    }
+    setPeriod(nextPeriod);
+    setSelectedTrendId(null);
+    setSelectedCategory(null);
+  };
+
+  const selectCurrency = (currency: string | null) => {
+    setCurrencyPreference(currency);
+    setSelectedTrendId(null);
+    setSelectedCategory(null);
+  };
+
+  const resetFilters = () => {
+    const today = new Date();
+    setPeriod('This month');
+    setCustomStartDate(dateKey(new Date(today.getFullYear(), today.getMonth(), 1)));
+    setCustomEndDate(dateKey(today));
+    setReportView('overview');
+    setCurrencyPreference(null);
+    setSelectedTrendId(null);
+    setSelectedCategory(null);
+    setFiltersVisible(false);
+  };
 
   return (
     <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
-      <GlobalHeader title="Insights" description="See the patterns behind your money" />
+      <GlobalHeader title="Insights" description="See the patterns behind your money" RightIcon={<View><Filter size={21} color={PRIMARY_COLOR} />{activeFilterCount > 0 ? <View className="absolute -right-2 -top-2 min-w-4 items-center rounded-full bg-primary px-1"><Text className="font-body text-[9px] font-bold text-white">{activeFilterCount}</Text></View> : null}</View>} onRightPress={openFilters} rightActionLabel={activeFilterCount ? `Insight filters, ${activeFilterCount} changed` : 'Filter insights'} />
       <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 14, paddingBottom: 36 }} showsVerticalScrollIndicator={false}>
-        <View className="mb-4">
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
-            {INSIGHTS_PERIODS.map((item) => <Pressable key={item} accessibilityRole="button" accessibilityState={{ selected: period === item }} onPress={() => { setPeriod(item); setSelectedMonth(null); }} className={`min-h-10 justify-center px-3 ${period === item ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${period === item ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{item}</Text></Pressable>)}
-          </ScrollView>
-          {period === 'Custom' ? <>
-            <View className="mt-3 flex-row">
-              <View className="mr-2 flex-1"><DatePickerField label="Start date" value={customStartDate} maxDate={parseDateKey(customEndDate) ?? new Date()} onChangeText={setCustomStartDate} /></View>
-              <View className="flex-1"><DatePickerField label="End date" value={customEndDate} minDate={parseDateKey(customStartDate)} maxDate={new Date()} onChangeText={setCustomEndDate} /></View>
-            </View>
-            {dataQuery.customRangeError ? <Text accessibilityLiveRegion="polite" className="-mt-2 mb-2 font-body text-xs text-rose-700 dark:text-rose-300">{dataQuery.customRangeError}</Text> : null}
-          </> : null}
-          {data && data.currencies.length > 1 ? <ScrollView horizontal className="mt-2" showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>{data.currencies.map((currency) => <Pressable key={currency} accessibilityRole="button" accessibilityState={{ selected: data.currency === currency }} onPress={() => setCurrencyPreference(currency)} className={`min-h-9 justify-center px-3 ${data.currency === currency ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${data.currency === currency ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{currency}</Text></Pressable>)}</ScrollView> : null}
-        </View>
-
-        <ScrollView accessibilityRole="tablist" horizontal showsHorizontalScrollIndicator={false} className="mb-3" contentContainerStyle={{ gap: 8 }}>
-          {([
-            ['review', 'Review'], ['overview', 'Overview'], ['income', 'Income statement'], ['cashflow', 'Cash flow'], ['balance', 'Balance sheet'],
-          ] as const).map(([key, label]) => <Pressable key={key} accessibilityRole="tab" accessibilityState={{ selected: reportView === key }} onPress={() => setReportView(key)} className={`min-h-10 shrink-0 items-center justify-center px-3 ${reportView === key ? BADGE_PRIMARY : BADGE_NEUTRAL}`}><Text className={`font-body text-xs font-semibold ${reportView === key ? BADGE_PRIMARY_TEXT : BADGE_NEUTRAL_TEXT}`}>{label}</Text></Pressable>)}
-        </ScrollView>
-
+          <View className="mb-3 rounded-2xl border border-gray-100 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-900">
+            <View className="mb-2 flex-row items-center justify-between"><Text className="font-body text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-neutral-400">Time period</Text><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">Tap to update dashboard</Text></View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+              {INSIGHTS_PERIODS.map((item) => <FilterChoice key={item} label={item === 'Last 7 days' ? '7 days' : item} selected={period === item} onPress={() => selectPeriod(item)} />)}
+            </ScrollView>
+            {data && data.currencies.length > 1 ? <View className="mt-3 border-t border-gray-100 pt-3 dark:border-neutral-800"><Text className="mb-2 font-body text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-neutral-400">Currency · no conversion</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}><FilterChoice label={`Auto · ${data.currencies.includes('PKR') ? 'PKR' : data.currencies[0]}`} selected={!currencyPreference} onPress={() => selectCurrency(null)} />{data.currencies.map((currency) => <FilterChoice key={currency} label={currency} selected={currencyPreference === currency} onPress={() => selectCurrency(currency)} />)}</ScrollView></View> : null}
+          </View>
           {dataQuery.customRangeError ? <Card><Empty text="Choose a valid date range to load this report." /></Card> : dataQuery.isLoading ? <View accessibilityLabel="Loading financial insights" className="gap-3">{[0, 1, 2].map((item) => <View key={item} className="mb-2 h-32 border border-gray-100 bg-white dark:border-neutral-800 dark:bg-neutral-900" />)}<ActivityIndicator color={PRIMARY_COLOR} /></View> : dataQuery.isError ? <Card className="items-center py-8"><RefreshCw size={22} color={PRIMARY_COLOR} /><Text className="mt-3 font-heading font-semibold text-gray-900 dark:text-white">Insights could not be loaded</Text><Text className="mt-1 text-center font-body text-sm text-gray-500 dark:text-neutral-400">{dataQuery.error instanceof Error ? dataQuery.error.message : 'Your saved records are unchanged.'}</Text><Pressable accessibilityRole="button" onPress={() => void dataQuery.refetch()} className="houselog-button mt-4 px-5 py-3"><Text className="font-body font-semibold text-white">Retry</Text></Pressable></Card> : data ? <>
-          <Text className="mb-2 font-body text-[11px] text-gray-500 dark:text-neutral-400">{periodLabel} · {data.currency} only · {data.excludedCurrencies.length ? `excludes ${data.excludedCurrencies.join(', ')}` : 'no other recorded currencies excluded'}</Text>
+          <Text className="mb-2 font-body text-[11px] text-gray-500 dark:text-neutral-400">{periodLabel}{data.isPartialPeriod ? ' · through today, partial period' : ''} · {reportViewLabel} · {data.currency} only · {data.excludedCurrencies.length ? `excludes ${data.excludedCurrencies.join(', ')}` : 'no other recorded currencies excluded'}</Text>
 
           {reportView === 'review' ? <>
             <Card>
@@ -256,28 +333,32 @@ export default function InsightsScreen() {
             <Text className="mt-3 font-body text-[10px] leading-4 text-gray-500 dark:text-neutral-400">Money moved between your accounts, starting balances, loan amounts and asset purchases aren’t counted as money in or spending. Refunds reduce spending. Other currencies stay separate.</Text>
           </Card>
 
-          {data.monthReportRows.some((point) => point.incomeMinor !== 0 || point.expenseMinor !== 0) ? <Card>
-            <SectionTitle title="Money in vs spending" hint="Compare receipts and spending by month. Longer bars mean larger amounts." />
-            {selectedPoint ? <Pressable accessibilityRole="button" onPress={() => goTransactions({ currency: data.currency, startDate: selectedPoint.startDate, endDate: selectedPoint.endDate })} className="mb-3 flex-row items-center justify-between border-l-2 border-primary pl-3"><View><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{selectedPoint.label} · tap to view transactions</Text><Text className="mt-1 font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">In {formatMinorUnits(selectedPoint.incomeMinor, data.currency)} · Out {formatMinorUnits(selectedPoint.expenseMinor, data.currency)}</Text></View><ArrowUpRight size={16} color={PRIMARY_COLOR} /></Pressable> : null}
-            <View accessibilityRole="image" accessibilityLabel={`Monthly comparison of money received and spending in ${data.currency}.`}>
-              {data.monthReportRows.map((point) => <Pressable key={point.id} accessibilityRole="button" accessibilityLabel={`${point.label}: money received ${formatMinorUnits(point.incomeMinor, data.currency)}, spending ${formatMinorUnits(point.expenseMinor, data.currency)}. Select month.`} accessibilityState={{ selected: selectedPoint?.id === point.id }} onPress={() => setSelectedMonth(point.id)} className={`mb-3 rounded-xl px-3 py-2 ${selectedPoint?.id === point.id ? 'bg-primary/5 dark:bg-primary/10' : ''}`}>
-                <View className="mb-2 flex-row items-center justify-between"><Text className="font-body text-xs font-bold text-gray-800 dark:text-neutral-100">{point.label}</Text><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{point.incomeMinor - point.expenseMinor >= 0 ? 'Surplus' : 'Shortfall'} {formatMinorUnits(Math.abs(point.incomeMinor - point.expenseMinor), data.currency)}</Text></View>
-                <View className="mb-1.5 flex-row items-center"><Text className="w-11 font-body text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">In</Text><View className="mr-2 h-2 flex-1 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="h-full rounded-full" style={{ width: `${safeRatio(point.incomeMinor, monthlyMax) * 100}%`, backgroundColor: GREEN }} /></View><Text numberOfLines={1} className="w-[82px] text-right font-body text-[10px] font-semibold text-gray-700 dark:text-neutral-200">{formatMinorUnits(point.incomeMinor, data.currency)}</Text></View>
-                <View className="flex-row items-center"><Text className="w-11 font-body text-[10px] font-semibold text-orange-700 dark:text-orange-300">Out</Text><View className="mr-2 h-2 flex-1 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="h-full rounded-full" style={{ width: `${safeRatio(point.expenseMinor, monthlyMax) * 100}%`, backgroundColor: ORANGE }} /></View><Text numberOfLines={1} className="w-[82px] text-right font-body text-[10px] font-semibold text-gray-700 dark:text-neutral-200">{formatMinorUnits(point.expenseMinor, data.currency)}</Text></View>
-              </Pressable>)}
-            </View>
-            <View className="mt-1 flex-row justify-center gap-5"><Legend color={GREEN} label="Income" /><Legend color={ORANGE} label="Expenses" /></View>
-          </Card> : <Card><SectionTitle title="Money in vs spending" hint="Monthly totals for the selected period" /><Empty text="No money-in or spending activity recorded for this period." /></Card>}
+          <Card>
+            <SectionTitle title="Income vs spending" hint={`${financialPoints[0]?.group === 'day' ? 'Daily' : financialPoints[0]?.group === 'week' ? 'Weekly' : 'Monthly'} totals · ${data.currency}. Tap a bar for exact figures.`} />
+            {selectedFinancialPoint ? <Pressable accessibilityRole="button" accessibilityLabel={`Open transactions for ${selectedFinancialPoint.label}`} onPress={() => goTransactions({ currency: data.currency, startDate: selectedFinancialPoint.startDate, endDate: selectedFinancialPoint.endDate })} className="mb-3 rounded-xl bg-gray-50 px-3 py-2 dark:bg-neutral-800"><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{selectedFinancialPoint.label} · selected · tap for transactions</Text><Text className="mt-1 font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">Income {formatMinorUnits(selectedFinancialPoint.incomeMinor, data.currency)} · Spending {formatMinorUnits(selectedFinancialPoint.expenseMinor, data.currency)}</Text><Text className="mt-1 font-body text-xs font-bold" style={{ color: selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor >= 0 ? GREEN : '#DC4C4C' }}>{selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor >= 0 ? 'Surplus' : 'Shortfall'} {formatMinorUnits(Math.abs(selectedFinancialPoint.incomeMinor - selectedFinancialPoint.expenseMinor), data.currency)}</Text></Pressable> : null}
+            {financialPoints.some((point) => point.incomeMinor !== 0 || point.expenseMinor !== 0) ? <GroupedFinancialBars points={financialPoints} width={trendChartWidth} currency={data.currency} selectedId={selectedFinancialPoint?.id} onSelect={setSelectedTrendId} /> : <Empty text="No income or spending recorded for this period. The chart uses a zero baseline; no activity is shown as an empty state." />}
+            <View className="mt-1 flex-row justify-center gap-5"><Legend color={GREEN} label="Income" /><Legend color={ORANGE} label="Spending after refunds" /></View>
+          </Card>
 
           <Card>
-            <SectionTitle title="Spending by category" hint="Category spending after refunds are applied" />
+            <SectionTitle title="Spending trend" hint={`${financialPoints[0]?.group === 'day' ? 'Daily' : financialPoints[0]?.group === 'week' ? 'Weekly' : 'Monthly'} net spending after refunds. Tap a point to inspect the amount.`} />
+            {selectedTrend ? <Pressable accessibilityRole="button" accessibilityLabel={`Open transactions for ${selectedTrend.label}`} onPress={() => goTransactions({ currency: data.currency, startDate: selectedTrend.startDate, endDate: selectedTrend.endDate })} className="mb-2 flex-row items-center justify-between rounded-xl bg-orange-50 px-3 py-2 dark:bg-orange-950/30"><View><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{selectedTrend.label} · selected</Text><Text className="font-heading text-base font-bold" style={{ color: selectedTrend.amountMinor < 0 ? GREEN : ORANGE }}>{formatMinorUnits(selectedTrend.amountMinor, data.currency)}</Text></View><ArrowUpRight size={16} color={PRIMARY_COLOR} /></Pressable> : null}
+            {trendPoints.length ? <SpendingAreaChart points={trendPoints} width={trendChartWidth} color={ORANGE} dark={dark} currency={data.currency} selectedId={selectedTrend?.id} onSelect={setSelectedTrendId} /> : <Empty text="No spending buckets are available for this period." />}
+            {data.report.expenseMinor < 0 ? <Text className="mt-1 font-body text-xs text-emerald-700 dark:text-emerald-300">Refunds and corrections exceeded ordinary spending in this range. Negative values appear below the zero baseline.</Text> : data.report.expenseMinor === 0 ? <Text className="mt-1 font-body text-xs text-gray-500 dark:text-neutral-400">No net ordinary spending recorded in this range.</Text> : null}
+          </Card>
+
+          <Card>
+            <SectionTitle title="Spending by category" hint="Positive net categories make up the donut; net refunds stay visible in the signed list below." />
             {data.categories.length === 0 ? <Empty text="No ordinary expenses recorded in this period." /> : <>
-              {pieData.length > 0 ? <View accessible accessibilityRole="image" accessibilityLabel={`Category donut shows positive net category totals of ${formatMinorUnits(data.positiveCategoryTotalMinor, data.currency)}. Refund adjustments are listed separately.`} className="mb-3 items-center"><PieChart donut radius={90} innerRadius={64} data={pieData} centerLabelComponent={() => <View className="items-center"><Text className="font-body text-[11px] text-gray-500 dark:text-neutral-400">Positive category totals</Text><Text className="font-heading text-base font-bold text-gray-900 dark:text-white">{formatMinorUnits(data.positiveCategoryTotalMinor, data.currency)}</Text></View>} /></View> : null}
+              {pieData.length > 0 ? <View accessible accessibilityRole="image" accessibilityLabel={`Category donut of positive net spending totaling ${formatMinorUnits(data.positiveCategoryTotalMinor, data.currency)}. Refund categories are listed separately.`} className="mb-3 items-center"><PieChart donut radius={86} innerRadius={60} data={pieData} focusOnPress onPress={(_item: unknown, index: number) => setSelectedCategory(pieData[index]?.category ?? null)} centerLabelComponent={() => {
+                return <View className="h-[112px] w-[112px] items-center justify-center rounded-full" style={{ backgroundColor: dark ? '#171717' : '#FFFFFF' }}><Text numberOfLines={1} className="max-w-[104px] font-body text-[10px]" style={{ color: dark ? '#A3A3A3' : '#6B7280' }}>Positive net spend</Text><Text adjustsFontSizeToFit minimumFontScale={0.7} numberOfLines={1} className="max-w-[104px] font-heading text-xs font-bold" style={{ color: dark ? '#FFFFFF' : '#111827' }}>{formatMinorUnits(data.positiveCategoryTotalMinor, data.currency)}</Text></View>;
+              }} /></View> : <Empty text="Refunds and corrections leave no positive net categories for a donut. Signed values remain listed below." />}
+              {selectedCategory && selectedCategory !== 'other' ? <Pressable accessibilityRole="button" onPress={() => goTransactions({ categoryId: selectedCategory, currency: data.currency, startDate: data.currentRange.startDate, endDate: data.currentRange.endDate })} className="mb-3 self-center rounded-full bg-primary/10 px-4 py-2"><Text className="font-body text-xs font-semibold text-primary">View {CLASSIFICATIONS[selectedCategory as keyof typeof CLASSIFICATIONS]?.label ?? selectedCategory} transactions</Text></Pressable> : null}
               {data.categories.map((category) => {
                 const style = categoryStyle(category.category); const Icon = style.icon;
                 const label = CLASSIFICATIONS[category.category as keyof typeof CLASSIFICATIONS]?.label ?? category.category.replaceAll('_', ' ');
                 const share = category.amountMinor > 0 && data.positiveCategoryTotalMinor > 0 ? category.amountMinor / data.positiveCategoryTotalMinor : 0;
-                return <Pressable key={category.category} accessibilityRole="button" accessibilityLabel={`Show ${label} transactions, ${formatMinorUnits(category.amountMinor, data.currency)}`} onPress={() => goTransactions({ categoryId: category.category, currency: data.currency, startDate: data.currentRange.startDate, endDate: data.currentRange.endDate })} className="mb-3 flex-row items-center"><View className="mr-3 h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: `${style.color}24` }}><Icon size={17} color={style.color} /></View><View className="mr-3 flex-1"><Text className="font-body text-sm font-semibold capitalize text-gray-800 dark:text-neutral-100" numberOfLines={1}>{label}</Text><View className="mt-1.5 h-2 overflow-hidden rounded-full" style={{ backgroundColor: dark ? `${style.color}30` : `${style.color}20` }}><View className="h-full rounded-full" style={{ width: `${share * 100}%`, backgroundColor: style.color }} /></View></View><View className="items-end"><Text className="font-body text-sm font-bold" style={{ color: category.amountMinor < 0 ? GREEN : style.color }}>{formatMinorUnits(category.amountMinor, data.currency)}</Text><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{category.amountMinor < 0 ? 'net refund' : `${(share * 100).toFixed(0)}%`}</Text></View></Pressable>;
+                return <Pressable key={category.category} accessibilityRole="button" accessibilityState={{ selected: selectedCategory === category.category }} accessibilityLabel={`Show ${label} transactions, ${formatMinorUnits(category.amountMinor, data.currency)}`} onPress={() => { setSelectedCategory(category.category); goTransactions({ categoryId: category.category, currency: data.currency, startDate: data.currentRange.startDate, endDate: data.currentRange.endDate }); }} className={`mb-3 flex-row items-center rounded-lg px-2 py-1 ${selectedCategory === category.category ? 'bg-primary/5 dark:bg-primary/10' : ''}`}><View className="mr-3 h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: `${style.color}24` }}><Icon size={17} color={style.color} /></View><View className="mr-3 flex-1"><Text className="font-body text-sm font-semibold capitalize text-gray-800 dark:text-neutral-100" numberOfLines={1}>{label}</Text><View className="mt-1.5 h-2 overflow-hidden rounded-full" style={{ backgroundColor: dark ? `${style.color}30` : `${style.color}20` }}><View className="h-full rounded-full" style={{ width: `${share * 100}%`, backgroundColor: category.amountMinor < 0 ? GREEN : style.color }} /></View></View><View className="items-end"><Text className="font-body text-sm font-bold" style={{ color: category.amountMinor < 0 ? GREEN : style.color }}>{formatMinorUnits(category.amountMinor, data.currency)}</Text><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{category.amountMinor < 0 ? 'net refund' : `${(share * 100).toFixed(0)}%`}</Text></View></Pressable>;
               })}
               {data.categories.some((item) => item.amountMinor < 0) ? <Text className="mt-1 font-body text-xs leading-4 text-gray-500 dark:text-neutral-400">A refund can bring a category below zero. The chart shows categories with spending left after refunds.</Text> : null}
             </>}
@@ -295,11 +376,22 @@ export default function InsightsScreen() {
             })}
           </Card> : null}
 
-          {trendPoints.length > 0 && data.report.expenseMinor > 0 ? <Card>
-            <SectionTitle title="Spending over time" hint={trendFrequency === 'day' ? 'The filled curve shows your net spending each day.' : 'The filled curve shows your net spending each month.'} />
-            <SpendingAreaChart points={trendPoints} width={trendChartWidth} color={ORANGE} dark={dark} />
-            {highestTrend ? <Text className="mt-1 font-body text-xs text-gray-600 dark:text-neutral-300">Peak {trendFrequency}: {highestTrend.label} · {formatMinorUnits(highestTrend.amountMinor, data.currency)}</Text> : null}
+          {data.accountSpending.length ? <Card>
+            <SectionTitle title="Spending by account" hint="Ordinary expenses after linked refunds and corrections. Transfers are excluded." />
+            {data.accountSpending.slice(0, 6).map((item) => {
+              const max = Math.max(1, ...data.accountSpending.map((entry) => Math.abs(entry.amountMinor)));
+              const account = item.accountId ? data.reportRows.find((row) => row.accountId === item.accountId) : null;
+              return <Pressable key={item.accountId ?? 'unknown'} accessibilityRole="button" accessibilityLabel={`Open ${item.name} transactions, net spending ${formatMinorUnits(item.amountMinor, data.currency)}`} onPress={() => goTransactions({ accountId: item.accountId ?? undefined, currency: data.currency, startDate: data.currentRange.startDate, endDate: data.currentRange.endDate })} className="mb-3 rounded-xl px-2 py-1">
+                <View className="mb-1 flex-row items-center justify-between"><Text numberOfLines={1} className="mr-3 flex-1 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{item.name}{account?.accountCurrency ? ` · ${account.accountCurrency}` : ''}</Text><Text className="font-body text-sm font-bold text-gray-900 dark:text-white">{formatMinorUnits(item.amountMinor, data.currency)}</Text></View>
+                <View className="h-2 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="h-full rounded-full" style={{ width: `${Math.min(100, Math.abs(item.amountMinor) / max * 100)}%`, backgroundColor: item.amountMinor < 0 ? GREEN : '#2D8CFF' }} /></View>
+              </Pressable>;
+            })}
           </Card> : null}
+
+          <Card>
+            <SectionTitle title="Cash-flow composition" hint="Selected-period cash movements. This is distinct from income minus ordinary spending." />
+            {cashFlowSections.some((section) => section.inflowsMinor || section.outflowsMinor) ? cashFlowSections.map((section) => <CashFlowVisual key={section.section} section={section.section} inflows={section.inflowsMinor} outflows={section.outflowsMinor} net={section.netMinor} scale={cashFlowMax} currency={data.currency} />) : <Empty text="No cash-flow movements recorded in this period." />}
+          </Card>
 
           {data.incomeSources.length > 0 ? <Card>
             <SectionTitle title="Where money came from" hint="Receipts can include salary, gifts and other sources. This is not a tax calculation." />
@@ -307,14 +399,14 @@ export default function InsightsScreen() {
               const style = INCOME_STYLE[source.source] ?? { color: '#64748B', icon: CircleEllipsis }; const Icon = style.icon;
               const label = CLASSIFICATIONS[source.source as keyof typeof CLASSIFICATIONS]?.label ?? source.source.replaceAll('_', ' ');
               const share = safeRatio(source.amountMinor, data.report.incomeMinor);
-              return <View key={source.source} className="mb-3 flex-row items-center"><View className="mr-3 h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: `${style.color}20` }}><Icon size={17} color={style.color} /></View><View className="mr-3 flex-1"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{label}</Text><View className="mt-1 h-1.5 overflow-hidden bg-gray-100 dark:bg-neutral-800"><View className="h-full" style={{ width: `${share * 100}%`, backgroundColor: style.color }} /></View></View><Text className="font-body text-sm font-bold text-gray-900 dark:text-white">{formatMinorUnits(source.amountMinor, data.currency)}</Text></View>;
+              return <Pressable key={source.source} accessibilityRole="button" accessibilityLabel={`Open ${label} income transactions, ${formatMinorUnits(source.amountMinor, data.currency)}`} onPress={() => goTransactions({ categoryId: source.source, currency: data.currency, startDate: data.currentRange.startDate, endDate: data.currentRange.endDate })} className="mb-3 flex-row items-center rounded-lg px-2 py-1"><View className="mr-3 h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: `${style.color}20` }}><Icon size={17} color={style.color} /></View><View className="mr-3 flex-1"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{label}</Text><View className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="h-full rounded-full" style={{ width: `${share * 100}%`, backgroundColor: style.color }} /></View></View><Text className="font-body text-sm font-bold text-gray-900 dark:text-white">{formatMinorUnits(source.amountMinor, data.currency)}</Text></Pressable>;
             })}
           </Card> : null}
 
           {data.budgets.length || data.activeGoals.length || data.emergency ? <Card>
-            <SectionTitle title="Budgets & savings" hint="Compare spending with limits and track money set aside for goals." />
-            {data.budgets.length ? data.budgets.slice(0, 4).map((budget) => { const ratio = safeRatio(budget.spentMinor, budget.allocatedMinor); const over = budget.remainingMinor < 0; return <View key={budget.category} className="mb-3"><View className="mb-1 flex-row justify-between"><Text className="font-body text-sm font-semibold capitalize text-gray-800 dark:text-neutral-100">{CLASSIFICATIONS[budget.category as keyof typeof CLASSIFICATIONS]?.label ?? budget.category}</Text><Text className={`font-body text-xs font-semibold ${over ? 'text-red-600' : 'text-gray-500 dark:text-neutral-400'}`}>{over ? `Over by ${formatMinorUnits(-budget.remainingMinor, data.currency)}` : `${formatMinorUnits(budget.remainingMinor, data.currency)} left`}</Text></View><View className="h-2 overflow-hidden bg-gray-100 dark:bg-neutral-800"><View className="h-full" style={{ width: `${ratio * 100}%`, backgroundColor: over ? '#DC4C4C' : PRIMARY_COLOR }} /></View><Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">{formatMinorUnits(budget.spentMinor, data.currency)} of {formatMinorUnits(budget.allocatedMinor, data.currency)}</Text></View>; }) : null}
-            {data.activeGoals.length ? data.activeGoals.slice(0, 3).map((goal) => <View key={goal.id} className="mb-3"><View className="mb-1 flex-row justify-between"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{goal.name}</Text><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{goal.percent.toFixed(0)}%</Text></View><View className="h-2 overflow-hidden bg-gray-100 dark:bg-neutral-800"><View className="h-full bg-primary" style={{ width: `${safeRatio(goal.actualMinor, goal.targetMinor) * 100}%` }} /></View><Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">{formatMinorUnits(goal.actualMinor, data.currency)} of {formatMinorUnits(goal.targetMinor, data.currency)}</Text></View>) : null}
+            <SectionTitle title="Budgets & savings" hint="Recorded spending in the selected range against monthly limits. Partial months compare with the full monthly allocation." />
+            {data.budgets.length ? data.budgets.slice(0, 4).map((budget) => { const ratio = safeRatio(budget.spentMinor, budget.allocatedMinor); const over = budget.remainingMinor < 0; const percent = budget.allocatedMinor > 0 ? Math.round(budget.spentMinor / budget.allocatedMinor * 100) : 0; return <Pressable accessibilityRole="link" key={budget.category} onPress={() => router.push('/budgets')} className="mb-3 rounded-lg px-2 py-1"><View className="mb-1 flex-row justify-between"><Text className="font-body text-sm font-semibold capitalize text-gray-800 dark:text-neutral-100">{CLASSIFICATIONS[budget.category as keyof typeof CLASSIFICATIONS]?.label ?? budget.category}</Text><Text className={`font-body text-xs font-semibold ${over ? 'text-red-600' : 'text-gray-500 dark:text-neutral-400'}`}>{over ? `Over by ${formatMinorUnits(-budget.remainingMinor, data.currency)}` : `${formatMinorUnits(budget.remainingMinor, data.currency)} left`}</Text></View><View className="h-2 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="h-full rounded-full" style={{ width: `${ratio * 100}%`, backgroundColor: over ? '#DC4C4C' : '#D99028' }} /></View><Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">{formatMinorUnits(budget.spentMinor, data.currency)} of {formatMinorUnits(budget.allocatedMinor, data.currency)} · {percent}% used{over ? ' · progress bar capped at 100%' : ''}</Text></Pressable>; }) : null}
+            {data.activeGoals.length ? data.activeGoals.slice(0, 3).map((goal) => { const remaining = goal.targetMinor - goal.actualMinor; return <Pressable accessibilityRole="link" key={goal.id} onPress={() => router.push('/savings')} className="mb-3 rounded-lg px-2 py-1"><View className="mb-1 flex-row justify-between"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">{goal.name}</Text><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{goal.percent.toFixed(0)}%</Text></View><View className="h-2 overflow-hidden rounded-full bg-gray-100 dark:bg-neutral-800"><View className="h-full rounded-full bg-sky-600" style={{ width: `${safeRatio(goal.actualMinor, goal.targetMinor) * 100}%` }} /></View><Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">{formatMinorUnits(goal.actualMinor, data.currency)} of {formatMinorUnits(goal.targetMinor, data.currency)} · {remaining > 0 ? `${formatMinorUnits(remaining, data.currency)} remaining` : `${formatMinorUnits(-remaining, data.currency)} above target`}</Text></Pressable>; }) : null}
             {data.emergency ? <View className="mt-2 border-t border-gray-100 pt-3 dark:border-neutral-800"><View className="mb-1 flex-row justify-between"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Emergency fund · {data.emergency.currency}</Text><Text className="font-body text-xs text-gray-500 dark:text-neutral-400">{data.emergency.coverageMonthsActual.toFixed(1)} / {data.emergency.coverageMonths} months</Text></View><View className="h-2 overflow-hidden bg-gray-100 dark:bg-neutral-800"><View className="h-full bg-primary" style={{ width: `${safeRatio(data.emergency.allocatedMinor, data.emergency.requiredMinor) * 100}%` }} /></View><Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">{formatMinorUnits(data.emergency.allocatedMinor, data.emergency.currency)} set aside · {formatMinorUnits(data.emergency.remainingMinor, data.emergency.currency)} left to reach the target. Essential monthly costs: {formatMinorUnits(data.emergency.essentialMonthlyMinor, data.emergency.currency)}.</Text></View> : null}
             <Pressable accessibilityRole="link" onPress={() => router.push('/budgets')} className="mt-2 self-start border-b border-primary pb-0.5"><Text className="font-body text-xs font-semibold text-primary">Manage budgets and savings</Text></Pressable>
           </Card> : null}
@@ -393,8 +485,31 @@ export default function InsightsScreen() {
           </> : null}
         </> : null}
       </ScrollView>
+      <ActionSheet visible={filtersVisible} title="Reports and custom dates" onClose={() => setFiltersVisible(false)}>
+        {draftPeriod === 'Custom' ? <>
+          <Text className="mb-2 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Custom period</Text>
+          <View className="mb-3 flex-row">
+          <View className="mr-2 flex-1"><DatePickerField label="Start date" value={draftStartDate} maxDate={parseDateKey(draftEndDate) ?? new Date()} onChangeText={setDraftStartDate} /></View>
+          <View className="flex-1"><DatePickerField label="End date" value={draftEndDate} minDate={parseDateKey(draftStartDate)} maxDate={new Date()} onChangeText={setDraftEndDate} /></View>
+          </View>
+          <Text className="mb-4 font-body text-[11px] leading-4 text-gray-500 dark:text-neutral-400">Dates are inclusive, limited to 366 days, and compared with the preceding range of equal length.</Text>
+        </> : null}
+        <Text className="mb-2 font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Statements and details</Text>
+        <Text className="mb-3 font-body text-[11px] leading-4 text-gray-500 dark:text-neutral-400">The dashboard remains the default. Choose a detailed report when you need statement rows.</Text>
+        <View className="mb-4 flex-row flex-wrap gap-2">
+          {REPORT_VIEWS.map(([key, label]) => <FilterChoice key={key} label={label} selected={draftReportView === key} onPress={() => setDraftReportView(key)} />)}
+        </View>
+        <View className="mb-2 flex-row gap-3 border-t border-gray-200 pt-3 dark:border-neutral-800">
+          <Pressable accessibilityRole="button" onPress={resetFilters} className="h-12 flex-1 items-center justify-center rounded-xl border border-gray-300 bg-white dark:border-neutral-700 dark:bg-neutral-900"><Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Reset</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={applyFilters} className="houselog-button h-12 flex-1 items-center justify-center rounded-xl"><Text className="font-body font-semibold text-white">Apply filters</Text></Pressable>
+        </View>
+      </ActionSheet>
     </SafeAreaView>
   );
+}
+
+function FilterChoice({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityState={{ selected }} onPress={onPress} className={`min-h-10 items-center justify-center rounded-full border px-3 ${selected ? 'border-primary/30 bg-primary/10 dark:border-primary/40 dark:bg-primary/20' : 'border-gray-200 bg-white dark:border-neutral-700 dark:bg-neutral-900'}`}><Text className={`font-body text-xs font-semibold ${selected ? 'text-primary dark:text-[#b9b5ff]' : 'text-gray-700 dark:text-neutral-200'}`}>{label}</Text></Pressable>;
 }
 
 function Legend({ color, label }: { color: string; label: string }) { return <View className="flex-row items-center"><View className="mr-1.5 h-2.5 w-2.5" style={{ backgroundColor: color }} /><Text className="font-body text-xs text-gray-600 dark:text-neutral-300">{label}</Text></View>; }
@@ -416,9 +531,54 @@ function StatementLine({ label, value, currency, color, strong = false }: { labe
 function Position({ label, value, currency, strong = false }: { label: string; value: number; currency: string; strong?: boolean }) { return <View className="w-1/3 pr-1"><Text className="font-body text-[10px] text-gray-500 dark:text-neutral-400">{label}</Text><Text className={`mt-0.5 font-body ${strong ? 'text-sm font-bold text-primary' : 'text-xs font-semibold text-gray-800 dark:text-neutral-100'}`}>{formatMinorUnits(value, currency)}</Text></View>; }
 function AssetComponent({ label, value, total, currency, color }: { label: string; value: number; total: number; currency: string; color: string }) { return <View className="mb-2"><View className="mb-1 flex-row justify-between"><Text className="font-body text-xs text-gray-600 dark:text-neutral-300">{label}</Text><Text className="font-body text-xs font-semibold text-gray-800 dark:text-neutral-100">{formatMinorUnits(value, currency)}</Text></View><View className="h-1.5 overflow-hidden bg-gray-100 dark:bg-neutral-800"><View className="h-full" style={{ width: `${value > 0 ? safeRatio(value, total) * 100 : 0}%`, backgroundColor: color }} /></View></View>; }
 
-function SpendingAreaChart({ points, width, color, dark }: { points: { id: string; label: string; amountMinor: number }[]; width: number; color: string; dark: boolean }) {
+function GroupedFinancialBars({ points, width, currency, selectedId, onSelect }: { points: { id: string; label: string; startDate: string; endDate: string; incomeMinor: number; expenseMinor: number }[]; width: number; currency: string; selectedId?: string; onSelect: (id: string) => void }) {
+  const height = 176;
+  const left = 54;
+  const right = 8;
+  const top = 10;
+  const bottom = 32;
+  const minValue = Math.min(0, ...points.flatMap((point) => [point.incomeMinor, point.expenseMinor]));
+  const maxValue = Math.max(1, ...points.flatMap((point) => [point.incomeMinor, point.expenseMinor]));
+  const span = maxValue - minValue || 1;
+  const chartHeight = height - top - bottom;
+  const baseline = top + (maxValue / span) * chartHeight;
+  const slot = (width - left - right) / Math.max(1, points.length);
+  const barWidth = Math.max(3, Math.min(13, slot * 0.28));
+  const x = (index: number) => left + slot * index + slot / 2;
+  const y = (value: number) => top + ((maxValue - value) / span) * chartHeight;
+  const ticks = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
+  const axis = '#9CA3AF';
+  return <View>
+    <Svg width={width} height={height}>
+      {[0, 0.5, 1].map((fraction) => <React.Fragment key={fraction}><Line x1={left} x2={width - right} y1={top + fraction * chartHeight} y2={top + fraction * chartHeight} stroke="#D1D5DB" strokeOpacity={0.55} strokeWidth={1} /><SvgText x={left - 5} y={top + fraction * chartHeight + 3} fill="#737987" fontSize={8} textAnchor="end">{formatMinorUnits(Math.round(maxValue - fraction * span), currency)}</SvgText></React.Fragment>)}
+      <Line x1={left} x2={width - right} y1={baseline} y2={baseline} stroke={axis} strokeWidth={1.5} />
+      {points.map((point, index) => {
+        const center = x(index);
+        const values = [{ value: point.incomeMinor, color: GREEN, key: 'income' }, { value: point.expenseMinor, color: ORANGE, key: 'spending' }];
+        return <React.Fragment key={point.id}>{values.map((entry, seriesIndex) => {
+          const valueY = y(entry.value);
+          const barX = center + (seriesIndex === 0 ? -barWidth - 1 : 1);
+          const barY = Math.min(baseline, valueY);
+          const barHeight = Math.max(2, Math.abs(valueY - baseline));
+          return <Rect key={entry.key} x={barX} y={barY} width={barWidth} height={barHeight} rx={Math.min(3, barWidth / 2)} fill={entry.color} opacity={selectedId && selectedId !== point.id ? 0.42 : 0.92} onPress={() => onSelect(point.id)} accessible accessibilityLabel={`${point.label} ${entry.key}: ${formatMinorUnits(entry.value, currency)}`} />;
+        })}</React.Fragment>;
+      })}
+      {ticks.map((index) => <SvgText key={index} x={x(index)} y={height - 7} fill="#737987" fontSize={9} textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}>{points[index]!.label}</SvgText>)}
+    </Svg>
+  </View>;
+}
+
+function CashFlowVisual({ section, inflows, outflows, net, scale, currency }: { section: string; inflows: number; outflows: number; net: number; scale: number; currency: string }) {
+  return <View className="mb-3 rounded-xl bg-gray-50 p-3 dark:bg-neutral-800">
+    <View className="mb-2 flex-row items-center justify-between"><Text className="font-heading text-sm font-bold capitalize text-gray-900 dark:text-white">{section}</Text><Text className="font-body text-xs font-bold" style={{ color: net >= 0 ? GREEN : '#DC4C4C' }}>Net {formatMinorUnits(net, currency)}</Text></View>
+    <View className="mb-2 flex-row items-center"><Text className="w-[74px] font-body text-[10px] font-semibold text-gray-600 dark:text-neutral-300">Inflows</Text><View className="mr-2 h-2 flex-1 overflow-hidden rounded-full bg-white dark:bg-neutral-900"><View className="h-full rounded-full bg-emerald-600" style={{ width: `${Math.min(100, inflows / scale * 100)}%` }} /></View><Text className="w-[92px] text-right font-body text-[10px] text-gray-700 dark:text-neutral-200">{formatMinorUnits(inflows, currency)}</Text></View>
+    <View className="flex-row items-center"><Text className="w-[74px] font-body text-[10px] font-semibold text-gray-600 dark:text-neutral-300">Outflows</Text><View className="mr-2 h-2 flex-1 overflow-hidden rounded-full bg-white dark:bg-neutral-900"><View className="h-full rounded-full bg-orange-500" style={{ width: `${Math.min(100, outflows / scale * 100)}%` }} /></View><Text className="w-[92px] text-right font-body text-[10px] text-gray-700 dark:text-neutral-200">{formatMinorUnits(outflows, currency)}</Text></View>
+  </View>;
+}
+
+function SpendingAreaChart({ points, width, color, dark, currency, selectedId, onSelect }: { points: { id: string; label: string; amountMinor: number }[]; width: number; color: string; dark: boolean; currency: string; selectedId?: string; onSelect: (id: string) => void }) {
   const height = 142;
-  const left = 8;
+  const left = 54;
   const right = 8;
   const top = 10;
   const bottom = 112;
@@ -433,20 +593,20 @@ function SpendingAreaChart({ points, width, color, dark }: { points: { id: strin
   const linePath = coordinates.map(({ x, y }, index) => `${index === 0 ? 'M' : 'L'} ${x} ${y}`).join(' ');
   const areaPath = coordinates.length ? `${linePath} L ${coordinates.at(-1)!.x} ${baseline} L ${coordinates[0]!.x} ${baseline} Z` : '';
   const tickIndices = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
-  const peakIndex = values.reduce((peak, value, index) => value > values[peak]! ? index : peak, 0);
   const gridColor = dark ? '#353535' : '#E9ECF2';
   const labelColor = dark ? '#A3A3A3' : '#737987';
 
-  return <View accessible accessibilityRole="image" accessibilityLabel="Area chart of net daily or monthly spending. Dips below the baseline represent net refunds.">
+  return <View>
     <Svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
       {[0, 0.5, 1].map((fraction) => {
         const y = top + fraction * (bottom - top);
-        return <Line key={fraction} x1={left} x2={width - right} y1={y} y2={y} stroke={gridColor} strokeWidth={1} />;
+        const value = maxValue - fraction * valueRange;
+        return <React.Fragment key={fraction}><Line x1={left} x2={width - right} y1={y} y2={y} stroke={gridColor} strokeWidth={1} /><SvgText x={left - 5} y={y + 3} fill={labelColor} fontSize={8} textAnchor="end">{formatMinorUnits(Math.round(value), currency)}</SvgText></React.Fragment>;
       })}
       {minValue < 0 ? <Line x1={left} x2={width - right} y1={baseline} y2={baseline} stroke={dark ? '#A3A3A3' : '#737987'} strokeDasharray="3 4" strokeWidth={1.2} /> : null}
       {areaPath ? <Path d={areaPath} fill={color} fillOpacity={dark ? 0.22 : 0.14} /> : null}
       {linePath ? <Path d={linePath} fill="none" stroke={color} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" /> : null}
-      {coordinates[peakIndex] ? <Circle cx={coordinates[peakIndex]!.x} cy={coordinates[peakIndex]!.y} r={4} fill={color} stroke={dark ? '#171717' : '#FFFFFF'} strokeWidth={2} /> : null}
+      {coordinates.map(({ x, y, point }) => <React.Fragment key={point.id}><Circle cx={x} cy={y} r={selectedId === point.id ? 5 : 3.5} fill={selectedId === point.id ? '#635BFF' : color} stroke={dark ? '#171717' : '#FFFFFF'} strokeWidth={2} onPress={() => onSelect(point.id)} accessible accessibilityLabel={`${point.label}: ${formatMinorUnits(point.amountMinor, currency)}`} />{points.length <= 14 ? <Circle cx={x} cy={y} r={12} fill="transparent" onPress={() => onSelect(point.id)} accessible accessibilityLabel={`${point.label}: select data point`} /> : null}</React.Fragment>)}
       {tickIndices.map((index) => <SvgText key={index} x={xAt(index)} y={height - 4} fill={labelColor} fontSize={10} textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}>{points[index]!.label}</SvgText>)}
     </Svg>
     {minValue < 0 ? <Text className="mt-1 font-body text-[10px] text-gray-500 dark:text-neutral-400">The dashed line is zero; dips below it are net refunds.</Text> : null}

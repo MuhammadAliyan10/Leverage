@@ -60,3 +60,27 @@ test('failed setup metadata write rolls back the account and allows a safe retry
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM Account WHERE ownerId=?').get('u1').n, 1);
   database.close();
 });
+
+test('existing and archived accounts count as completed setup even if the marker is missing', async () => {
+  const { database, store } = await fixture();
+  database.prepare('INSERT INTO Account(id,ownerId,name,type,balance,balanceMinor,currency,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run('legacy-account','u1','Main bank','Bank',100,10_000,'PKR','2025-01-01',1);
+
+  assert.equal(await store.isComplete('u1'), true);
+  const completion = await store.complete('u1', { name: 'Do not replace', type: 'cash', balanceMinor: 0, currency: 'PKR' });
+  assert.equal(completion.alreadyComplete, true);
+  assert.equal(completion.account.id, 'legacy-account');
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM Account WHERE ownerId=?').get('u1').n, 1);
+  database.close();
+});
+
+test('first-run requirement survives restart and clears atomically when account setup completes', async () => {
+  const { database, store } = await fixture();
+  assert.equal(await store.isRequired('u1'), false);
+  await store.require('u1');
+  assert.equal(await store.isRequired('u1'), true);
+  await store.complete('u1', { name: 'Wallet', type: 'cash', balanceMinor: 0, currency: 'PKR' });
+  assert.equal(await store.isRequired('u1'), false);
+  assert.equal(await store.isComplete('u1'), true);
+  database.close();
+});

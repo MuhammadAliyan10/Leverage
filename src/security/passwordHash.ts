@@ -6,6 +6,26 @@ export const PASSWORD_HASH_ITERATIONS = 600_000;
 const SALT_BYTES = 16;
 const DERIVED_KEY_BYTES = 32;
 const HASH_PREFIX = 'pbkdf2-sha256';
+type NativePasswordKdf = {
+  pbkdf2Sha256(password: string, saltHex: string, iterations: number, outputBytes: number): Promise<string>;
+};
+
+async function deriveKey(password: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {
+  // Avoid importing React Native's Flow-typed entry point into Node-based domain
+  // tests; Hermes exposes the same runtime marker on actual native devices.
+  const isNativeRuntime = typeof navigator !== 'undefined'
+    && (navigator as Navigator & { product?: string }).product === 'ReactNative';
+  if (isNativeRuntime) {
+    // Keep the same PBKDF2 work factor and persisted hash format while doing the
+    // expensive loop in the platform crypto provider instead of Hermes JS.
+    const { requireNativeModule } = await import('expo-modules-core');
+    const native = requireNativeModule<NativePasswordKdf>('LeveragePasswordKdf');
+    const output = await native.pbkdf2Sha256(password, bytesToHex(salt), iterations, DERIVED_KEY_BYTES);
+    if (!/^[0-9a-f]{64}$/i.test(output)) throw new Error('Native password derivation returned an invalid result.');
+    return hexToBytes(output);
+  }
+  return pbkdf2Async(sha256, utf8ToBytes(password), salt, { c: iterations, dkLen: DERIVED_KEY_BYTES });
+}
 
 function validPassword(password: string): void {
   if (typeof password !== 'string' || password.length < 1 || password.length > 1024) {
@@ -33,7 +53,7 @@ export async function derivePasswordHash(password: string, salt: Uint8Array, ite
   if (!Number.isSafeInteger(iterations) || iterations < PASSWORD_HASH_ITERATIONS || iterations > 2_000_000) {
     throw new Error('Password hash work factor is outside the supported range.');
   }
-  const derived = await pbkdf2Async(sha256, utf8ToBytes(password), salt, { c: iterations, dkLen: DERIVED_KEY_BYTES });
+  const derived = await deriveKey(password, salt, iterations);
   return `${HASH_PREFIX}$${iterations}$${bytesToHex(salt)}$${bytesToHex(derived)}`;
 }
 
@@ -42,7 +62,7 @@ export async function verifyPbkdf2Password(password: string, storedHash: string)
     validPassword(password);
     const parsed = parseHash(storedHash);
     if (!parsed) return false;
-    const actual = await pbkdf2Async(sha256, utf8ToBytes(password), parsed.salt, { c: parsed.iterations, dkLen: DERIVED_KEY_BYTES });
+    const actual = await deriveKey(password, parsed.salt, parsed.iterations);
     let difference = 0;
     for (let index = 0; index < DERIVED_KEY_BYTES; index += 1) difference |= actual[index] ^ parsed.expected[index];
     return difference === 0;

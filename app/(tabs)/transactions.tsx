@@ -55,10 +55,11 @@ export default function TransactionsScreen() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const router = useRouter();
-  const routeFilters = useLocalSearchParams<{ categoryId?: string; currency?: string; startDate?: string; endDate?: string }>();
+  const routeFilters = useLocalSearchParams<{ accountId?: string; categoryId?: string; currency?: string; startDate?: string; endDate?: string }>();
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [filters, setFilters] = useState<TransactionListFilters>(() => ({
+    accountId: routeFilters.accountId || undefined,
     categoryId: routeFilters.categoryId || undefined,
     currency: routeFilters.currency && isCurrencyCode(routeFilters.currency) ? routeFilters.currency : undefined,
     startDate: routeFilters.startDate || undefined,
@@ -66,7 +67,9 @@ export default function TransactionsScreen() {
   }));
   const [draftTypes, setDraftTypes] = useState<TransactionType[]>([]);
   const [draftAccountId, setDraftAccountId] = useState('');
+  const [draftAccountSearch, setDraftAccountSearch] = useState('');
   const [draftCategoryId, setDraftCategoryId] = useState('');
+  const [draftCategorySearch, setDraftCategorySearch] = useState('');
   const [draftCurrency, setDraftCurrency] = useState<CurrencyCode | ''>('');
   const [draftDates, setDraftDates] = useState<DateFilters>({});
   const [selectedTx, setSelectedTx] = useState<LocalTransaction | null>(null);
@@ -83,7 +86,7 @@ export default function TransactionsScreen() {
   const selectedIdRef = useRef<string | null>(null);
   const [filtersVisible, setFiltersVisible] = useState(false);
   const sheetPoints = useMemo(() => ['78%'], []);
-  const filterSheetPoints = useMemo(() => ['80%'], []);
+  const filterSheetPoints = useMemo(() => ['84%'], []);
 
   useEffect(() => {
     if (filtersVisible) filterSheetRef.current?.expand();
@@ -91,7 +94,7 @@ export default function TransactionsScreen() {
   }, [filtersVisible]);
 
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 250);
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 300);
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
@@ -116,7 +119,9 @@ export default function TransactionsScreen() {
   const openFilters = useCallback(() => {
     setDraftTypes(filters.types ?? []);
     setDraftAccountId(filters.accountId ?? '');
+    setDraftAccountSearch('');
     setDraftCategoryId(filters.categoryId ?? '');
+    setDraftCategorySearch('');
     setDraftCurrency(filters.currency ?? '');
     setDraftDates({
       startDate: filters.startDate?.slice(0, 10),
@@ -209,7 +214,7 @@ export default function TransactionsScreen() {
     setFiltersVisible(false);
   };
   const clearFilters = () => {
-    setDraftTypes([]); setDraftAccountId(''); setDraftCategoryId(''); setDraftCurrency(''); setDraftDates({}); setFilterError(''); setFilters({});
+    setDraftTypes([]); setDraftAccountId(''); setDraftAccountSearch(''); setDraftCategoryId(''); setDraftCategorySearch(''); setDraftCurrency(''); setDraftDates({}); setFilterError(''); setFilters({});
     setFiltersVisible(false);
   };
 
@@ -250,13 +255,18 @@ export default function TransactionsScreen() {
   };
 
   const sections: TransactionSection[] = groupedTransactions;
+  const normalizedAccountSearch = draftAccountSearch.trim().toLocaleLowerCase('en-US');
+  const visibleFilterAccounts = (accountsQuery.data ?? []).filter((account) => `${account.name} ${account.type} ${account.currency}${account.archivedAt ? ' archived' : ''}`.toLocaleLowerCase('en-US').includes(normalizedAccountSearch));
+  const normalizedCategorySearch = draftCategorySearch.trim().toLocaleLowerCase('en-US');
+  const visibleCategories = Object.entries(CLASSIFICATIONS).filter(([, value]) => value.label.toLocaleLowerCase('en-US').includes(normalizedCategorySearch));
+  const visibleEventCategories = EVENT_CATEGORIES.filter(([, label]) => label.toLocaleLowerCase('en-US').includes(normalizedCategorySearch));
   const selectedActivity = selectedTx ? activityFor(selectedTx) : null;
   const remainingRefund = selectedTx ? Math.max(0, selectedTx.amountMinor - (selectedTx.refundedMinor ?? 0)) : 0;
   const refundAccounts = selectedTx?.accountCurrency ? (accountsQuery.data ?? []).filter((account) => !account.archivedAt && account.currency === selectedTx.accountCurrency) : [];
   const canRefund = refundAccounts.some((account) => account.id === refundAccountId);
 
   return (
-    <SafeAreaView className="flex-1 bg-white dark:bg-neutral-950">
+    <SafeAreaView edges={['left', 'right', 'bottom']} className="flex-1 bg-white dark:bg-neutral-950">
       <GlobalHeader title="Transactions" description="Search and review your financial history" RightIcon={<Filter size={21} color="#635BFF" />} onRightPress={openFilters} rightActionLabel={activeFilterCount ? `Filters, ${activeFilterCount} active` : 'Filter transactions'} />
 
       <View className="px-5 pt-4 pb-2">
@@ -265,16 +275,13 @@ export default function TransactionsScreen() {
           <TextInput className="ml-2 flex-1 font-body text-sm text-gray-900 dark:text-white" placeholder="Search transactions, accounts, notes…" placeholderTextColor="#858995" value={searchQuery} onChangeText={setSearchQuery} onFocus={() => setIsFocused(true)} onBlur={() => setIsFocused(false)} onSubmitEditing={() => setDebouncedSearch(searchQuery.trim())} returnKeyType="search" accessibilityLabel="Search all transactions" />
           {!!searchQuery && <Pressable accessibilityRole="button" accessibilityLabel="Clear search" hitSlop={8} onPress={() => { setSearchQuery(''); setDebouncedSearch(''); }}><X size={18} color="#858995" /></Pressable>}
         </View>
-        <Pressable className="mt-2 self-start flex-row items-center py-1" accessibilityRole="button" accessibilityLabel={`Open filters${activeFilterCount ? `, ${activeFilterCount} active` : ''}`} onPress={openFilters}>
-          <Text className="font-body text-xs font-semibold text-primary">{activeFilterCount ? `${activeFilterCount} filter${activeFilterCount === 1 ? '' : 's'} active · Edit filters` : 'Filter transactions'}</Text>
-        </Pressable>
-        {activeFilterLabels.length ? <View className="mt-1 flex-row flex-wrap">{activeFilterLabels.map(({ key, label }) => <Pressable key={`${key}-${label}`} accessibilityRole="button" accessibilityLabel={`Remove ${label} filter`} className="mb-1 mr-1 border border-primary/30 px-2 py-1" onPress={() => setFilters((current) => {
+        {activeFilterLabels.length ? <View className="mt-2 flex-row flex-wrap">{activeFilterLabels.map(({ key, label }) => <Pressable key={`${key}-${label}`} accessibilityRole="button" accessibilityLabel={`Remove ${label} filter`} className="mb-1 mr-1 rounded-full border border-primary/30 bg-primary/5 px-3 py-1.5 dark:bg-primary/10" onPress={() => setFilters((current) => {
           if (key === 'types') return { ...current, types: undefined };
           if (key === 'dates') return { ...current, startDate: undefined, endDate: undefined };
           if (key === 'accountId') return { ...current, accountId: undefined };
           if (key === 'categoryId') return { ...current, categoryId: undefined };
           return { ...current, currency: undefined };
-        })}><Text className="font-body text-[10px] text-primary">{label} ×</Text></Pressable>)}</View> : null}
+        })}><Text className="font-body text-[10px] font-medium text-primary">{label} ×</Text></Pressable>)}</View> : null}
       </View>
 
       {isLoading ? <View className="flex-1 px-5 pt-2">{[0,1,2,3,4].map((row) => <View key={row} className="mb-3 h-[76px] border border-gray-100 bg-gray-50 dark:border-neutral-800 dark:bg-neutral-900" />)}</View> : isError ? (
@@ -316,16 +323,35 @@ export default function TransactionsScreen() {
         backgroundStyle={{ backgroundColor: 'transparent' }}
       >
         <View className="flex-1 border-t border-gray-200 bg-white px-5 pt-3 dark:border-neutral-700 dark:bg-neutral-900">
-          <View className="mb-3 flex-row items-center justify-between"><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Filter transactions</Text><Pressable accessibilityRole="button" accessibilityLabel="Close filters" onPress={() => setFiltersVisible(false)}><X size={22} color="#777" /></Pressable></View>
-          <BottomSheetScrollView className="flex-1" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 28 }}>
-          <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Type</Text><View className="mb-4 flex-row flex-wrap">{FILTER_TYPES.map((type) => { const selected = draftTypes.length === 0 || draftTypes.includes(type); return <Pressable key={type} accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => setDraftTypes((current) => { const effective = current.length ? current : [...FILTER_TYPES]; return effective.includes(type) ? effective.filter((item) => item !== type) : [...effective, type]; })} className={`mb-2 mr-2 ${selected ? BADGE_PRIMARY : BADGE_NEUTRAL} px-3 py-2`}><Text className={`font-body text-xs ${selected ? `font-semibold ${BADGE_PRIMARY_TEXT}` : BADGE_NEUTRAL_TEXT}`}>{type}</Text></Pressable>; })}</View>
-          <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Account</Text>{accountsQuery.isError ? <Pressable accessibilityRole="button" className="mb-3 py-2" onPress={() => void accountsQuery.refetch()}><Text className="font-body text-sm text-red-600">Accounts unavailable · tap to retry</Text></Pressable> : <View className="mb-4 flex-row flex-wrap"><Choice label="All accounts" selected={!draftAccountId} onPress={() => setDraftAccountId('')} />{(accountsQuery.data ?? []).map((account) => <Choice key={account.id} label={`${account.name}${account.archivedAt ? ' · archived' : ''}`} selected={draftAccountId === account.id} onPress={() => setDraftAccountId(account.id)} />)}</View>}
-          <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Category</Text><View className="mb-4 flex-row flex-wrap"><Choice label="All categories" selected={!draftCategoryId} onPress={() => setDraftCategoryId('')} />{Object.entries(CLASSIFICATIONS).map(([id, value]) => <Choice key={id} label={value.label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}{EVENT_CATEGORIES.map(([id, label]) => <Choice key={id} label={label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}</View>
-          {allCurrencies.length > 1 ? <><Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Currency</Text><View className="mb-4 flex-row flex-wrap"><Choice label="All currencies" selected={!draftCurrency} onPress={() => setDraftCurrency('')} />{allCurrencies.map((currency) => <Choice key={currency} label={currency} selected={draftCurrency === currency} onPress={() => setDraftCurrency(draftCurrency === currency ? '' : currency)} />)}</View></> : null}
-          <Text className="mb-2 font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">Date range</Text><View className="flex-row"><View className="mr-2 flex-1"><DatePickerField label="From date" accessibilityLabel="Start date" value={draftDates.startDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, startDate: value || undefined }))} clearable/></View><View className="flex-1"><DatePickerField label="Through date" accessibilityLabel="End date" value={draftDates.endDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, endDate: value || undefined }))} clearable/></View></View>
-          {!!filterError && <Text accessibilityRole="alert" className="mb-3 font-body text-sm text-red-600">{filterError}</Text>}
-          <View className="flex-row"><Pressable accessibilityRole="button" className="mr-2 h-12 flex-1 items-center justify-center border border-gray-300 dark:border-neutral-700" onPress={clearFilters}><Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Clear</Text></Pressable><Pressable accessibilityRole="button" className="houselog-button h-12 flex-1 items-center justify-center" onPress={applyFilters}><Text className="font-body font-semibold text-white">Apply filters</Text></Pressable></View>
+          <View className="mb-3 flex-row items-center justify-between"><View><Text className="font-heading text-lg font-bold text-gray-900 dark:text-white">Filter transactions</Text><Text className="mt-0.5 font-body text-xs text-gray-500 dark:text-neutral-400">Narrow your history, then apply all filters together.</Text></View><Pressable accessibilityRole="button" accessibilityLabel="Close filters" hitSlop={8} onPress={() => setFiltersVisible(false)} className="h-10 w-10 items-center justify-center rounded-full bg-gray-100 dark:bg-neutral-800"><X size={20} color="#858995" /></Pressable></View>
+          <BottomSheetScrollView className="flex-1" keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 12 }}>
+            <View className="mb-3 rounded-2xl bg-gray-50 p-3 dark:bg-neutral-800/70">
+              <View className="mb-2"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Transaction type</Text><Text className="mt-0.5 font-body text-xs text-gray-500 dark:text-neutral-400">Choose one or more. All types are included by default.</Text></View>
+              <View className="flex-row flex-wrap"><Choice label="All types" selected={draftTypes.length === 0} onPress={() => setDraftTypes([])} />{FILTER_TYPES.map((type) => { const selected = draftTypes.includes(type); return <Choice key={type} label={type} selected={selected} onPress={() => setDraftTypes((current) => { const effective = current.length ? current : [...FILTER_TYPES]; return effective.includes(type) ? effective.filter((item) => item !== type) : [...effective, type]; })} />; })}</View>
+            </View>
+
+            <View className="mb-3 rounded-2xl bg-gray-50 p-3 dark:bg-neutral-800/70">
+              <View className="mb-2"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Account</Text><Text className="mt-0.5 font-body text-xs text-gray-500 dark:text-neutral-400">Include activity paid from or transferred to this account.</Text></View>
+              {accountsQuery.isError ? <Pressable accessibilityRole="button" className="py-2" onPress={() => void accountsQuery.refetch()}><Text className="font-body text-sm text-red-600">Accounts unavailable · tap to retry</Text></Pressable> : <>
+                {(accountsQuery.data?.length ?? 0) > 5 ? <View className="mb-2 h-10 flex-row items-center rounded-xl border border-gray-200 bg-white px-3 dark:border-neutral-700 dark:bg-neutral-900"><Search size={16} color="#858995" /><TextInput accessibilityLabel="Search filter accounts" className="ml-2 flex-1 font-body text-sm text-gray-900 dark:text-white" placeholder="Find an account" placeholderTextColor="#858995" value={draftAccountSearch} onChangeText={setDraftAccountSearch} /><Pressable accessibilityRole="button" accessibilityLabel="Clear account search" onPress={() => setDraftAccountSearch('')}><X size={16} color="#858995" /></Pressable></View> : null}
+                <View className="flex-row flex-wrap"><Choice label="All accounts" selected={!draftAccountId} onPress={() => setDraftAccountId('')} />{visibleFilterAccounts.map((account) => <Choice key={account.id} label={`${account.name}${account.archivedAt ? ' · archived' : ''}`} selected={draftAccountId === account.id} onPress={() => setDraftAccountId(account.id)} />)}{visibleFilterAccounts.length === 0 ? <Text className="py-2 font-body text-xs text-gray-500 dark:text-neutral-400">No matching accounts.</Text> : null}</View>
+              </>}
+            </View>
+
+            <View className="mb-3 rounded-2xl bg-gray-50 p-3 dark:bg-neutral-800/70">
+              <View className="mb-2"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Category or activity</Text><Text className="mt-0.5 font-body text-xs text-gray-500 dark:text-neutral-400">Find spending, income, transfers, or linked financial activity.</Text></View>
+              <View className="mb-2 h-10 flex-row items-center rounded-xl border border-gray-200 bg-white px-3 dark:border-neutral-700 dark:bg-neutral-900"><Search size={16} color="#858995" /><TextInput accessibilityLabel="Search filter categories" className="ml-2 flex-1 font-body text-sm text-gray-900 dark:text-white" placeholder="Find a category or activity" placeholderTextColor="#858995" value={draftCategorySearch} onChangeText={setDraftCategorySearch} /><Pressable accessibilityRole="button" accessibilityLabel="Clear category search" onPress={() => setDraftCategorySearch('')}><X size={16} color="#858995" /></Pressable></View>
+              <View className="flex-row flex-wrap"><Choice label="All categories" selected={!draftCategoryId} onPress={() => setDraftCategoryId('')} />{visibleCategories.map(([id, value]) => <Choice key={id} label={value.label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}{visibleEventCategories.map(([id, label]) => <Choice key={id} label={label} selected={draftCategoryId === id} onPress={() => setDraftCategoryId(draftCategoryId === id ? '' : id)} />)}{visibleCategories.length + visibleEventCategories.length === 0 ? <Text className="py-2 font-body text-xs text-gray-500 dark:text-neutral-400">No matching categories.</Text> : null}</View>
+            </View>
+
+            {allCurrencies.length > 1 ? <View className="mb-3 rounded-2xl bg-gray-50 p-3 dark:bg-neutral-800/70"><View className="mb-2"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Currency</Text><Text className="mt-0.5 font-body text-xs text-gray-500 dark:text-neutral-400">Show transactions involving this currency.</Text></View><View className="flex-row flex-wrap"><Choice label="All currencies" selected={!draftCurrency} onPress={() => setDraftCurrency('')} />{allCurrencies.map((currency) => <Choice key={currency} label={currency} selected={draftCurrency === currency} onPress={() => setDraftCurrency(draftCurrency === currency ? '' : currency)} />)}</View></View> : null}
+
+            <View className="mb-2 rounded-2xl bg-gray-50 p-3 dark:bg-neutral-800/70"><View className="mb-2"><Text className="font-body text-sm font-semibold text-gray-800 dark:text-neutral-100">Date range</Text><Text className="mt-0.5 font-body text-xs text-gray-500 dark:text-neutral-400">Leave either date empty for an open-ended range.</Text></View><View className="flex-row"><View className="mr-2 flex-1"><DatePickerField label="From date" accessibilityLabel="Start date" value={draftDates.startDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, startDate: value || undefined }))} clearable/></View><View className="flex-1"><DatePickerField label="Through date" accessibilityLabel="End date" value={draftDates.endDate?.slice(0, 10) ?? ''} onChangeText={(value) => setDraftDates((old) => ({ ...old, endDate: value || undefined }))} clearable/></View></View></View>
           </BottomSheetScrollView>
+          <View className="border-t border-gray-100 bg-white pt-3 pb-3 dark:border-neutral-800 dark:bg-neutral-900">
+            {!!filterError && <Text accessibilityRole="alert" className="mb-2 font-body text-sm text-red-600">{filterError}</Text>}
+            <View className="flex-row"><Pressable accessibilityRole="button" className="mr-2 h-12 flex-1 items-center justify-center rounded-xl border border-gray-300 dark:border-neutral-700" onPress={clearFilters}><Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Clear all</Text></Pressable><Pressable accessibilityRole="button" className="houselog-button h-12 flex-1 items-center justify-center rounded-xl" onPress={applyFilters}><Text className="font-body font-semibold text-white">Apply filters</Text></Pressable></View>
+          </View>
         </View>
       </BottomSheet>
 

@@ -532,7 +532,7 @@ export default function AddTransactionScreen() {
             </View>
 
             {/* Category Horizontal Scroll */}
-            <View className="border-b border-gray-100 pb-4 dark:border-neutral-800">
+            <View className="border-b border-gray-100 pb-4 pt-3 dark:border-neutral-800">
               <Text className="font-body mb-3 text-sm font-semibold text-gray-800 dark:text-neutral-100">{transactionType === 'Income' ? 'Income classification' : 'Category'}</Text>
               {transactionType === 'Transfer' ? <Text className="font-body text-sm text-blue-700">Internal transfer · excluded from income and spending totals</Text> : <ScrollView horizontal showsHorizontalScrollIndicator={false} className="-mx-2 px-2">
                 {visibleCategories.map((cat) => {
@@ -617,7 +617,7 @@ export default function AddTransactionScreen() {
               </View>
             )}
 
-            <Pressable accessibilityRole="button" accessibilityState={{ expanded: showAdditionalDetails }} onPress={() => setShowAdditionalDetails((visible) => !visible)} className="min-h-11 flex-row items-center justify-between border-b border-gray-100 pb-3 dark:border-neutral-800">
+            <Pressable accessibilityRole="button" accessibilityState={{ expanded: showAdditionalDetails }} onPress={() => setShowAdditionalDetails((visible) => !visible)} className="min-h-11 flex-row items-center justify-between border-b border-gray-100 py-2 dark:border-neutral-800">
               <Text className="font-body text-sm font-semibold text-gray-700 dark:text-neutral-200">{showAdditionalDetails ? 'Hide optional details' : 'Add date or note'}</Text>
               <Text className="font-body text-sm font-semibold text-primary">{showAdditionalDetails ? '−' : '+'}</Text>
             </Pressable>

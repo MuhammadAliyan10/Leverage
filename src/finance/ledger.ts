@@ -111,12 +111,62 @@ export function formatMinorUnits(
   fractionDigits = 2,
 ): string {
   if (!Number.isSafeInteger(amountMinor)) throw new Error('Amount is outside the supported range.');
-  return new Intl.NumberFormat(locale, {
+  if (!Number.isInteger(fractionDigits) || fractionDigits < 0 || fractionDigits > 6) {
+    throw new Error('fractionDigits must be an integer between 0 and 6.');
+  }
+
+  // Keep the major and fractional portions as integers. Dividing a safe
+  // integer by the currency scale can still round its last minor unit before
+  // Intl.NumberFormat sees it.
+  const formatter = new Intl.NumberFormat(locale, {
     style: 'currency',
     currency,
     minimumFractionDigits: fractionDigits,
     maximumFractionDigits: fractionDigits,
-  }).format(amountMinor / 10 ** fractionDigits);
+  });
+  const magnitude = BigInt(Math.abs(amountMinor));
+  const scale = 10n ** BigInt(fractionDigits);
+  const whole = magnitude / scale;
+  const remainder = magnitude % scale;
+  const negative = amountMinor < 0;
+  const wholeNumber = Number(whole);
+  const integerFormatter = new Intl.NumberFormat(locale, { maximumFractionDigits: 0, useGrouping: true });
+  const localizedWhole = integerFormatter.format(negative ? -wholeNumber : wholeNumber);
+  if (fractionDigits === 0) {
+    const numberTemplate = integerFormatter.format(negative ? -0 : 0);
+    const currencyTemplate = formatter.format(negative ? -0 : 0);
+    const numberStart = currencyTemplate.indexOf(numberTemplate);
+    if (numberStart < 0) return formatter.format(negative ? -wholeNumber : wholeNumber);
+    return `${currencyTemplate.slice(0, numberStart)}${localizedWhole}${currencyTemplate.slice(numberStart + numberTemplate.length)}`;
+  }
+
+  // Hermes on the supported iOS runtime does not expose formatToParts. Derive
+  // the locale's currency wrapper and decimal separator using format(), then
+  // insert the exact localized integer fraction ourselves.
+  const numberFormatter = new Intl.NumberFormat(locale, {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+    useGrouping: true,
+  });
+  const numberTemplate = numberFormatter.format(negative ? -0 : 0);
+  const currencyTemplate = formatter.format(negative ? -0 : 0);
+  const numberStart = currencyTemplate.indexOf(numberTemplate);
+  if (numberStart < 0) return formatter.format(negative ? -wholeNumber - Number(remainder) / Number(scale) : wholeNumber + Number(remainder) / Number(scale));
+
+  const localizedOne = new Intl.NumberFormat(locale, { maximumFractionDigits: 0, useGrouping: false }).format(1);
+  const decimalSample = new Intl.NumberFormat(locale, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+    useGrouping: false,
+  }).format(1.1);
+  const decimalSeparator = decimalSample.slice(localizedOne.length, decimalSample.length - localizedOne.length);
+  const localizedFraction = new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 0,
+    minimumIntegerDigits: fractionDigits,
+    useGrouping: false,
+  }).format(Number(remainder));
+  const exactNumber = `${localizedWhole}${decimalSeparator}${localizedFraction}`;
+  return `${currencyTemplate.slice(0, numberStart)}${exactNumber}${currencyTemplate.slice(numberStart + numberTemplate.length)}`;
 }
 
 /** Produces editable decimal text directly from integer minor units, without a float round trip. */

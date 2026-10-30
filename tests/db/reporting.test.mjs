@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { buildFinancialReportQuery, calculateFinancialBucketTotals, calculateFinancialReport } from '../../src/finance/reporting.ts';
+import { buildFinancialReportQuery, calculateFinancialBucketTotals, calculateFinancialReport, calculateSpendingByAccountTotals } from '../../src/finance/reporting.ts';
 import { buildTransactionPagePredicate } from '../../src/db/local/queryBuilders.ts';
 
 function setupReportDatabase() {
@@ -148,6 +148,24 @@ test('chart buckets aggregate complete large record sets with signed refunds and
     }, { incomeMinor: 0, expenseMinor: 0 });
     assert.deepEqual(paged, totals.may);
   }
+});
+
+test('spending-by-account totals reconcile after refunds and reversals while excluding transfers', () => {
+  const base = { ownerId: 'u', date: '2026-05-15T12:00:00.000Z', category: 'food', note: '', toAccountId: null, accountCurrency: 'PKR', destinationCurrency: null, reversalOfId: null, linkedOriginalAccountId: null, linkedOriginalToAccountId: null, linkedOriginalType: null, linkedCategory: null, linkedCurrency: null, linkedDestinationCurrency: null, linkedRootType: null, linkedRootId: null, linkedRootCurrency: null };
+  const rows = [
+    { ...base, id: 'expense-a', amountMinor: 1000, type: 'Expense', accountId: 'a' },
+    { ...base, id: 'expense-b', amountMinor: 500, type: 'Expense', accountId: 'b' },
+    { ...base, id: 'refund-a', amountMinor: 200, type: 'Refund', accountId: 'a', reversalOfId: 'expense-a', linkedOriginalAccountId: 'a', linkedOriginalType: 'Expense', linkedCategory: 'food', linkedCurrency: 'PKR' },
+    { ...base, id: 'reverse-b', amountMinor: 100, type: 'Reversal', accountId: 'b', reversalOfId: 'expense-b', linkedOriginalAccountId: 'b', linkedOriginalType: 'Expense', linkedCategory: 'food', linkedCurrency: 'PKR' },
+    { ...base, id: 'refund-b-from-a', amountMinor: 50, type: 'Refund', accountId: 'a', reversalOfId: 'expense-b', linkedOriginalAccountId: 'b', linkedOriginalType: 'Expense', linkedCategory: 'food', linkedCurrency: 'PKR' },
+    { ...base, id: 'undo-refund-b', amountMinor: 50, type: 'Reversal', accountId: 'a', reversalOfId: 'refund-b-from-a', linkedOriginalAccountId: 'a', linkedOriginalType: 'Refund', linkedCategory: 'food', linkedCurrency: 'PKR', linkedRootType: 'Expense', linkedRootId: 'expense-b', linkedRootAccountId: 'b', linkedRootCurrency: 'PKR' },
+    { ...base, id: 'transfer', amountMinor: 9999, type: 'Transfer', accountId: 'a', toAccountId: 'b', destinationCurrency: 'PKR' },
+  ];
+  const range = { startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-06-01T00:00:00.000Z' };
+  const byAccount = calculateSpendingByAccountTotals(rows, 'PKR', range);
+  assert.deepEqual(byAccount, [{ accountId: 'a', amountMinor: 800 }, { accountId: 'b', amountMinor: 400 }]);
+  const report = calculateFinancialReport(rows, 'PKR', range);
+  assert.equal(byAccount.reduce((sum, item) => sum + item.amountMinor, 0), report.expenseMinor);
 });
 
 test('a refund in a later reporting period remains a signed adjustment instead of a fake positive category', () => {

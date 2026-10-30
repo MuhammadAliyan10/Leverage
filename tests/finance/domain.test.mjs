@@ -5,6 +5,7 @@ import {
   calculateCashFlow,
   calculateIncomeExpense,
   convertForeignMinorToPkr,
+  formatMinorUnits,
   formatMinorUnitsForInput,
   formatGroupedAmountInput,
   parseExchangeRate,
@@ -49,6 +50,26 @@ test('editable amount formatting avoids floating-point round trips', () => {
   assert.equal(formatMinorUnitsForInput(-5), '-0.05');
   assert.throws(() => formatMinorUnitsForInput(Number.MAX_SAFE_INTEGER + 1), /supported range/);
   assert.throws(() => formatMinorUnitsForInput(10, 7), /fractionDigits/);
+});
+
+test('currency display preserves every supported minor unit, including safe-integer boundaries', () => {
+  assert.equal(formatMinorUnits(1_234_567), 'Rs 12,345.67');
+  assert.equal(formatMinorUnits(-1), '-Rs 0.01');
+  assert.equal(formatMinorUnits(Number.MAX_SAFE_INTEGER), 'Rs 90,071,992,547,409.91');
+  assert.equal(formatMinorUnits(Number.MAX_SAFE_INTEGER, 'PKR', 'de-DE'), '90.071.992.547.409,91 PKR');
+  assert.throws(() => formatMinorUnits(1, 'PKR', 'en-PK', 7), /fractionDigits/);
+});
+
+test('currency display works when the runtime lacks Intl formatToParts', () => {
+  const prototype = Intl.NumberFormat.prototype;
+  const original = prototype.formatToParts;
+  try {
+    prototype.formatToParts = undefined;
+    assert.equal(formatMinorUnits(Number.MAX_SAFE_INTEGER), 'Rs 90,071,992,547,409.91');
+    assert.equal(formatMinorUnits(-1, 'PKR', 'de-DE'), '-0,01 PKR');
+  } finally {
+    prototype.formatToParts = original;
+  }
 });
 
 test('amount entry formatting groups valid values without sanitizing malformed input', () => {

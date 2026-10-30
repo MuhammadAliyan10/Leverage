@@ -18,6 +18,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { zodResolver } from '@hookform/resolvers/zod';
 import Toast from 'react-native-toast-message';
 import { getLocalAuthFailureMessage } from '../../src/security/localAuthError';
+import { authTraceEvent, beginAuthTrace, finishAuthTrace } from '../../src/security/authDiagnostics';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { useAuth } from '../../src/context/AuthContext';
@@ -41,6 +42,7 @@ export default function AuthScreen() {
   const [showSignUpPassword, setShowSignUpPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const signInPasswordRef = React.useRef<TextInput>(null);
+  const signInTraceIdRef = React.useRef<string | null>(null);
   const signUpEmailRef = React.useRef<TextInput>(null);
   const signUpPasswordRef = React.useRef<TextInput>(null);
   const signUpConfirmRef = React.useRef<TextInput>(null);
@@ -77,6 +79,10 @@ export default function AuthScreen() {
 
   const signUpPassword = useWatch({ control: signUpControl, name: 'password' });
   useEffect(() => {
+    const traceId = signInTraceIdRef.current;
+    if (traceId) authTraceEvent('LOGIN_LOADING_STATE', { isSubmitting: isSignInSubmitting }, traceId);
+  }, [isSignInSubmitting]);
+  useEffect(() => {
     const email = Array.isArray(params.email) ? params.email[0] : params.email;
     if (email) setSignInValue('email', email, { shouldValidate: true });
   }, [params.email, setSignInValue]);
@@ -87,13 +93,19 @@ export default function AuthScreen() {
   }, [getSignUpFieldState, signUpPassword, triggerSignUpValidation]);
 
   const onSignIn = async (data: SignInFormData) => {
+    const traceId = beginAuthTrace();
+    signInTraceIdRef.current = traceId;
+    authTraceEvent('LOGIN_LOADING_STATE', { isSubmitting: true }, traceId);
     let result: { success: boolean; error?: string; passwordUpgradePending?: boolean };
     try {
-      result = await signIn(data.email, data.password, rememberMe);
+      result = await signIn(data.email, data.password, rememberMe, traceId);
     } catch (error) {
+      authTraceEvent('LOGIN_HANDLER_ERROR', { errorKind: error instanceof Error ? 'operation_failed' : 'unknown' }, traceId);
       result = { success: false, error: getLocalAuthFailureMessage(error) };
     }
     if (!result.success) {
+      authTraceEvent('LOGIN_ERROR_PRESENTED', { visible: true }, traceId);
+      finishAuthTrace(false, 'visible_sign_in_error', traceId);
       setSignInError('root', {
         type: 'server',
         message: result.error || 'Sign in could not be completed. Check your details and connection, then try again.',
@@ -101,8 +113,16 @@ export default function AuthScreen() {
     } else if (result.passwordUpgradePending) {
       Toast.show({ type: 'info', text1: 'Password security update pending', text2: 'Your login was verified; stored password protection could not be upgraded yet.' });
     }
+    authTraceEvent('LOGIN_HANDLER_RETURN', { success: result.success }, traceId);
     // The router guard redirects after AuthContext publishes the authenticated user.
   };
+
+  const onInvalidSignIn = () => {
+    const traceId = beginAuthTrace();
+    authTraceEvent('LOGIN_VALIDATION_REJECTED', { visible: true }, traceId);
+    finishAuthTrace(false, 'form_validation', traceId);
+  };
+  const submitSignIn = () => { void handleSignInSubmit(onSignIn, onInvalidSignIn)(); };
 
   const onSignUp = async (data: SignUpFormData) => {
     let result: { success: boolean; error?: string };
@@ -222,7 +242,7 @@ export default function AuthScreen() {
                       textContentType="password"
                       inputRef={signInPasswordRef}
                       returnKeyType="done"
-                      onSubmitEditing={handleSignInSubmit(onSignIn)}
+                      onSubmitEditing={submitSignIn}
                       onBlur={onBlur}
                       autoCapitalize="none"
                       autoCorrect={false}
@@ -242,7 +262,7 @@ export default function AuthScreen() {
                 <Button
                   title={isSignInSubmitting ? 'Signing in…' : 'Sign in'}
                   className={`${AUTH_BUTTON_CLASS} ${isSignInSubmitting ? 'opacity-60' : ''}`}
-                  onPress={handleSignInSubmit(onSignIn)}
+                  onPress={submitSignIn}
                   isLoading={isSignInSubmitting}
                 />
               </View>

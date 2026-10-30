@@ -15,10 +15,12 @@ export const DEFAULT_PROFILE_SETTINGS: ProfileSettings = {
 export interface SettingsKeyValueStorage {
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<void>;
+  removeItem(key: string): Promise<void>;
 }
 
 const APPEARANCE_KEY = 'houselog_appearance_v1';
 const profileKey = (profileId: string) => `houselog_profile_settings_v1_${profileId}`;
+const backgroundKey = (profileId: string) => `houselog_profile_background_v1_${profileId}`;
 
 export function createSettingsPreferenceStore(storage: SettingsKeyValueStorage) {
   return {
@@ -60,6 +62,23 @@ export function createSettingsPreferenceStore(storage: SettingsKeyValueStorage) 
         throw new Error('Biometric unlock requires the app lock to be enabled.');
       }
       await storage.setItem(profileKey(profileId), JSON.stringify(value));
+    },
+    async getLastBackgroundAt(profileId: string): Promise<number | null> {
+      if (!profileId.trim()) throw new Error('A profile is required to read its lock state.');
+      const stored = await storage.getItem(backgroundKey(profileId));
+      if (stored === null) return null;
+      const timestamp = Number(stored);
+      return Number.isSafeInteger(timestamp) && timestamp > 0 ? timestamp : null;
+    },
+    async setLastBackgroundAt(profileId: string, timestamp: number): Promise<void> {
+      if (!profileId.trim() || !Number.isSafeInteger(timestamp) || timestamp <= 0) {
+        throw new Error('The profile inactivity timestamp is invalid.');
+      }
+      await storage.setItem(backgroundKey(profileId), String(timestamp));
+    },
+    async clearLastBackgroundAt(profileId: string): Promise<void> {
+      if (!profileId.trim()) throw new Error('A profile is required to clear its lock state.');
+      await storage.removeItem(backgroundKey(profileId));
     },
   };
 }

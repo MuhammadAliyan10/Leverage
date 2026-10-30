@@ -1,0 +1,77 @@
+# Keep the same safety filters as .gitignore because EAS_NO_VCS is needed here.
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Expo
+.expo/
+dist/
+build/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+
+# macOS
+.DS_Store
+*.pem
+
+# Environment variables and local secrets
+.env*
+!.env.example
+!.env.template
+!backend/.env.example
+.secrets/
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+/ios
+/android
+
+# Prisma
+/src/generated/prisma
+prisma/*.db
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# NativeWind
+.nativewind/
+
+# Misc
+example/
+.vercel
+coverage/
+.turbo/
+
+# Local developer configuration and non-app sources must not leave this machine.
+.git/
+.mcp.json
+.vscode/
+.agents/
+.codex/
+backend/
+tests/
+docs/

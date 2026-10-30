@@ -8,19 +8,21 @@ test('a remembered profile restores signed in across refreshes', () => {
   assert.equal(canReadProtectedData('signedIn'), true);
 });
 
-test('a remembered profile with app lock enabled restores behind the password gate', () => {
-  assert.equal(decideRestoredSession({ savedUserId: 'profile-a', signedOutMarker: false, profileExists: true, appLockEnabled: true }), 'locked');
+test('app lock does not prompt on each restart, but locks after the configured inactivity period', () => {
+  assert.equal(decideRestoredSession({ savedUserId: 'profile-a', signedOutMarker: false, profileExists: true, appLockEnabled: true }), 'signedIn');
+  assert.equal(decideRestoredSession({ savedUserId: 'profile-a', signedOutMarker: false, profileExists: true, appLockEnabled: true, lastBackgroundAt: 1_000, now: 901_000 }), 'locked');
+  assert.equal(decideRestoredSession({ savedUserId: 'profile-a', signedOutMarker: false, profileExists: true, appLockEnabled: false, lastBackgroundAt: 1_000, now: 901_000 }), 'signedIn');
   assert.equal(canReadProtectedData('locked'), false);
 });
 
 test('a remembered web session remains signed in across reloads even when native app lock is enabled', () => {
   assert.equal(decideRestoredSession({
     savedUserId: 'profile-a', signedOutMarker: false, profileExists: true,
-    appLockEnabled: true, coldStartLockRequired: false,
+    appLockEnabled: true,
   }), 'signedIn');
   assert.equal(decideRestoredSession({
     savedUserId: 'profile-a', signedOutMarker: false, profileExists: true,
-    appLockEnabled: true, coldStartLockRequired: true,
+    appLockEnabled: true, lastBackgroundAt: 0, now: 1_000_000,
   }), 'locked');
 });
 

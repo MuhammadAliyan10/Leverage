@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { localDb } from '../../src/db/local/client';
 import { useAuth } from '../../src/context/AuthContext';
-import { calculateFinancialReport, calculateFinancialBucketTotals, type FinancialBucket } from '../../src/finance/reporting';
+import { calculateFinancialReport, calculateFinancialBucketTotals, calculateSpendingByAccountTotals, type FinancialBucket } from '../../src/finance/reporting';
 import { calculateDebtPositions } from '../../src/finance/debtPosition';
 import { calculateNetWorthPositions } from '../../src/finance/assetsInvestments';
 import { calculateLiquidityPositions } from '../../src/finance/liquidity';
@@ -10,6 +10,11 @@ import { calculateBudgetSnapshot } from '../../src/finance/budgeting';
 import { getInsightsPeriodRanges, calendarDaysInRange, calculateDailyAverageMinor, calculatePeriodChangePercent, type CustomInsightsDates, type InsightsPeriod } from '../../src/finance/insights';
 
 export interface InsightsMonthPoint { id: string; label: string; startDate: string; endDate: string; incomeMinor: number; expenseMinor: number }
+export interface InsightsTrendPoint extends InsightsMonthPoint { group: 'day' | 'week' | 'month' }
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
 
 function monthRanges(start: Date, end: Date): FinancialBucket[] {
   const buckets: FinancialBucket[] = [];
@@ -31,14 +36,19 @@ function safeMinor(value: bigint, label: string): number {
 
 export function useInsightsMetrics(period: InsightsPeriod, currencyPreference: string | null, customDates?: CustomInsightsDates) {
   const { user } = useAuth();
+  const customStartDate = customDates?.startDate;
+  const customEndDate = customDates?.endDate;
   const customRangeError = useMemo(() => {
     if (period !== 'Custom') return null;
-    try { getInsightsPeriodRanges('Custom', new Date(), customDates); return null; }
+    const dates = customStartDate && customEndDate ? { startDate: customStartDate, endDate: customEndDate } : undefined;
+    try { getInsightsPeriodRanges('Custom', new Date(), dates); return null; }
     catch (error) { return error instanceof Error ? error.message : 'Choose a valid custom date range.'; }
-  }, [period, customDates?.startDate, customDates?.endDate]);
-  const ranges = useMemo(() => period === 'Custom' && customRangeError
-    ? getInsightsPeriodRanges('This month')
-    : getInsightsPeriodRanges(period, new Date(), customDates), [period, customRangeError, customDates?.startDate, customDates?.endDate]);
+  }, [period, customStartDate, customEndDate]);
+  const ranges = useMemo(() => {
+    if (period === 'Custom' && customRangeError) return getInsightsPeriodRanges('This month');
+    const dates = customStartDate && customEndDate ? { startDate: customStartDate, endDate: customEndDate } : undefined;
+    return getInsightsPeriodRanges(period, new Date(), dates);
+  }, [period, customRangeError, customStartDate, customEndDate]);
   const currentPeriodRange = ranges.current;
   const previousPeriodRange = ranges.previous;
   const currentMonths = useMemo(() => monthRanges(currentPeriodRange.start, currentPeriodRange.end), [currentPeriodRange]);
@@ -55,7 +65,7 @@ export function useInsightsMetrics(period: InsightsPeriod, currencyPreference: s
       for (let date = new Date(currentPeriodRange.start.getFullYear(), currentPeriodRange.start.getMonth(), 1);
         date < currentPeriodRange.end && monthStarts.length < 13;
         date = new Date(date.getFullYear(), date.getMonth() + 1, 1)) {
-        monthStarts.push(date.toISOString().slice(0, 10));
+        monthStarts.push(localDateKey(date));
       }
       const [reportRows, accounts, assets, holdings, debts, goals, emergency, reservations, budgetLists, bills, schedules] = await Promise.all([
         localDb.transaction.findReportRows({ ownerId: user.id, startDate: lower.toISOString(), endDate: upper.toISOString() }),
@@ -78,13 +88,14 @@ export function useInsightsMetrics(period: InsightsPeriod, currencyPreference: s
     if (!query.data) return undefined;
     const source = query.data;
     const accountPositions = source.accounts;
-    const currencySet = new Set<string>(['PKR']);
+    const currencySet = new Set<string>();
     for (const account of source.accounts) currencySet.add(account.currency);
     for (const row of source.reportRows) if (row.accountCurrency) currencySet.add(row.accountCurrency);
     for (const asset of source.assets) currencySet.add(asset.currency);
     for (const holding of source.holdings) currencySet.add(holding.currency);
     for (const debt of source.debts) currencySet.add(debt.currency);
     for (const budget of source.budgets) currencySet.add(budget.currency);
+    if (currencySet.size === 0) currencySet.add('PKR');
     const currencies = [...currencySet].sort();
     const currency = currencyPreference && currencySet.has(currencyPreference) ? currencyPreference : (currencySet.has('PKR') ? 'PKR' : currencies[0]);
     if (!currency) throw new Error('No financial reporting currency is available.');
@@ -97,32 +108,48 @@ export function useInsightsMetrics(period: InsightsPeriod, currencyPreference: s
     const months = monthRanges(currentPeriodRange.start, currentPeriodRange.end);
     const monthlyTotals = calculateFinancialBucketTotals(source.reportRows, currency, months);
     const monthReportRows = months.map((bucket) => ({ id: bucket.id, label: new Date(bucket.startDate).toLocaleDateString(undefined, { month: 'short', year: '2-digit' }), startDate: bucket.startDate, endDate: bucket.endDate, incomeMinor: monthlyTotals[bucket.id]?.incomeMinor ?? 0, expenseMinor: monthlyTotals[bucket.id]?.expenseMinor ?? 0 }));
-    const buckets = period === 'This month' || period === 'Last month'
-      ? (() => {
-        const dayBuckets: FinancialBucket[] = [];
+    const periodDays = calendarDaysInRange(currentPeriodRange);
+    const trendGroup: InsightsTrendPoint['group'] = periodDays <= 14 ? 'day' : periodDays <= 183 ? 'week' : 'month';
+    const buckets: FinancialBucket[] = trendGroup === 'month'
+      ? monthRanges(currentPeriodRange.start, currentPeriodRange.end)
+      : (() => {
+        const result: FinancialBucket[] = [];
         let date = new Date(currentPeriodRange.start);
-        while (date < currentPeriodRange.end && dayBuckets.length < 31) {
-          const next = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
-          dayBuckets.push({ id: `day:${date.toISOString().slice(0, 10)}`, group: 'day', startDate: date.toISOString(), endDate: (next > currentPeriodRange.end ? currentPeriodRange.end : next).toISOString() });
-          date = next;
+        const step = trendGroup === 'day' ? 1 : 7;
+        while (date < currentPeriodRange.end && result.length < 53) {
+          const next = new Date(date.getFullYear(), date.getMonth(), date.getDate() + step);
+          const boundedEnd = next > currentPeriodRange.end ? currentPeriodRange.end : next;
+          const idDate = localDateKey(date);
+          result.push({ id: `${trendGroup}:${idDate}`, group: trendGroup, startDate: date.toISOString(), endDate: boundedEnd.toISOString() });
+          date = boundedEnd;
         }
-        return dayBuckets;
-      })()
-      : monthRanges(currentPeriodRange.start, currentPeriodRange.end);
+        return result;
+      })();
     const bucketAmounts = calculateFinancialBucketTotals(source.reportRows, currency, buckets);
-    const spendingTrend = buckets.map((bucket) => ({
+    const financialTrend = buckets.map((bucket) => ({
       id: bucket.id,
-      label: bucket.group === 'day' ? new Date(bucket.startDate).toLocaleDateString(undefined, { day: 'numeric' }) : new Date(bucket.startDate).toLocaleDateString(undefined, { month: 'short' }),
+      group: trendGroup,
+      label: trendGroup === 'day'
+        ? new Date(bucket.startDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+        : trendGroup === 'week'
+          ? `${new Date(bucket.startDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${new Date(new Date(bucket.endDate).getFullYear(), new Date(bucket.endDate).getMonth(), new Date(bucket.endDate).getDate() - 1).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+          : new Date(bucket.startDate).toLocaleDateString(undefined, currentPeriodRange.start.getFullYear() === new Date(currentPeriodRange.end.getTime() - 1).getFullYear() ? { month: 'short' } : { month: 'short', year: '2-digit' }),
       startDate: bucket.startDate,
       endDate: bucket.endDate,
-      amountMinor: bucketAmounts[bucket.id]?.expenseMinor ?? 0,
+      incomeMinor: bucketAmounts[bucket.id]?.incomeMinor ?? 0,
+      expenseMinor: bucketAmounts[bucket.id]?.expenseMinor ?? 0,
+    }));
+    const spendingTrend = financialTrend.map((point) => ({ ...point, amountMinor: point.expenseMinor }));
+    const accountSpending = calculateSpendingByAccountTotals(source.reportRows, currency, currentRange).map((item) => ({
+      ...item,
+      name: source.accounts.find((account) => account.id === item.accountId)?.name ?? (item.accountId ? 'Archived account' : 'Unknown account'),
     }));
 
     const activeGoals = source.goals.filter((goal) => goal.status === 'active' && goal.currency === currency);
     const savings = activeGoals.reduce((sum, goal) => ({ targetMinor: sum.targetMinor + BigInt(goal.targetMinor), actualMinor: sum.actualMinor + BigInt(goal.actualMinor) }), { targetMinor: 0n, actualMinor: 0n });
     const budgetByCategory = new Map<string, { allocated: bigint; spent: bigint }>();
     for (const month of currentMonths) {
-      const start = month.startDate.slice(0, 10);
+      const start = localDateKey(new Date(month.startDate));
       const allocations = source.budgets.filter((budget) => budget.periodStart === start && budget.currency === currency && !budget.archivedAt && !budget.supersededAt)
         .map((budget) => ({ category: budget.categoryId, amountMinor: budget.amountMinor }));
       if (allocations.length === 0) continue;
@@ -149,7 +176,7 @@ export function useInsightsMetrics(period: InsightsPeriod, currencyPreference: s
       unrealizedGainMinor: sum.unrealizedGainMinor + BigInt(holding.unrealizedGainMinor),
       dividendsMinor: sum.dividendsMinor + BigInt(holding.dividendsMinor),
     }), { marketValueMinor: 0n, realizedGainMinor: 0n, unrealizedGainMinor: 0n, dividendsMinor: 0n });
-    const monthStart = new Date(currentPeriodRange.start.getFullYear(), currentPeriodRange.start.getMonth(), 1).toISOString().slice(0, 10);
+    const monthStart = localDateKey(new Date(currentPeriodRange.start.getFullYear(), currentPeriodRange.start.getMonth(), 1));
     const currentMonthBudget = source.budgets.some((budget) => budget.periodStart === monthStart && budget.currency === currency && !budget.archivedAt && !budget.supersededAt);
     const selectedMonthBudgets = currentMonthBudget ? source.budgets.filter((budget) => budget.periodStart === monthStart && budget.currency === currency && !budget.archivedAt && !budget.supersededAt) : [];
     const relevantBills = source.bills.filter((bill) => bill.currency === currency && (bill.status === 'overdue' || bill.status === 'due' || bill.status === 'upcoming')).slice(0, 4);
@@ -163,7 +190,8 @@ export function useInsightsMetrics(period: InsightsPeriod, currencyPreference: s
       .map((holding) => ({ date: holding.priceDate, source: holding.priceSource, stale: !holding.priceDate || !Number.isFinite(Date.parse(holding.priceDate)) || asOf.getTime() - Date.parse(holding.priceDate) > 180 * 86_400_000 }));
     return {
       reportRows: source.reportRows,
-      currency, currencies, report, previousReport, currentRange, monthReportRows, spendingTrend, excludedCurrencies: report.excludedCurrencies,
+      currency, currencies, report, previousReport, currentRange, monthReportRows, financialTrend, spendingTrend, accountSpending, excludedCurrencies: report.excludedCurrencies,
+      isPartialPeriod: currentPeriodRange.start <= new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) && currentPeriodRange.end.getTime() === new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() + 1).getTime(),
       positiveCategoryTotalMinor,
       dailyAverageMinor: calculateDailyAverageMinor(report.expenseMinor, calendarDaysInRange(currentPeriodRange)),
       incomeChangePercent: calculatePeriodChangePercent(report.incomeMinor, previousReport.incomeMinor),
@@ -181,6 +209,6 @@ export function useInsightsMetrics(period: InsightsPeriod, currencyPreference: s
       staleAssetValuations, investmentPriceInfo,
       asOf: asOf.toISOString(),
     };
-  }, [query.data, currentPeriodRange, previousPeriodRange, period, currencyPreference, currentMonths, user?.id]);
+  }, [query.data, currentPeriodRange, previousPeriodRange, currencyPreference, currentMonths, user?.id]);
   return { ...query, data, customRangeError };
 }

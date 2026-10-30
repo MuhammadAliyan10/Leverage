@@ -43,9 +43,23 @@ import { inspectEncryptedDatabaseContent, openProtectedDatabase, prepareKeyForVe
 import { createPassphraseBackupEnvelope, openPassphraseBackupEnvelope } from '../../security/backupEnvelope';
 import { expoBackupCipher } from '../../security/expoBackupCipher';
 import { getLocalAuthFailureMessage, LOCAL_PROFILE_NOT_FOUND_MESSAGE } from '../../security/localAuthError';
-import { activeCloudUser, assertCloudAccountType, countLocalFinancialRecords, enqueueCloudMutation, nextCloudAccountRevision, validateCloudChangePage, wakeSync, type OutboxMutation, type CloudAccountPayload, type CloudTransactionPayload } from './syncOutbox';
+import { activeCloudUser, assertCloudAccountType, countLocalFinancialRecords, deferPendingCloudMutations, enqueueCloudMutation, nextCloudAccountRevision, normalizeSavingsEventReferences, releasePendingCloudMutations, retryEligibleRejectedCloudChanges, validateCloudChangePage, wakeSync, type OutboxMutation, type CloudAccountPayload, type CloudTransactionPayload } from './syncOutbox';
+import { executeSyncDiagnosticSql } from './syncSqliteDiagnostics';
+import { markTransactionCloudConfirmed } from './transactionSyncMetadata';
+import { authTraceEvent, authTraceOperation, getActiveAuthTraceId } from '../../security/authDiagnostics';
+import { createProjectsStore, type ProjectSql } from './projectsStore';
 
-type SqlExecutor = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getFirstAsync' | 'getAllAsync'>;
+type SqlExecutor = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getFirstAsync' | 'getAllAsync' | 'prepareAsync'>;
+type SyncSqlBindValue = string | number | null;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+async function stableCloudUuid(entityType: string, localId: string): Promise<string> {
+  const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `leverage:${entityType}:${localId}`);
+  const hex = digest.slice(0, 32).split('');
+  hex[12] = '5';
+  hex[16] = ((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  const value = hex.join('');
+  return `${value.slice(0,8)}-${value.slice(8,12)}-${value.slice(12,16)}-${value.slice(16,20)}-${value.slice(20)}`;
+}
 
 function nullableCloudText(value: unknown): string | null { return typeof value === 'string' ? value : null; }
 
@@ -561,7 +575,80 @@ async function importEncryptedBackup(envelope: Uint8Array, passphrase: string, e
   });
 }
 
+const projectDb = {
+  runAsync: async (source: string, params: (string | number | null)[] = []) => (await getDb()).runAsync(source, params),
+  getFirstAsync: async <T>(source: string, params: (string | number | null)[] = []) => (await getDb()).getFirstAsync<T>(source, params),
+  getAllAsync: async <T>(source: string, params: (string | number | null)[] = []) => (await getDb()).getAllAsync<T>(source, params),
+};
+
+async function postProjectAccountExpense(sql: ProjectSql, input: {
+  ownerId:string;expenseId:string;projectId:string;projectName:string;amountMinor:number;currency:CurrencyCode;category:string;description:string;note?:string;accountId:string;occurredAt:string;
+}): Promise<string> {
+  const executor=sql as SqlExecutor;
+  const category=input.category.trim().toLowerCase();
+  const classificationId: ClassificationId=category.includes('food')||category.includes('meal')||category.includes('grocery')?'food'
+    :category.includes('transport')||category.includes('travel')?'transport'
+      :category.includes('hotel')||category.includes('accommodation')||category.includes('housing')?'housing'
+        :category.includes('health')||category.includes('medical')?'health'
+          :category.includes('shop')||category.includes('supply')?'shopping'
+            :category.includes('bill')?'bills':'other_expense';
+  const transactionId=`project-expense:${input.expenseId}`;
+  const draft:TransactionDraft={id:transactionId,ownerId:input.ownerId,amountMinor:input.amountMinor,type:'Expense',classificationId,accountId:input.accountId,date:input.occurredAt,note:[`Project: ${input.projectName}`,input.description,input.note?.trim()].filter(Boolean).join(' · '),sourceName:input.projectName};
+  await createValidatedTransaction(draft,transactionId,{
+    findAccount:async(id,ownerId)=>executor.getFirstAsync<{id:string;ownerId:string;currency:string;type:string}>('SELECT id,ownerId,currency,type FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[id,ownerId]),
+    findTransaction:async(id,ownerId)=>{
+      const row=await executor.getFirstAsync<{id:string;ownerId:string;amountMinor:number;type:string;classificationId:string|null;categoryId:string;accountId:string|null;toAccountId:string|null;date:string;note:string;sourceName:string|null;paymentMethod:string|null;sourceAmountMinor:number|null;sourceCurrency:string|null;exchangeRate:string|null;referenceNumber:string|null;taxStatus:string;taxYear:number|null}>('SELECT id,ownerId,amountMinor,type,classificationId,categoryId,accountId,toAccountId,date,note,sourceName,paymentMethod,sourceAmountMinor,sourceCurrency,exchangeRate,referenceNumber,taxStatus,taxYear FROM "Transaction" WHERE id=? AND ownerId=?',[id,ownerId]);
+      if(!row||!row.accountId)return null;
+      const account=await executor.getFirstAsync<{id:string;ownerId:string;currency:string;type:string}>('SELECT id,ownerId,currency,type FROM Account WHERE id=? AND ownerId=?',[row.accountId,ownerId]);
+      if(!account)return null;
+      return normalizeTransactionDraft({id:row.id,ownerId:row.ownerId,amountMinor:row.amountMinor,type:row.type as TransactionType,classificationId:row.classificationId??row.categoryId,accountId:row.accountId,toAccountId:row.toAccountId??undefined,date:row.date,note:row.note,sourceName:row.sourceName??undefined,paymentMethod:row.paymentMethod??undefined,sourceAmountMinor:row.sourceAmountMinor??undefined,sourceCurrency:row.sourceCurrency??undefined,exchangeRate:row.exchangeRate??undefined,referenceNumber:row.referenceNumber??undefined,taxStatus:row.taxStatus,taxYear:row.taxYear??undefined},account);
+    },
+    insertTransaction:async(record)=>{
+      const account=await executor.getFirstAsync<{currency:string;type:string}>('SELECT currency,type FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[record.accountId,record.ownerId]);
+      if(!account||account.currency!==input.currency)throw new Error('Choose an active personal account in the project currency.');
+      await assertAccountCanFund(asObligationsSql(executor),record.ownerId,record.accountId,record.amountMinor,account.currency);
+      const cloudUserId=await activeCloudUser(executor,record.ownerId);
+      if(cloudUserId){
+        if(!['cash','bank','wallet','savings'].includes(account.type))throw new Error('This personal account type is not supported by cloud sync yet.');
+        const payload:CloudTransactionPayload={id:record.id,type:'expense',amountMinor:String(record.amountMinor),currency:account.currency as CurrencyCode,classificationId:record.classificationId??'other_expense',categoryLabel:record.categoryLabel,accountId:record.accountId,occurredAt:record.date,note:record.note,paymentMethod:record.paymentMethod,sourceName:record.sourceName,sourceAmountMinor:record.sourceAmountMinor===null?null:String(record.sourceAmountMinor),sourceCurrency:record.sourceCurrency,exchangeRate:record.exchangeRate,referenceNumber:record.referenceNumber,taxStatus:record.taxStatus,taxYear:record.taxYear};
+        await enqueueCloudMutation(executor,{mutationId:`project-expense:${input.expenseId}`,ownerId:record.ownerId,cloudUserId,entityType:'transaction',entityId:record.id,operation:'transaction.create',payload,dependencyEntityId:record.accountId});
+      }
+      await executor.runAsync('INSERT INTO "Transaction" (id,ownerId,amount,amountMinor,type,category,categoryId,classificationId,accountId,toAccountId,date,note,sourceName,paymentMethod,sourceAmountMinor,sourceCurrency,exchangeRate,referenceNumber,taxStatus,taxYear,synced) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,0)',[record.id,record.ownerId,record.amountMinor/100,record.amountMinor,record.type,record.categoryLabel,record.categoryLabel,record.classificationId,record.accountId,record.date,record.note,record.sourceName,record.paymentMethod,record.sourceAmountMinor,record.sourceCurrency,record.exchangeRate,record.referenceNumber,record.taxStatus,record.taxYear]);
+      await budgetingStore.validatePostTransaction(asBudgetingSql(executor),record.ownerId,record.accountId);
+    },
+  });
+  return transactionId;
+}
+
+async function postProjectAccountRefund(sql:ProjectSql,input:{ownerId:string;refundId:string;expenseId:string;expenseTransactionId:string;amountMinor:number;currency:CurrencyCode;accountId:string;occurredAt:string;note?:string}):Promise<string>{
+  const executor=sql as SqlExecutor;
+  const transactionId=`project-refund:${input.refundId}`;
+  const existing=await executor.getFirstAsync<{ownerId:string;amountMinor:number;type:string;accountId:string|null;date:string;note:string;reversalOfId:string|null}>('SELECT ownerId,amountMinor,type,accountId,date,note,reversalOfId FROM "Transaction" WHERE id=?',[transactionId]);
+  const note=input.note?.trim()??'';
+  if(existing){if(existing.ownerId!==input.ownerId||existing.amountMinor!==input.amountMinor||existing.type!=='Refund'||existing.accountId!==input.accountId||existing.date!==input.occurredAt||existing.note!==note||existing.reversalOfId!==input.expenseTransactionId)throw new Error('This project refund ID was already used for different personal-account refund details.');return transactionId;}
+  const original=await executor.getFirstAsync<{amountMinor:number;type:string;accountId:string|null}>('SELECT amountMinor,type,accountId FROM "Transaction" WHERE id=? AND ownerId=?',[input.expenseTransactionId,input.ownerId]);
+  if(!original||original.type!=='Expense'||original.accountId!==input.accountId)throw new Error('The personal expense linked to this project refund is unavailable.');
+  const refunded=await executor.getFirstAsync<{amountMinor:number|null}>("SELECT COALESCE(SUM(amountMinor),0) AS amountMinor FROM \"Transaction\" WHERE ownerId=? AND type='Refund' AND reversalOfId=?",[input.ownerId,input.expenseTransactionId]);
+  if((refunded?.amountMinor??0)+input.amountMinor>original.amountMinor)throw new Error('Project and personal account refunds would exceed the original payment.');
+  const account=await executor.getFirstAsync<{currency:string;type:string}>('SELECT currency,type FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[input.accountId,input.ownerId]);
+  if(!account||account.currency!==input.currency)throw new Error('The linked refund account is unavailable or has a different currency.');
+  const cloudUserId=await activeCloudUser(executor,input.ownerId);
+  if(cloudUserId){
+    if(!['cash','bank','wallet','savings'].includes(account.type))throw new Error('This account type is not supported for cloud-linked project refunds.');
+    const payload:CloudTransactionPayload={id:transactionId,type:'refund',amountMinor:String(input.amountMinor),currency:input.currency,classificationId:'expense_refund',categoryLabel:'Expense refund',accountId:input.accountId,occurredAt:input.occurredAt,note:note||null,paymentMethod:null,sourceName:null,sourceAmountMinor:null,sourceCurrency:null,exchangeRate:null,referenceNumber:null,taxStatus:'unreviewed',taxYear:null,refundOfId:input.expenseTransactionId};
+    await enqueueCloudMutation(executor,{mutationId:`project-refund:${input.refundId}`,ownerId:input.ownerId,cloudUserId,entityType:'transaction',entityId:transactionId,operation:'transaction.create',payload,dependencyEntityId:input.expenseTransactionId});
+  }
+  await executor.runAsync('INSERT INTO "Transaction" (id,ownerId,amount,amountMinor,type,category,categoryId,classificationId,accountId,toAccountId,date,note,taxStatus,synced,reversalOfId) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?,0,?)',[transactionId,input.ownerId,input.amountMinor/100,input.amountMinor,'Refund','Expense refund','expense_refund','expense_refund',input.accountId,input.occurredAt,note,'unreviewed',input.expenseTransactionId]);
+  return transactionId;
+}
+
+const projectsStore = createProjectsStore(projectDb, async (work) => {
+  const database = await getDb();
+  return withLocalWrite(database, (transaction) => work(transaction));
+},postProjectAccountExpense,wakeSync,postProjectAccountRefund);
+
 export const localDb = {
+  projects: projectsStore,
   cloudIdentity: {
     /** Link an authenticated cloud profile and queue its existing cash accounts and ledger entries for idempotent import. */
     linkProfileAndQueueCoreImport: async ({ ownerId, cloudUserId }: { ownerId: string; cloudUserId: string }): Promise<{ unsupportedRecords: number }> => {
@@ -745,6 +832,108 @@ export const localDb = {
       const database = await getDb();
       return database.getAllAsync('SELECT mutationId,entityType,entityId,operation,lastErrorCategory AS errorCategory,createdAt FROM SyncOutbox WHERE ownerId=? AND status=\'rejected\' ORDER BY updatedAt DESC,mutationId LIMIT 5', [ownerId]);
     },
+    rejectedAccountCreateForReconciliation: async (ownerId: string): Promise<{
+      mutationId: string; cloudUserId: string; entityId: string;
+      payload: CloudAccountPayload;
+      local: { name: string; type: string; currency: string; openingBalanceMinor: string; currentBalanceMinor: string };
+    } | null> => {
+      if (!ownerId.trim()) throw new Error('A profile is required to inspect this account conflict.');
+      const database = await getDb();
+      const row = await database.getFirstAsync<{
+        mutationId: string; cloudUserId: string; entityId: string; payloadJson: string;
+        name: string; type: string; currency: string; openingBalanceMinor: number; archivedAt: string | null;
+      }>(`SELECT o.mutationId,o.cloudUserId,o.entityId,o.payloadJson,a.name,a.type,a.currency,
+          a.balanceMinor AS openingBalanceMinor,a.archivedAt
+        FROM SyncOutbox o LEFT JOIN Account a ON a.id=o.entityId AND a.ownerId=o.ownerId
+        WHERE o.ownerId=? AND o.entityType='account' AND o.operation='account.create'
+          AND o.status='rejected' AND o.lastErrorCategory='CLOUD_RECORD_ALREADY_EXISTS'
+        ORDER BY o.updatedAt DESC,o.mutationId LIMIT 1`, [ownerId]);
+      if (!row) return null;
+      if (row.name == null || row.type == null || row.currency == null || row.openingBalanceMinor == null) {
+        throw new Error('The rejected account is no longer present in this local profile; no data was changed.');
+      }
+      if (row.archivedAt != null) throw new Error('The rejected account is archived locally; no data was changed.');
+      const identity = await database.getFirstAsync<{ cloudUserId: string; syncEnabled: number }>(
+        'SELECT cloudUserId,syncEnabled FROM CloudIdentity WHERE ownerId=?', [ownerId],
+      );
+      if (!identity?.syncEnabled || identity.cloudUserId !== row.cloudUserId) {
+        throw new Error('The rejected change belongs to a different cloud identity. Switch to its original linked profile before comparing; no data was changed.');
+      }
+      let payload: unknown;
+      try { payload = JSON.parse(row.payloadJson) as unknown; } catch { throw new Error('The original account request is unreadable; the conflict was left unchanged.'); }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('The original account request is invalid; the conflict was left unchanged.');
+      const p = payload as Record<string, unknown>;
+      if (p.id !== row.entityId || p.name !== row.name || p.type !== row.type || p.currency !== row.currency || typeof p.openingBalanceMinor !== 'string' || !/^-?\d+$/.test(p.openingBalanceMinor)) {
+        throw new Error('The original request does not match the local account; the conflict was left unchanged.');
+      }
+      const balanceQuery = buildAccountBalanceQuery(ownerId, true);
+      const balances = await database.getAllAsync<{ id: string; currentBalanceMinor: number }>(balanceQuery.sql, balanceQuery.params);
+      const current = balances.find((account) => account.id === row.entityId)?.currentBalanceMinor;
+      if (!Number.isSafeInteger(current)) throw new Error('The current local account balance could not be verified safely.');
+      return {
+        mutationId: row.mutationId,
+        cloudUserId: row.cloudUserId,
+        entityId: row.entityId,
+        payload: p as unknown as CloudAccountPayload,
+        local: {
+          name: row.name, type: row.type, currency: row.currency,
+          openingBalanceMinor: p.openingBalanceMinor,
+          currentBalanceMinor: String(current),
+        },
+      };
+    },
+    recentQueueItems: async (ownerId: string): Promise<{ mutationId:string;entityType:string;operation:string;payload:Record<string,unknown>;accountName:string|null;destinationName:string|null;errorCategory:string|null;status:'pending'|'in_flight'|'rejected';createdAt:string }[]> => {
+      const database = await getDb();
+      const rejected = await database.getAllAsync<{ mutationId:string;entityType:string;entityId:string;operation:string;payloadJson:string;errorCategory:string|null;status:'rejected';createdAt:string }>(`SELECT mutationId,entityType,entityId,operation,payloadJson,lastErrorCategory AS errorCategory,status,createdAt
+        FROM SyncOutbox WHERE ownerId=? AND status='rejected' ORDER BY updatedAt DESC,mutationId LIMIT 5`, [ownerId]);
+      const waiting = await database.getAllAsync<{ mutationId:string;entityType:string;entityId:string;operation:string;payloadJson:string;errorCategory:string|null;status:'pending'|'in_flight';createdAt:string }>(`SELECT mutationId,entityType,entityId,operation,payloadJson,lastErrorCategory AS errorCategory,status,createdAt
+        FROM SyncOutbox WHERE ownerId=? AND status IN ('pending','in_flight') ORDER BY updatedAt DESC,mutationId LIMIT 6`, [ownerId]);
+      const accounts = await database.getAllAsync<{ id:string;name:string }>('SELECT id,name FROM Account WHERE ownerId=?', [ownerId]);
+      const names = new Map(accounts.map((account) => [account.id, account.name]));
+      return [...rejected,...waiting].map((row) => {
+        let payload: Record<string,unknown> = {};
+        try {
+          const parsed: unknown = JSON.parse(row.payloadJson);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) payload = parsed as Record<string,unknown>;
+        } catch { /* Keep corrupt queue data visible with a generic label. */ }
+        const entityAccountId = row.entityType === 'account' ? row.entityId : null;
+        const sourceId = typeof payload.accountId === 'string' ? payload.accountId : entityAccountId;
+        const destinationId = typeof payload.toAccountId === 'string' ? payload.toAccountId : null;
+        return {
+          mutationId: row.mutationId,
+          entityType: row.entityType,
+          operation: row.operation,
+          payload,
+          accountName: sourceId ? names.get(sourceId) ?? null : null,
+          destinationName: destinationId ? names.get(destinationId) ?? null : null,
+          errorCategory: row.errorCategory,
+          status: row.status,
+          createdAt: row.createdAt,
+        };
+      });
+    },
+    retryRejected: async (ownerId: string): Promise<number> => {
+      if (!ownerId.trim()) throw new Error('A signed-in profile is required to retry cloud sync.');
+      const database = await getDb();
+      const retried = await withLocalWrite(database, async (transaction) => {
+        const identity = await transaction.getFirstAsync<{ cloudUserId:string; syncEnabled:number }>('SELECT cloudUserId,syncEnabled FROM CloudIdentity WHERE ownerId=?', [ownerId]);
+        if (!identity?.syncEnabled) throw new Error('Connect this profile to cloud sync before retrying rejected records.');
+        const now = new Date().toISOString();
+        return retryEligibleRejectedCloudChanges(transaction,ownerId,identity.cloudUserId,now);
+      });
+      wakeSync(ownerId);
+      return retried;
+    },
+    deferPendingAfterSharedFailure: async (ownerId: string, delayMs = 24 * 60 * 60 * 1000): Promise<void> => {
+      if (!ownerId.trim() || !Number.isSafeInteger(delayMs) || delayMs < 60_000 || delayMs > 7 * 24 * 60 * 60 * 1000) return;
+      const database = await getDb();
+      await deferPendingCloudMutations(database,ownerId,Date.now(),delayMs);
+    },
+    releasePendingForManualRetry: async (ownerId: string): Promise<void> => {
+      if (!ownerId.trim()) return;
+      const database = await getDb();
+      await releasePendingCloudMutations(database,ownerId);
+    },
     claimNext: async ({ ownerId, cloudUserId, now = Date.now(), leaseMs = 60_000 }: { ownerId: string; cloudUserId: string; now?: number; leaseMs?: number }) => {
       const database = await getDb();
       return withLocalWrite(database, async (transaction) => {
@@ -770,6 +959,48 @@ export const localDb = {
         let payload: Record<string, unknown>;
         try { payload = JSON.parse(row.payloadJson) as Record<string, unknown>; }
         catch { await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',lastErrorCategory='invalid_local_payload',updatedAt=? WHERE mutationId=?", [nowIso,row.mutationId]); return null; }
+        // Older app builds used timestamp-prefixed savings IDs, while Neon’s
+        // UUID-backed savings tables require UUIDs. Preserve the device IDs and
+        // persist a deterministic cloud ID in the existing outbox payload so a
+        // timeout/restart retries the exact same request and idempotency key.
+        if (row.operation === 'saving.goal.create' || row.operation === 'saving.goal.update' || row.operation === 'saving.goal.event') {
+          const localId = typeof payload.id === 'string' ? payload.id : row.entityId;
+          if (row.operation === 'saving.goal.update') {
+            const mapping = await transaction.getFirstAsync<{cloudId:string}>("SELECT cloudId FROM CloudEntityMap WHERE ownerId=? AND entityType='savings_goal' AND localId=?", [ownerId,row.entityId]);
+            if (!mapping) return null;
+            payload.id = mapping.cloudId;
+          } else if (!UUID_PATTERN.test(localId)) {
+            payload.id = await stableCloudUuid(row.entityType, localId);
+          }
+          if (row.operation === 'saving.goal.event') {
+            const normalized = await normalizeSavingsEventReferences(transaction,ownerId,payload);
+            if (normalized.status === 'waiting') return null;
+            if (normalized.status === 'missing') {
+              await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',lastErrorCategory=?,updatedAt=? WHERE mutationId=? AND ownerId=? AND status='pending'", [normalized.category,nowIso,row.mutationId,ownerId]);
+              return null;
+            }
+            payload = normalized.payload;
+          }
+          const normalizedJson = JSON.stringify(payload);
+          if (normalizedJson !== row.payloadJson) await transaction.runAsync('UPDATE SyncOutbox SET payloadJson=?,updatedAt=? WHERE mutationId=? AND ownerId=?', [normalizedJson,nowIso,row.mutationId,ownerId]);
+        }
+        if (row.operation === 'budget.create' || row.operation === 'budget.revise' || row.operation === 'budget.archive') {
+          if (row.operation === 'budget.archive') {
+            const mapping = await transaction.getFirstAsync<{cloudId:string}>("SELECT cloudId FROM CloudEntityMap WHERE ownerId=? AND entityType='budget' AND localId=?", [ownerId,row.entityId]);
+            if (!mapping) return null;
+            payload.id = mapping.cloudId;
+          } else {
+            const localId = typeof payload.id === 'string' ? payload.id : row.entityId;
+            if (!UUID_PATTERN.test(localId)) payload.id = await stableCloudUuid('budget',localId);
+            if (row.operation === 'budget.revise' && typeof payload.budgetId === 'string') {
+              const mapping = await transaction.getFirstAsync<{cloudId:string}>("SELECT cloudId FROM CloudEntityMap WHERE ownerId=? AND entityType='budget' AND localId=?", [ownerId,payload.budgetId]);
+              if (!mapping) return null;
+              payload.budgetId = mapping.cloudId;
+            }
+          }
+          const normalizedJson = JSON.stringify(payload);
+          if (normalizedJson !== row.payloadJson) await transaction.runAsync('UPDATE SyncOutbox SET payloadJson=?,updatedAt=? WHERE mutationId=? AND ownerId=?', [normalizedJson,nowIso,row.mutationId,ownerId]);
+        }
         if (row.operation === 'transaction.create') {
           const accountIds = [payload.accountId, payload.toAccountId].filter((id): id is string => typeof id === 'string');
           for (const accountId of accountIds) {
@@ -811,15 +1042,6 @@ export const localDb = {
             }
           }
         }
-        if (row.operation === 'budget.revise' && typeof payload.budgetId === 'string') {
-          const originalMap = await transaction.getFirstAsync<{cloudId:string}>("SELECT cloudId FROM CloudEntityMap WHERE ownerId=? AND entityType='budget' AND localId=?", [ownerId,payload.budgetId]);
-          if (!originalMap) {
-            const originalPending = await transaction.getFirstAsync<{mutationId:string}>("SELECT mutationId FROM SyncOutbox WHERE ownerId=? AND entityType='budget' AND entityId=? AND operation='budget.create' AND status IN ('pending','in_flight')", [ownerId,payload.budgetId]);
-            if (originalPending) return null;
-            await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',lastErrorCategory='budget_dependency_missing',updatedAt=? WHERE mutationId=?", [nowIso,row.mutationId]);
-            return null;
-          }
-        }
         if (row.operation === 'budget.archive') {
           const mapped = await transaction.getFirstAsync<{cloudId:string}>("SELECT cloudId FROM CloudEntityMap WHERE ownerId=? AND entityType='budget' AND localId=?", [ownerId,row.entityId]);
           if (!mapped) {
@@ -843,8 +1065,8 @@ export const localDb = {
           dependencyChecks.push({ entityType: 'schedule_occurrence', id: row.entityId, error: 'schedule_occurrence_dependency_missing' });
           if (typeof payload.transactionId === 'string') dependencyChecks.push({ entityType: 'transaction', id: payload.transactionId, error: 'transaction_dependency_missing' });
         }
-        if (row.operation === 'saving.goal.update' || row.operation === 'saving.goal.event') {
-          dependencyChecks.push({ entityType: 'savings_goal', id: row.operation === 'saving.goal.event' ? payload.goalId : row.entityId, error: 'saving_goal_dependency_missing' });
+        if (row.operation === 'saving.goal.update') {
+          dependencyChecks.push({ entityType: 'savings_goal', id: row.entityId, error: 'saving_goal_dependency_missing' });
         }
         if (row.operation === 'emergency.event') dependencyChecks.push({ entityType: 'emergency_config', id: ownerId, error: 'emergency_config_dependency_missing' });
         if (row.operation === 'domain.create' || row.operation === 'domain.update') {
@@ -862,7 +1084,7 @@ export const localDb = {
             if (typeof data.replacementEventId === 'string') dependencyChecks.push({ entityType: 'debt_event', id: data.replacementEventId, error: 'debt_event_dependency_missing' });
           }
         }
-        if (row.operation === 'saving.goal.event' || row.operation === 'emergency.event') {
+        if (row.operation === 'emergency.event') {
           for (const key of ['accountId','sourceAccountId','destinationAccountId']) {
             if (typeof payload[key] === 'string') dependencyChecks.push({ entityType: 'account', id: payload[key], error: 'account_dependency_missing' });
           }
@@ -897,7 +1119,7 @@ export const localDb = {
         await transaction.runAsync(`INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,?,?,?,?)
           ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=COALESCE(excluded.serverRevision,CloudEntityMap.serverRevision)`, [ownerId,row.entityType,row.entityId,cloudId,revision]);
         if (row.entityType === 'account') await transaction.runAsync('UPDATE Account SET synced=1 WHERE id=? AND ownerId=?', [row.entityId,ownerId]);
-        if (row.entityType === 'transaction') await transaction.runAsync('UPDATE "Transaction" SET synced=1 WHERE id=? AND ownerId=?', [row.entityId,ownerId]);
+        if (row.entityType === 'transaction') await markTransactionCloudConfirmed(transaction,row.entityId,ownerId);
         if (row.entityType === 'budget') await transaction.runAsync('UPDATE Budget SET synced=1 WHERE id=? AND ownerId=?', [row.entityId,ownerId]);
         if (row.entityType === 'savings_goal') await transaction.runAsync('UPDATE SavingsGoal SET synced=1 WHERE id=? AND ownerId=?', [row.entityId,ownerId]);
         if (row.entityType === 'savings_goal_event') await transaction.runAsync('UPDATE SavingsGoalEvent SET synced=1 WHERE id=? AND ownerId=?', [row.entityId,ownerId]);
@@ -918,7 +1140,9 @@ export const localDb = {
     },
     cursor: async ({ ownerId, cloudUserId }: { ownerId:string;cloudUserId:string }): Promise<string> => {
       const database = await getDb();
-      const row = await database.getFirstAsync<{cursor:string}>('SELECT cursor FROM SyncCursor WHERE ownerId=? AND cloudUserId=?', [ownerId,cloudUserId]);
+      const row = Platform.OS === 'web'
+        ? await executeSyncDiagnosticSql<{cursor:string}|null>(database,'read_sync_cursor','SELECT cursor FROM SyncCursor WHERE ownerId=? AND cloudUserId=?',[ownerId,cloudUserId],'first')
+        : await database.getFirstAsync<{cursor:string}>('SELECT cursor FROM SyncCursor WHERE ownerId=? AND cloudUserId=?', [ownerId,cloudUserId]);
       if (!row) throw new Error('This local profile is not linked to the authenticated cloud identity.');
       return row.cursor;
     },
@@ -939,11 +1163,25 @@ export const localDb = {
       if (!/^(0|[1-9]\d{0,18})$/.test(nextCursor)) throw new Error('The cloud synchronization cursor is invalid.');
       const database = await getDb();
       await withLocalWrite(database, async (transaction) => {
-        const identity = await transaction.getFirstAsync<{cloudUserId:string}>('SELECT cloudUserId FROM CloudIdentity WHERE ownerId=? AND syncEnabled=1', [ownerId]);
+        const applySql = Platform.OS === 'web' ? ({
+          execAsync: (sql: string) => transaction.execAsync(sql),
+          prepareAsync: (sql: string) => transaction.prepareAsync(sql),
+          runAsync: (sql: string, params: readonly SyncSqlBindValue[] = []) => executeSyncDiagnosticSql<SQLite.SQLiteRunResult>(transaction,'apply_cloud_change',sql,params,'run'),
+          getFirstAsync: <T>(sql: string, params: readonly (string | number | null)[] = []) => executeSyncDiagnosticSql<T|null>(transaction,'apply_cloud_change',sql,params,'first'),
+          getAllAsync: <T>(sql: string, params: readonly (string | number | null)[] = []) => executeSyncDiagnosticSql<T[]>(transaction,'apply_cloud_change',sql,params,'all'),
+        } as unknown as SqlExecutor) : transaction;
+        const schema = Platform.OS === 'web'
+          ? await executeSyncDiagnosticSql<{user_version:number}|null>(transaction,'read_local_schema_version','PRAGMA user_version',[],'first')
+          : null;
+        const identity = await applySql.getFirstAsync<{cloudUserId:string}>('SELECT cloudUserId FROM CloudIdentity WHERE ownerId=? AND syncEnabled=1', [ownerId]);
         if (identity?.cloudUserId !== cloudUserId) throw new Error('Cloud profile changed while downloading records.');
-        const cursor = await transaction.getFirstAsync<{cursor:string}>('SELECT cursor FROM SyncCursor WHERE ownerId=? AND cloudUserId=?', [ownerId,cloudUserId]);
+        const cursor = await applySql.getFirstAsync<{cursor:string}>('SELECT cursor FROM SyncCursor WHERE ownerId=? AND cloudUserId=?', [ownerId,cloudUserId]);
         if (!cursor) throw new Error('The synchronization cursor is unavailable.');
         validateCloudChangePage(cursor.cursor,nextCursor,changes);
+        if (Platform.OS === 'web' && typeof __DEV__ !== 'undefined' && __DEV__) {
+          const eventTypes = [...new Set(changes.map((change) => typeof change.entityType === 'string' ? change.entityType : 'invalid'))].sort();
+          console.info('[sync-download]', JSON.stringify({ step:'apply_cloud_records', schemaVersion:schema?.user_version ?? null, changeCount:changes.length, eventTypes }));
+        }
         for (const change of changes) {
           const serverRevision=typeof change.revision==='number'&&Number.isSafeInteger(change.revision)&&change.revision>0?change.revision:null;
           if(serverRevision===null)throw new Error('A cloud change has an invalid server revision.');
@@ -952,22 +1190,34 @@ export const localDb = {
             const p = change.payload as Record<string,unknown>;
             const id = String(p.id ?? change.entityId ?? '');
             if (!id || id !== change.entityId) throw new Error('A cloud account change is missing its stable ID.');
-            const existing = await transaction.getFirstAsync<{ownerId:string;name:string;type:string;currency:string;balanceMinor:number;archivedAt:string|null;synced:number}>('SELECT ownerId,name,type,currency,balanceMinor,archivedAt,synced FROM Account WHERE id=?', [id]);
+            const existing = await applySql.getFirstAsync<{ownerId:string;name:string;type:string;currency:string;balanceMinor:number;archivedAt:string|null;synced:number}>('SELECT ownerId,name,type,currency,balanceMinor,archivedAt,synced FROM Account WHERE id=?', [id]);
             if (p.archivedAt !== undefined && p.name === undefined) {
-              if (existing?.ownerId === ownerId) await transaction.runAsync('UPDATE Account SET archivedAt=?,synced=1 WHERE id=? AND ownerId=?', [nullableCloudText(p.archivedAt),id,ownerId]);
+              if (existing?.ownerId === ownerId) await applySql.runAsync('UPDATE Account SET archivedAt=?,synced=1 WHERE id=? AND ownerId=?', [nullableCloudText(p.archivedAt),id,ownerId]);
             } else {
               const name = String(p.name ?? ''); const type = String(p.type ?? ''); const currency = String(p.currency ?? '');
               const opening = Number(p.openingBalanceMinor);
               if (!name || !['cash','bank','wallet','savings'].includes(type) || !isCurrencyCode(currency) || !Number.isSafeInteger(opening)) throw new Error('A cloud account change contains unsupported financial data.');
               if (existing && existing.ownerId !== ownerId) throw new Error('A cloud account ID collides with another local profile.');
-              if (existing && existing.synced === 0 && (existing.name !== name || existing.type !== type || existing.currency !== currency || existing.balanceMinor !== opening)) {
-                await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='account' AND entityId=? AND status!='confirmed'", [now,ownerId,id]);
+              const localCreate = existing?.synced === 0
+                ? await applySql.getFirstAsync<{ payloadJson: string }>("SELECT payloadJson FROM SyncOutbox WHERE ownerId=? AND entityType='account' AND entityId=? AND operation='account.create' ORDER BY createdAt LIMIT 1", [ownerId,id])
+                : null;
+              let localOpening: number | null = null;
+              if (localCreate) {
+                try {
+                  const localPayload = JSON.parse(localCreate.payloadJson) as Record<string,unknown>;
+                  const candidate = Number(localPayload.openingBalanceMinor);
+                  if (Number.isSafeInteger(candidate)) localOpening = candidate;
+                } catch { /* Treat malformed queued creation as a conflict below. */ }
+              }
+              if (existing && existing.synced === 0 && (existing.name !== name || existing.type !== type || existing.currency !== currency || (localOpening ?? existing.balanceMinor) !== opening)) {
+                await applySql.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='account' AND entityId=? AND status!='confirmed'", [now,ownerId,id]);
                 continue;
               }
-              if (!existing) await transaction.runAsync('INSERT INTO Account(id,ownerId,name,type,balance,balanceMinor,currency,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,1)', [id,ownerId,name,type,opening/100,opening,currency,String(p.createdAt ?? now)]);
-              else await transaction.runAsync('UPDATE Account SET name=?,type=?,archivedAt=?,synced=1 WHERE id=? AND ownerId=?', [name,type,p.archivedAt == null ? null : String(p.archivedAt),id,ownerId]);
+              if (!existing) await applySql.runAsync('INSERT INTO Account(id,ownerId,name,type,balance,balanceMinor,currency,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,1)', [id,ownerId,name,type,opening/100,opening,currency,String(p.createdAt ?? now)]);
+              else await applySql.runAsync('UPDATE Account SET name=?,type=?,archivedAt=?,synced=1 WHERE id=? AND ownerId=?', [name,type,p.archivedAt == null ? null : String(p.archivedAt),id,ownerId]);
             }
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'account',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision", [ownerId,id,id,Number.isSafeInteger(p.revision)?Number(p.revision):null]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'account',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision", [ownerId,id,id,Number.isSafeInteger(p.revision)?Number(p.revision):null]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='account' AND entityId=? AND cloudUserId=? AND status!='confirmed'", [now,ownerId,id,cloudUserId]);
           } else if (change.entityType === 'transaction') {
             if (!change.payload || typeof change.payload !== 'object' || Array.isArray(change.payload)) throw new Error('A cloud transaction change has an invalid payload.');
             const p = change.payload as Record<string,unknown>;
@@ -977,27 +1227,27 @@ export const localDb = {
             const currency = String(p.currency ?? '');
             if (!id || id !== change.entityId || !type || !Number.isSafeInteger(amount) || amount <= 0 || !isCurrencyCode(currency) || typeof p.accountId !== 'string' || typeof p.occurredAt !== 'string' || !Number.isFinite(Date.parse(p.occurredAt))) throw new Error('A cloud transaction change contains unsupported financial data.');
             const sourceAccountId = p.accountId;
-            const existing = await transaction.getFirstAsync<{ownerId:string;amountMinor:number;type:string;accountId:string|null;toAccountId:string|null;date:string;categoryId:string;category:string;note:string|null;paymentMethod:string|null;sourceName:string|null;sourceAmountMinor:number|null;sourceCurrency:string|null;exchangeRate:string|null;referenceNumber:string|null;taxStatus:string;taxYear:number|null;reversalOfId:string|null;correctionOfId:string|null;synced:number}>('SELECT ownerId,amountMinor,type,accountId,toAccountId,date,categoryId,category,note,paymentMethod,sourceName,sourceAmountMinor,sourceCurrency,exchangeRate,referenceNumber,taxStatus,taxYear,reversalOfId,correctionOfId,synced FROM "Transaction" WHERE id=?', [id]);
+            const existing = await applySql.getFirstAsync<{ownerId:string;amountMinor:number;type:string;accountId:string|null;toAccountId:string|null;date:string;categoryId:string;category:string;note:string|null;paymentMethod:string|null;sourceName:string|null;sourceAmountMinor:number|null;sourceCurrency:string|null;exchangeRate:string|null;referenceNumber:string|null;taxStatus:string;taxYear:number|null;reversalOfId:string|null;correctionOfId:string|null;synced:number}>('SELECT ownerId,amountMinor,type,accountId,toAccountId,date,categoryId,category,note,paymentMethod,sourceName,sourceAmountMinor,sourceCurrency,exchangeRate,referenceNumber,taxStatus,taxYear,reversalOfId,correctionOfId,synced FROM "Transaction" WHERE id=?', [id]);
             if (existing && existing.ownerId !== ownerId) throw new Error('A cloud transaction ID collides with another local profile.');
             const categoryId = String(p.classificationId ?? ''); const categoryLabel = String(p.categoryLabel ?? categoryId);
             const toAccountId = typeof p.toAccountId === 'string' ? p.toAccountId : null;
             if ((type === 'Income' || type === 'Expense') && !validateStoredClassification(type, categoryId)) throw new Error('A cloud transaction classification is unsupported.');
             if ((type === 'Transfer' && categoryId !== 'internal_transfer') || (type === 'Refund' && (categoryId !== 'expense_refund' || typeof p.refundOfId !== 'string')) || (type === 'Reversal' && (categoryId !== 'correction_reversal' || typeof p.reversalOfId !== 'string'))) throw new Error('A cloud transaction classification is unsupported.');
-            const sourceAccount = await transaction.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[sourceAccountId,ownerId]);
-            const destinationAccount = toAccountId ? await transaction.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[toAccountId,ownerId]) : null;
+            const sourceAccount = await applySql.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[sourceAccountId,ownerId]);
+            const destinationAccount = toAccountId ? await applySql.getFirstAsync<{currency:string}>('SELECT currency FROM Account WHERE id=? AND ownerId=? AND archivedAt IS NULL',[toAccountId,ownerId]) : null;
             const hasTransferDestination=type==='Transfer'||(type==='Reversal'&&toAccountId!==null);
             if (!sourceAccount || sourceAccount.currency !== currency || (hasTransferDestination && (!destinationAccount || destinationAccount.currency !== currency)) || (!hasTransferDestination && toAccountId)) throw new Error('A cloud transaction references an unavailable account or currency.');
             if (type === 'Refund') {
-              const original = await transaction.getFirstAsync<{type:string;accountId:string|null;amountMinor:number;currency:string}>('SELECT t.type,t.accountId,t.amountMinor,a.currency FROM "Transaction" t JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId WHERE t.id=? AND t.ownerId=?', [p.refundOfId as string,ownerId]);
+              const original = await applySql.getFirstAsync<{type:string;accountId:string|null;amountMinor:number;currency:string}>('SELECT t.type,t.accountId,t.amountMinor,a.currency FROM "Transaction" t JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId WHERE t.id=? AND t.ownerId=?', [p.refundOfId as string,ownerId]);
               if (!original || original.type !== 'Expense' || original.currency !== currency || !original.accountId) throw new Error('A cloud refund refers to an unavailable expense.');
             }
             if (type === 'Reversal') {
-              const original = await transaction.getFirstAsync<{type:string;accountId:string|null;toAccountId:string|null;amountMinor:number;currency:string}>('SELECT t.type,t.accountId,t.toAccountId,t.amountMinor,a.currency FROM "Transaction" t JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId WHERE t.id=? AND t.ownerId=?', [p.reversalOfId as string,ownerId]);
-              if (!original || !['Income','Expense','Transfer'].includes(original.type) || original.accountId !== sourceAccountId || original.toAccountId !== toAccountId || original.amountMinor !== amount || original.currency !== currency) throw new Error('A cloud reversal does not match an available original transaction.');
+              const original = await applySql.getFirstAsync<{type:string;accountId:string|null;toAccountId:string|null;amountMinor:number;currency:string}>('SELECT t.type,t.accountId,t.toAccountId,t.amountMinor,a.currency FROM "Transaction" t JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId WHERE t.id=? AND t.ownerId=?', [p.reversalOfId as string,ownerId]);
+              if (!original || !['Income','Expense','Transfer'].includes(original.type) || original.accountId !== sourceAccountId || original.toAccountId !== toAccountId || original.amountMinor !== amount || original.currency !== currency) throw new Error('A cloud reversal does not match an available original applySql.');
             }
             if (typeof p.correctionOfId === 'string') {
-              const original = await transaction.getFirstAsync<{type:string}>('SELECT type FROM "Transaction" WHERE id=? AND ownerId=?', [p.correctionOfId,ownerId]);
-              const reversal = await transaction.getFirstAsync<{id:string}>('SELECT id FROM "Transaction" WHERE ownerId=? AND type=\'Reversal\' AND reversalOfId=?', [ownerId,p.correctionOfId]);
+              const original = await applySql.getFirstAsync<{type:string}>('SELECT type FROM "Transaction" WHERE id=? AND ownerId=?', [p.correctionOfId,ownerId]);
+              const reversal = await applySql.getFirstAsync<{id:string}>('SELECT id FROM "Transaction" WHERE ownerId=? AND type=\'Reversal\' AND reversalOfId=?', [ownerId,p.correctionOfId]);
               if (!original || !['Income','Expense','Transfer'].includes(original.type) || !reversal) throw new Error('A cloud correction replacement arrived without its original reversal.');
             }
             const sourceAmountMinor = p.sourceAmountMinor == null ? null : Number(p.sourceAmountMinor);
@@ -1016,14 +1266,14 @@ export const localDb = {
               || existing.reversalOfId !== (type === 'Refund' ? String(p.refundOfId) : type === 'Reversal' ? String(p.reversalOfId) : null)
               || existing.correctionOfId !== (typeof p.correctionOfId === 'string' ? p.correctionOfId : null)
             )) {
-              await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='transaction' AND entityId=? AND status!='confirmed'", [now,ownerId,id]);
+              await applySql.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='transaction' AND entityId=? AND status!='confirmed'", [now,ownerId,id]);
               continue;
             }
-            if (!existing) await transaction.runAsync(`INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,classificationId,accountId,toAccountId,date,note,sourceName,paymentMethod,sourceAmountMinor,sourceCurrency,exchangeRate,referenceNumber,taxStatus,taxYear,reversalOfId,correctionOfId,synced)
+            if (!existing) await applySql.runAsync(`INSERT INTO "Transaction"(id,ownerId,amount,amountMinor,type,category,categoryId,classificationId,accountId,toAccountId,date,note,sourceName,paymentMethod,sourceAmountMinor,sourceCurrency,exchangeRate,referenceNumber,taxStatus,taxYear,reversalOfId,correctionOfId,synced)
               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`, [id,ownerId,amount/100,amount,type,categoryLabel,categoryId,type === 'Transfer' ? null : categoryId,sourceAccountId,toAccountId,p.occurredAt,nullableCloudText(p.note),nullableCloudText(p.sourceName),nullableCloudText(p.paymentMethod),sourceAmountMinor,nullableCloudText(p.sourceCurrency),nullableCloudText(p.exchangeRate),nullableCloudText(p.referenceNumber),taxStatus,taxYear,type === 'Refund' ? p.refundOfId as string : type === 'Reversal' ? p.reversalOfId as string : null,typeof p.correctionOfId === 'string' ? p.correctionOfId : null]);
-            else await transaction.runAsync('UPDATE "Transaction" SET synced=1 WHERE id=? AND ownerId=?', [id,ownerId]);
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'transaction',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision", [ownerId,id,id,Number.isSafeInteger(change.revision)?Number(change.revision):null]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='transaction' AND entityId=? AND cloudUserId=? AND status!='confirmed'", [now,ownerId,id,cloudUserId]);
+            else await markTransactionCloudConfirmed(applySql,id,ownerId);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'transaction',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision", [ownerId,id,id,Number.isSafeInteger(change.revision)?Number(change.revision):null]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='transaction' AND entityId=? AND cloudUserId=? AND status!='confirmed'", [now,ownerId,id,cloudUserId]);
           } else if (change.entityType === 'recurring_schedule') {
             if (!change.payload || typeof change.payload !== 'object' || Array.isArray(change.payload)) throw new Error('A cloud recurring schedule has an invalid payload.');
             const p=change.payload as Record<string,unknown>, id=String(p.id??change.entityId??'');
@@ -1041,55 +1291,62 @@ export const localDb = {
               (scheduleType==='expense'&&!['food','transport','bills','shopping','health','bank_fee','housing','other_expense'].includes(classificationId??'other_expense'))||
               !['daily','weekly','monthly','yearly'].includes(frequency)||!dateOnly(startDate)||!dateOnly(nextDueDate)||(endDate!==null&&!dateOnly(endDate))||(endDate!==null&&endDate<startDate)||
               !['active','paused','cancelled'].includes(status)||!Number.isFinite(Date.parse(createdAt))||!Number.isFinite(Date.parse(updatedAt))) throw new Error('A cloud recurring schedule contains unsupported data.');
-            const accounts=await transaction.getAllAsync<{id:string;currency:string}>('SELECT id,currency FROM Account WHERE ownerId=? AND id IN (?,?)',[ownerId,accountId,toAccountId??accountId]);
+            const accounts=await applySql.getAllAsync<{id:string;currency:string}>('SELECT id,currency FROM Account WHERE ownerId=? AND id IN (?,?)',[ownerId,accountId,toAccountId??accountId]);
             const source=accounts.find((a)=>a.id===accountId), destination=toAccountId?accounts.find((a)=>a.id===toAccountId):null;
             if(!source||source.currency!==currency||(scheduleType==='transfer'&&(!destination||destination.currency!==currency)))throw new Error('A cloud recurring schedule references an unavailable account or currency.');
             if(scheduleType==='bill') {
-              const template=await transaction.getFirstAsync<{ownerId:string;accountId:string;currency:string}>('SELECT ownerId,accountId,currency FROM Bill WHERE id=?',[billId]);
+              const template=await applySql.getFirstAsync<{ownerId:string;accountId:string;currency:string}>('SELECT ownerId,accountId,currency FROM Bill WHERE id=?',[billId]);
               if(!template||template.ownerId!==ownerId||template.accountId!==accountId||template.currency!==currency)throw new Error('A cloud bill schedule references an unavailable or mismatched bill.');
             }
-            const existing=await transaction.getFirstAsync<{ownerId:string;scheduleType:string;name:string;amountMinor:number;currency:string;classificationId:string|null;accountId:string;toAccountId:string|null;billId:string|null;frequency:string;startDate:string;endDate:string|null;nextDueDate:string;status:string;createdAt:string;updatedAt:string;synced:number}>('SELECT ownerId,scheduleType,name,amountMinor,currency,classificationId,accountId,toAccountId,billId,frequency,startDate,endDate,nextDueDate,status,createdAt,updatedAt,synced FROM RecurringSchedule WHERE id=?',[id]);
+            const existing=await applySql.getFirstAsync<{ownerId:string;scheduleType:string;name:string;amountMinor:number;currency:string;classificationId:string|null;accountId:string;toAccountId:string|null;billId:string|null;frequency:string;startDate:string;endDate:string|null;nextDueDate:string;status:string;createdAt:string;updatedAt:string;synced:number}>('SELECT ownerId,scheduleType,name,amountMinor,currency,classificationId,accountId,toAccountId,billId,frequency,startDate,endDate,nextDueDate,status,createdAt,updatedAt,synced FROM RecurringSchedule WHERE id=?',[id]);
             if(existing&&existing.ownerId!==ownerId)throw new Error('A cloud recurring schedule ID collides with another local profile.');
             const same=existing&&existing.scheduleType===scheduleType&&existing.name===name&&existing.amountMinor===amount&&existing.currency===currency&&existing.classificationId===classificationId&&existing.accountId===accountId&&existing.toAccountId===toAccountId&&existing.billId===billId&&existing.frequency===frequency&&existing.startDate===startDate&&existing.endDate===endDate&&existing.nextDueDate===nextDueDate&&existing.status===status;
             if(existing&&existing.synced===0&&!same){
-              await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='recurring_schedule' AND entityId=? AND status!='confirmed'",[now,ownerId,id]);
+              await applySql.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='recurring_schedule' AND entityId=? AND status!='confirmed'",[now,ownerId,id]);
               continue;
             }
-            if(!existing) await transaction.runAsync('INSERT INTO RecurringSchedule(id,ownerId,scheduleType,name,amountMinor,currency,classificationId,accountId,toAccountId,billId,frequency,startDate,endDate,nextDueDate,status,createdAt,updatedAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)',[id,ownerId,scheduleType,name,amount,currency,classificationId,accountId,toAccountId,billId,frequency,startDate,endDate,nextDueDate,status,createdAt,updatedAt]);
-            else await transaction.runAsync('UPDATE RecurringSchedule SET name=?,amountMinor=?,currency=?,classificationId=?,accountId=?,toAccountId=?,billId=?,frequency=?,startDate=?,endDate=?,nextDueDate=?,status=?,updatedAt=?,synced=1 WHERE id=? AND ownerId=?',[name,amount,currency,classificationId,accountId,toAccountId,billId,frequency,startDate,endDate,nextDueDate,status,updatedAt,id,ownerId]);
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'recurring_schedule',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='recurring_schedule' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
+            if(!existing) await applySql.runAsync('INSERT INTO RecurringSchedule(id,ownerId,scheduleType,name,amountMinor,currency,classificationId,accountId,toAccountId,billId,frequency,startDate,endDate,nextDueDate,status,createdAt,updatedAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)',[id,ownerId,scheduleType,name,amount,currency,classificationId,accountId,toAccountId,billId,frequency,startDate,endDate,nextDueDate,status,createdAt,updatedAt]);
+            else await applySql.runAsync('UPDATE RecurringSchedule SET name=?,amountMinor=?,currency=?,classificationId=?,accountId=?,toAccountId=?,billId=?,frequency=?,startDate=?,endDate=?,nextDueDate=?,status=?,updatedAt=?,synced=1 WHERE id=? AND ownerId=?',[name,amount,currency,classificationId,accountId,toAccountId,billId,frequency,startDate,endDate,nextDueDate,status,updatedAt,id,ownerId]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'recurring_schedule',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='recurring_schedule' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
           } else if (change.entityType === 'schedule_occurrence') {
             if(!change.payload||typeof change.payload!=='object'||Array.isArray(change.payload))throw new Error('A cloud schedule occurrence has an invalid payload.');
             const p=change.payload as Record<string,unknown>,id=String(p.id??change.entityId??''),scheduleId=String(p.scheduleId??''),occurrenceDate=String(p.occurrenceDate??''),status=String(p.status??'');
             const transactionId=typeof p.transactionId==='string'?p.transactionId:null,resolvedAt=nullableCloudText(p.resolvedAt),createdAt=typeof p.createdAt==='string'?p.createdAt:now;
             if(!id||id!==change.entityId||!scheduleId||!/^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate)||!Number.isFinite(Date.parse(`${occurrenceDate}T00:00:00.000Z`))||!['pending','posted','skipped'].includes(status)||!Number.isFinite(Date.parse(createdAt))||
               (status==='pending'&&(transactionId!==null||resolvedAt!==null))||(status==='posted'&&(!transactionId||!resolvedAt))||(status==='skipped'&&(transactionId!==null||!resolvedAt)))throw new Error('A cloud schedule occurrence contains unsupported data.');
-            const schedule=await transaction.getFirstAsync<{scheduleType:string;amountMinor:number;currency:string;accountId:string;toAccountId:string|null;startDate:string;endDate:string|null}>('SELECT scheduleType,amountMinor,currency,accountId,toAccountId,startDate,endDate FROM RecurringSchedule WHERE id=? AND ownerId=?',[scheduleId,ownerId]);
+            const schedule=await applySql.getFirstAsync<{scheduleType:string;amountMinor:number;currency:string;accountId:string;toAccountId:string|null;startDate:string;endDate:string|null}>('SELECT scheduleType,amountMinor,currency,accountId,toAccountId,startDate,endDate FROM RecurringSchedule WHERE id=? AND ownerId=?',[scheduleId,ownerId]);
             if(!schedule||occurrenceDate<schedule.startDate||(schedule.endDate!==null&&occurrenceDate>schedule.endDate))throw new Error('A cloud schedule occurrence references an unavailable schedule or date.');
             if(status==='posted'){
-              const posted=await transaction.getFirstAsync<{type:string;amountMinor:number;currency:string;accountId:string|null;toAccountId:string|null}>('SELECT t.type,t.amountMinor,a.currency,t.accountId,t.toAccountId FROM "Transaction" t JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId WHERE t.id=? AND t.ownerId=?',[transactionId!,ownerId]);
+              const posted=await applySql.getFirstAsync<{type:string;amountMinor:number;currency:string;accountId:string|null;toAccountId:string|null}>('SELECT t.type,t.amountMinor,a.currency,t.accountId,t.toAccountId FROM "Transaction" t JOIN Account a ON a.id=t.accountId AND a.ownerId=t.ownerId WHERE t.id=? AND t.ownerId=?',[transactionId!,ownerId]);
               const expectedType=schedule.scheduleType==='income'?'Income':schedule.scheduleType==='expense'?'Expense':'Transfer';
               if(!posted||posted.type!==expectedType||posted.amountMinor!==schedule.amountMinor||posted.currency!==schedule.currency||posted.accountId!==schedule.accountId||posted.toAccountId!==schedule.toAccountId)throw new Error('A cloud occurrence is linked to a transaction that does not match its schedule.');
             }
-            const existing=await transaction.getFirstAsync<{ownerId:string;scheduleId:string;occurrenceDate:string;status:string;transactionId:string|null;resolvedAt:string|null;synced:number}>('SELECT ownerId,scheduleId,occurrenceDate,status,transactionId,resolvedAt,synced FROM ScheduleOccurrence WHERE id=?',[id]);
+            const existing=await applySql.getFirstAsync<{ownerId:string;scheduleId:string;occurrenceDate:string;status:string;transactionId:string|null;resolvedAt:string|null;synced:number}>('SELECT ownerId,scheduleId,occurrenceDate,status,transactionId,resolvedAt,synced FROM ScheduleOccurrence WHERE id=?',[id]);
             if(existing&&existing.ownerId!==ownerId)throw new Error('A cloud schedule occurrence ID collides with another local profile.');
             const same=existing&&existing.scheduleId===scheduleId&&existing.occurrenceDate===occurrenceDate&&existing.status===status&&existing.transactionId===transactionId&&existing.resolvedAt===resolvedAt;
             if(existing&&existing.synced===0&&!same){
-              await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='schedule_occurrence' AND entityId=? AND status!='confirmed'",[now,ownerId,id]);
+              await applySql.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='schedule_occurrence' AND entityId=? AND status!='confirmed'",[now,ownerId,id]);
               continue;
             }
-            if(!existing)await transaction.runAsync('INSERT INTO ScheduleOccurrence(id,ownerId,scheduleId,occurrenceDate,status,transactionId,resolvedAt,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,1)',[id,ownerId,scheduleId,occurrenceDate,status,transactionId,resolvedAt,createdAt]);
-            else await transaction.runAsync('UPDATE ScheduleOccurrence SET status=?,transactionId=?,resolvedAt=?,synced=1 WHERE id=? AND ownerId=?',[status,transactionId,resolvedAt,id,ownerId]);
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'schedule_occurrence',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='schedule_occurrence' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
+            if(!existing)await applySql.runAsync('INSERT INTO ScheduleOccurrence(id,ownerId,scheduleId,occurrenceDate,status,transactionId,resolvedAt,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,1)',[id,ownerId,scheduleId,occurrenceDate,status,transactionId,resolvedAt,createdAt]);
+            else await applySql.runAsync('UPDATE ScheduleOccurrence SET status=?,transactionId=?,resolvedAt=?,synced=1 WHERE id=? AND ownerId=?',[status,transactionId,resolvedAt,id,ownerId]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'schedule_occurrence',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='schedule_occurrence' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
           } else if (change.entityType === 'budget') {
             if (!change.payload || typeof change.payload !== 'object' || Array.isArray(change.payload)) throw new Error('A cloud budget change has an invalid payload.');
             const p = change.payload as Record<string,unknown>;
-            const id = String(p.id ?? change.entityId ?? '');
-            if (!id || id !== change.entityId) throw new Error('A cloud budget change is missing its stable ID.');
+            const cloudId = String(p.id ?? change.entityId ?? '');
+            if (!cloudId || cloudId !== change.entityId) throw new Error('A cloud budget change is missing its stable ID.');
+            const mappedLocal = await applySql.getFirstAsync<{localId:string}>("SELECT localId FROM CloudEntityMap WHERE ownerId=? AND entityType='budget' AND cloudId=?", [ownerId,cloudId]);
+            const queuedCreates = mappedLocal ? [] : await applySql.getAllAsync<{entityId:string}>("SELECT entityId FROM SyncOutbox WHERE ownerId=? AND entityType='budget' AND operation IN ('budget.create','budget.revise') AND status!='confirmed' ORDER BY createdAt", [ownerId]);
+            let queuedLocalId: string | null = null;
+            for (const queued of queuedCreates) {
+              if (await stableCloudUuid('budget',queued.entityId) === cloudId) { queuedLocalId = queued.entityId; break; }
+            }
+            const id = mappedLocal?.localId ?? queuedLocalId ?? cloudId;
             if (p.archivedAt !== undefined && typeof p.categoryId !== 'string') {
-              await transaction.runAsync('UPDATE Budget SET archivedAt=?,synced=1 WHERE id=? AND ownerId=?', [nullableCloudText(p.archivedAt),id,ownerId]);
+              await applySql.runAsync('UPDATE Budget SET archivedAt=?,synced=1 WHERE id=? AND ownerId=?', [nullableCloudText(p.archivedAt),id,ownerId]);
             } else {
               const amountMinor = Number(p.amountMinor);
               const categoryId = typeof p.categoryId === 'string' ? p.categoryId : '';
@@ -1098,77 +1355,94 @@ export const localDb = {
               const periodEnd = typeof p.periodEnd === 'string' ? p.periodEnd : '';
               const rolloverPolicy = typeof p.rolloverPolicy === 'string' ? p.rolloverPolicy : '';
               const revision = Number(p.revision);
-              const supersedesId = typeof p.supersedesId === 'string' ? p.supersedesId : null;
+              const cloudSupersedesId = typeof p.supersedesId === 'string' ? p.supersedesId : null;
+              const supersedesMap = cloudSupersedesId ? await applySql.getFirstAsync<{localId:string}>("SELECT localId FROM CloudEntityMap WHERE ownerId=? AND entityType='budget' AND cloudId=?", [ownerId,cloudSupersedesId]) : null;
+              const supersedesId = cloudSupersedesId ? supersedesMap?.localId ?? cloudSupersedesId : null;
               const createdAt = typeof p.createdAt === 'string' ? p.createdAt : now;
               if (!categoryId || !Number.isSafeInteger(amountMinor) || amountMinor <= 0 || !isCurrencyCode(currency) ||
                 !/^\d{4}-\d{2}-\d{2}$/.test(periodStart) || !/^\d{4}-\d{2}-\d{2}$/.test(periodEnd) || periodStart >= periodEnd ||
                 !['reset','carry_unused'].includes(rolloverPolicy) || !Number.isSafeInteger(revision) || revision < 1 || !Number.isFinite(Date.parse(createdAt))) {
                 throw new Error('A cloud budget change contains unsupported financial data.');
               }
-              const existing = await transaction.getFirstAsync<{ownerId:string;categoryId:string;amountMinor:number;currency:string;periodStart:string;periodEnd:string;rolloverPolicy:string;revision:number;supersedesId:string|null;synced:number}>(
+              const existing = await applySql.getFirstAsync<{ownerId:string;categoryId:string;amountMinor:number;currency:string;periodStart:string;periodEnd:string;rolloverPolicy:string;revision:number;supersedesId:string|null;synced:number}>(
                 'SELECT ownerId,categoryId,amountMinor,currency,periodStart,periodEnd,rolloverPolicy,revision,supersedesId,synced FROM Budget WHERE id=?', [id]);
               if (existing && existing.ownerId !== ownerId) throw new Error('A cloud budget ID collides with another local profile.');
               if (existing && existing.synced === 0 && (existing.categoryId !== categoryId || existing.amountMinor !== amountMinor || existing.currency !== currency ||
                 existing.periodStart !== periodStart || existing.periodEnd !== periodEnd || existing.rolloverPolicy !== rolloverPolicy || existing.revision !== revision || existing.supersedesId !== supersedesId)) {
-                await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='budget' AND entityId=? AND status!='confirmed'", [now,ownerId,id]);
+                await applySql.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='budget' AND entityId=? AND status!='confirmed'", [now,ownerId,id]);
                 continue;
               }
               if (!existing) {
-                if (supersedesId) await transaction.runAsync('UPDATE Budget SET supersededAt=COALESCE(supersededAt,?),synced=1 WHERE id=? AND ownerId=?', [createdAt,supersedesId,ownerId]);
-                await transaction.runAsync('INSERT INTO Budget(id,ownerId,categoryId,amountMinor,currency,periodStart,periodEnd,rolloverPolicy,revision,supersedesId,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)',
+                if (supersedesId) await applySql.runAsync('UPDATE Budget SET supersededAt=COALESCE(supersededAt,?),synced=1 WHERE id=? AND ownerId=?', [createdAt,supersedesId,ownerId]);
+                await applySql.runAsync('INSERT INTO Budget(id,ownerId,categoryId,amountMinor,currency,periodStart,periodEnd,rolloverPolicy,revision,supersedesId,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)',
                   [id,ownerId,categoryId,amountMinor,currency,periodStart,periodEnd,rolloverPolicy,revision,supersedesId,createdAt]);
-              } else await transaction.runAsync('UPDATE Budget SET synced=1 WHERE id=? AND ownerId=?', [id,ownerId]);
+              } else await applySql.runAsync('UPDATE Budget SET synced=1 WHERE id=? AND ownerId=?', [id,ownerId]);
             }
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'budget',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision", [ownerId,id,id,Number.isSafeInteger(change.revision)?Number(change.revision):null]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='budget' AND entityId=? AND cloudUserId=? AND status!='confirmed'", [now,ownerId,id,cloudUserId]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'budget',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision", [ownerId,id,cloudId,Number.isSafeInteger(change.revision)?Number(change.revision):null]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='budget' AND entityId=? AND cloudUserId=? AND status!='confirmed'", [now,ownerId,id,cloudUserId]);
           } else if (change.entityType === 'savings_goal') {
             if (!change.payload || typeof change.payload !== 'object' || Array.isArray(change.payload)) throw new Error('A cloud savings-goal change has an invalid payload.');
-            const p=change.payload as Record<string,unknown>, id=String(p.id??change.entityId??''), target=Number(p.targetMinor);
+            const p=change.payload as Record<string,unknown>, cloudId=String(p.id??change.entityId??''), target=Number(p.targetMinor);
+            const mappedLocal=await applySql.getFirstAsync<{localId:string}>("SELECT localId FROM CloudEntityMap WHERE ownerId=? AND entityType='savings_goal' AND cloudId=?",[ownerId,cloudId]);
+            const queuedCreates=mappedLocal?[]:await applySql.getAllAsync<{entityId:string}>("SELECT entityId FROM SyncOutbox WHERE ownerId=? AND entityType='savings_goal' AND operation='saving.goal.create' AND status!='confirmed' ORDER BY createdAt",[ownerId]);
+            let queuedLocalId:string|null=null;
+            for(const queued of queuedCreates){if(await stableCloudUuid('savings_goal',queued.entityId)===cloudId){queuedLocalId=queued.entityId;break;}}
+            const id=mappedLocal?.localId??queuedLocalId??cloudId;
             const currency=String(p.currency??''), name=String(p.name??''), status=String(p.status??'active');
             const createdAt=typeof p.createdAt==='string'?p.createdAt:now, updatedAt=typeof p.updatedAt==='string'?p.updatedAt:now;
             const targetDate=p.targetDate==null?null:String(p.targetDate);
-            if(!id||id!==change.entityId||!name||name.trim().length>100||!Number.isSafeInteger(target)||target<=0||!isCurrencyCode(currency)||!['active','completed','archived'].includes(status)||!Number.isFinite(Date.parse(createdAt))||!Number.isFinite(Date.parse(updatedAt))||(targetDate!==null&&(!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)||!Number.isFinite(Date.parse(`${targetDate}T00:00:00.000Z`))))) throw new Error('A cloud savings-goal change contains unsupported financial data.');
-            const existing=await transaction.getFirstAsync<{ownerId:string;name:string;targetMinor:number;currency:string;targetDate:string|null;status:string;synced:number}>('SELECT ownerId,name,targetMinor,currency,targetDate,status,synced FROM SavingsGoal WHERE id=?',[id]);
+            if(!cloudId||cloudId!==change.entityId||!name||name.trim().length>100||!Number.isSafeInteger(target)||target<=0||!isCurrencyCode(currency)||!['active','completed','archived'].includes(status)||!Number.isFinite(Date.parse(createdAt))||!Number.isFinite(Date.parse(updatedAt))||(targetDate!==null&&(!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)||!Number.isFinite(Date.parse(`${targetDate}T00:00:00.000Z`))))) throw new Error('A cloud savings-goal change contains unsupported financial data.');
+            const existing=await applySql.getFirstAsync<{ownerId:string;name:string;targetMinor:number;currency:string;targetDate:string|null;status:string;synced:number}>('SELECT ownerId,name,targetMinor,currency,targetDate,status,synced FROM SavingsGoal WHERE id=?',[id]);
             if(existing&&existing.ownerId!==ownerId)throw new Error('A cloud savings-goal ID collides with another local profile.');
             if(existing&&existing.synced===0&&change.revision===1&&(existing.name!==name||existing.targetMinor!==target||existing.currency!==currency||existing.targetDate!==targetDate)){
-              await transaction.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='savings_goal' AND entityId=? AND status!='confirmed'",[now,ownerId,id]);continue;
+              await applySql.runAsync("UPDATE SyncOutbox SET status='rejected',leaseUntil=NULL,lastErrorCategory='server_local_conflict',updatedAt=? WHERE ownerId=? AND entityType='savings_goal' AND entityId=? AND status!='confirmed'",[now,ownerId,id]);continue;
             }
             const completedAt=nullableCloudText(p.completedAt),archivedAt=nullableCloudText(p.archivedAt);
-            if(!existing)await transaction.runAsync('INSERT INTO SavingsGoal(id,ownerId,name,targetMinor,currency,targetDate,status,completedAt,archivedAt,createdAt,updatedAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)',[id,ownerId,name,target,currency,targetDate,status,completedAt,archivedAt,createdAt,updatedAt]);
-            else await transaction.runAsync('UPDATE SavingsGoal SET name=?,targetMinor=?,targetDate=?,status=?,completedAt=?,archivedAt=?,updatedAt=?,synced=1 WHERE id=? AND ownerId=?',[name,target,targetDate,status,completedAt,archivedAt,updatedAt,id,ownerId]);
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'savings_goal',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='savings_goal' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
+            if(!existing)await applySql.runAsync('INSERT INTO SavingsGoal(id,ownerId,name,targetMinor,currency,targetDate,status,completedAt,archivedAt,createdAt,updatedAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)',[id,ownerId,name,target,currency,targetDate,status,completedAt,archivedAt,createdAt,updatedAt]);
+            else await applySql.runAsync('UPDATE SavingsGoal SET name=?,targetMinor=?,targetDate=?,status=?,completedAt=?,archivedAt=?,updatedAt=?,synced=1 WHERE id=? AND ownerId=?',[name,target,targetDate,status,completedAt,archivedAt,updatedAt,id,ownerId]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'savings_goal',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,cloudId,serverRevision]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='savings_goal' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
           } else if (change.entityType === 'savings_goal_event') {
             if(!change.payload||typeof change.payload!=='object'||Array.isArray(change.payload))throw new Error('A cloud savings event has an invalid payload.');
-            const p=change.payload as Record<string,unknown>,id=String(p.id??change.entityId??''),goalId=String(p.goalId??''),amount=Number(p.amountMinor),currency=String(p.currency??''),eventType=String(p.eventType??'');
+            const p=change.payload as Record<string,unknown>,cloudId=String(p.id??change.entityId??''),cloudGoalId=String(p.goalId??''),amount=Number(p.amountMinor),currency=String(p.currency??''),eventType=String(p.eventType??'');
+            const eventMap=await applySql.getFirstAsync<{localId:string}>("SELECT localId FROM CloudEntityMap WHERE ownerId=? AND entityType='savings_goal_event' AND cloudId=?",[ownerId,cloudId]);
+            const goalMap=await applySql.getFirstAsync<{localId:string}>("SELECT localId FROM CloudEntityMap WHERE ownerId=? AND entityType='savings_goal' AND cloudId=?",[ownerId,cloudGoalId]);
+            const id=eventMap?.localId??cloudId, goalId=goalMap?.localId??cloudGoalId;
             const eventDate=String(p.eventDate??''),createdAt=typeof p.createdAt==='string'?p.createdAt:now,note=typeof p.note==='string'?p.note:'';
             const accountId=typeof p.accountId==='string'?p.accountId:null,transactionId=typeof p.transactionId==='string'?p.transactionId:null,key=String(p.idempotencyKey??id);
-            if(!id||id!==change.entityId||!goalId||!Number.isSafeInteger(amount)||amount<=0||!isCurrencyCode(currency)||!['planned','allocate','release','transfer_in','transfer_out'].includes(eventType)||!Number.isFinite(Date.parse(eventDate))||!Number.isFinite(Date.parse(createdAt))||note.length>1000)throw new Error('A cloud savings event contains unsupported data.');
-            const old=await transaction.getFirstAsync<{ownerId:string;goalId:string;eventType:string;amountMinor:number;currency:string;accountId:string|null;transactionId:string|null;eventDate:string;note:string}>('SELECT ownerId,goalId,eventType,amountMinor,currency,accountId,transactionId,eventDate,note FROM SavingsGoalEvent WHERE id=?',[id]);
+            const invalidSavingsEvent = !cloudId || cloudId !== change.entityId ? 'identity_mismatch'
+              : !goalId ? 'missing_goal_reference'
+                : !Number.isSafeInteger(amount) || amount <= 0 ? 'invalid_amount'
+                  : !isCurrencyCode(currency) ? 'invalid_currency'
+                    : !['planned','allocate','release','transfer_in','transfer_out'].includes(eventType) ? 'unsupported_event_type'
+                      : !Number.isFinite(Date.parse(eventDate)) ? 'invalid_event_date'
+                        : note.length > 1000 ? 'note_too_long' : null;
+            if (invalidSavingsEvent) throw new Error(`A cloud savings event contains unsupported data (${invalidSavingsEvent}).`);
+            const old=await applySql.getFirstAsync<{ownerId:string;goalId:string;eventType:string;amountMinor:number;currency:string;accountId:string|null;transactionId:string|null;eventDate:string;note:string}>('SELECT ownerId,goalId,eventType,amountMinor,currency,accountId,transactionId,eventDate,note FROM SavingsGoalEvent WHERE id=?',[id]);
             if(old&&old.ownerId!==ownerId)throw new Error('A cloud savings event ID collides with another local profile.');
             if(old&&(old.goalId!==goalId||old.eventType!==eventType||old.amountMinor!==amount||old.currency!==currency||old.accountId!==accountId||old.transactionId!==transactionId||old.eventDate!==eventDate||old.note!==note))throw new Error('A cloud savings event conflicts with existing immutable history.');
-            if(!old)await transaction.runAsync('INSERT INTO SavingsGoalEvent(id,ownerId,goalId,eventType,amountMinor,currency,accountId,transactionId,idempotencyKey,eventDate,note,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)',[id,ownerId,goalId,eventType,amount,currency,accountId,transactionId,key,eventDate,note,createdAt]);
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'savings_goal_event',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='savings_goal_event' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
+            if(!old)await applySql.runAsync('INSERT INTO SavingsGoalEvent(id,ownerId,goalId,eventType,amountMinor,currency,accountId,transactionId,idempotencyKey,eventDate,note,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)',[id,ownerId,goalId,eventType,amount,currency,accountId,transactionId,key,eventDate,note,createdAt]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'savings_goal_event',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,cloudId,serverRevision]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='savings_goal_event' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
           } else if (change.entityType === 'emergency_config') {
             if(!change.payload||typeof change.payload!=='object'||Array.isArray(change.payload))throw new Error('A cloud emergency-fund config has an invalid payload.');
             const p=change.payload as Record<string,unknown>,currency=String(p.currency??''),months=Number(p.coverageMonths),essential=Number(p.essentialMonthlyMinor),updatedAt=typeof p.updatedAt==='string'?p.updatedAt:now;
             if(!isCurrencyCode(currency)||!Number.isInteger(months)||months<1||months>60||!Number.isSafeInteger(essential)||essential<0||!Number.isFinite(Date.parse(updatedAt)))throw new Error('A cloud emergency-fund config contains unsupported data.');
-            const old=await transaction.getFirstAsync<{currency:string;coverageMonths:number;essentialMonthlyMinor:number}>('SELECT currency,coverageMonths,essentialMonthlyMinor FROM EmergencyFundConfig WHERE ownerId=?',[ownerId]);
-            if(old&&old.currency!==currency){const events=await transaction.getFirstAsync<{n:number}>('SELECT COUNT(*) AS n FROM EmergencyFundEvent WHERE ownerId=?',[ownerId]);if((events?.n??0)>0)throw new Error('A cloud emergency-fund currency conflicts with local event history.');}
-            await transaction.runAsync('INSERT INTO EmergencyFundConfig(ownerId,currency,coverageMonths,essentialMonthlyMinor,updatedAt,synced) VALUES(?,?,?,?,?,1) ON CONFLICT(ownerId) DO UPDATE SET currency=excluded.currency,coverageMonths=excluded.coverageMonths,essentialMonthlyMinor=excluded.essentialMonthlyMinor,updatedAt=excluded.updatedAt,synced=1',[ownerId,currency,months,essential,updatedAt]);
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'emergency_config',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,ownerId,ownerId,serverRevision]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='emergency_config' AND cloudUserId=? AND status!='confirmed'",[now,ownerId,cloudUserId]);
+            const old=await applySql.getFirstAsync<{currency:string;coverageMonths:number;essentialMonthlyMinor:number}>('SELECT currency,coverageMonths,essentialMonthlyMinor FROM EmergencyFundConfig WHERE ownerId=?',[ownerId]);
+            if(old&&old.currency!==currency){const events=await applySql.getFirstAsync<{n:number}>('SELECT COUNT(*) AS n FROM EmergencyFundEvent WHERE ownerId=?',[ownerId]);if((events?.n??0)>0)throw new Error('A cloud emergency-fund currency conflicts with local event history.');}
+            await applySql.runAsync('INSERT INTO EmergencyFundConfig(ownerId,currency,coverageMonths,essentialMonthlyMinor,updatedAt,synced) VALUES(?,?,?,?,?,1) ON CONFLICT(ownerId) DO UPDATE SET currency=excluded.currency,coverageMonths=excluded.coverageMonths,essentialMonthlyMinor=excluded.essentialMonthlyMinor,updatedAt=excluded.updatedAt,synced=1',[ownerId,currency,months,essential,updatedAt]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'emergency_config',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,ownerId,ownerId,serverRevision]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='emergency_config' AND cloudUserId=? AND status!='confirmed'",[now,ownerId,cloudUserId]);
           } else if (change.entityType === 'emergency_event') {
             if(!change.payload||typeof change.payload!=='object'||Array.isArray(change.payload))throw new Error('A cloud emergency-fund event has an invalid payload.');
             const p=change.payload as Record<string,unknown>,id=String(p.id??change.entityId??''),amount=Number(p.amountMinor),currency=String(p.currency??''),eventType=String(p.eventType??''),accountId=String(p.accountId??''),transactionId=typeof p.transactionId==='string'?p.transactionId:null,eventDate=String(p.eventDate??''),note=typeof p.note==='string'?p.note:'',createdAt=typeof p.createdAt==='string'?p.createdAt:now,key=String(p.idempotencyKey??id);
             if(!id||id!==change.entityId||!Number.isSafeInteger(amount)||amount<=0||!isCurrencyCode(currency)||!['allocate','release','transfer_in','transfer_out'].includes(eventType)||!accountId||!Number.isFinite(Date.parse(eventDate))||!Number.isFinite(Date.parse(createdAt))||note.length>1000)throw new Error('A cloud emergency-fund event contains unsupported data.');
-            const old=await transaction.getFirstAsync<{ownerId:string;eventType:string;amountMinor:number;currency:string;accountId:string;transactionId:string|null;eventDate:string;note:string}>('SELECT ownerId,eventType,amountMinor,currency,accountId,transactionId,eventDate,note FROM EmergencyFundEvent WHERE id=?',[id]);
+            const old=await applySql.getFirstAsync<{ownerId:string;eventType:string;amountMinor:number;currency:string;accountId:string;transactionId:string|null;eventDate:string;note:string}>('SELECT ownerId,eventType,amountMinor,currency,accountId,transactionId,eventDate,note FROM EmergencyFundEvent WHERE id=?',[id]);
             if(old&&old.ownerId!==ownerId)throw new Error('A cloud emergency-fund event ID collides with another local profile.');
             if(old&&(old.eventType!==eventType||old.amountMinor!==amount||old.currency!==currency||old.accountId!==accountId||old.transactionId!==transactionId||old.eventDate!==eventDate||old.note!==note))throw new Error('A cloud emergency-fund event conflicts with immutable local history.');
-            if(!old)await transaction.runAsync('INSERT INTO EmergencyFundEvent(id,ownerId,eventType,amountMinor,currency,accountId,transactionId,idempotencyKey,eventDate,note,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)',[id,ownerId,eventType,amount,currency,accountId,transactionId,key,eventDate,note,createdAt]);
-            await transaction.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'emergency_event',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='emergency_event' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
+            if(!old)await applySql.runAsync('INSERT INTO EmergencyFundEvent(id,ownerId,eventType,amountMinor,currency,accountId,transactionId,idempotencyKey,eventDate,note,createdAt,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)',[id,ownerId,eventType,amount,currency,accountId,transactionId,key,eventDate,note,createdAt]);
+            await applySql.runAsync("INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,'emergency_event',?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision",[ownerId,id,id,serverRevision]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType='emergency_event' AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,id,cloudUserId]);
           } else if (typeof change.entityType === 'string' && ['bill','bill_payment','bill_payment_correction','debt','debt_event','debt_interest_event','debt_event_correction','debt_repayment_schedule','asset','asset_valuation','asset_activity','investment_portfolio','investment_holding','investment_event','investment_price'].includes(change.entityType)) {
             if (!change.payload || typeof change.payload !== 'object' || Array.isArray(change.payload)) throw new Error('A cloud finance-domain change has an invalid payload.');
             const p = change.payload as Record<string, unknown>;
@@ -1200,28 +1474,28 @@ export const localDb = {
               if (value === null || typeof value === 'string' || typeof value === 'number') return value;
               throw new Error(`A cloud ${type} record has invalid ${column}.`);
             });
-            const existing = await transaction.getFirstAsync<{ownerId:string}>(`SELECT ownerId FROM "${spec.table}" WHERE id=?`,[id]);
+            const existing = await applySql.getFirstAsync<{ownerId:string}>(`SELECT ownerId FROM "${spec.table}" WHERE id=?`,[id]);
             if(existing && existing.ownerId!==ownerId)throw new Error('A cloud finance-domain ID collides with another local profile.');
             if(existing && !spec.mutable){
-              const current=await transaction.getFirstAsync<Record<string,unknown>>(`SELECT ${spec.columns.map((c)=>`"${c}"`).join(',')} FROM "${spec.table}" WHERE id=? AND ownerId=?`,[id,ownerId]);
+              const current=await applySql.getFirstAsync<Record<string,unknown>>(`SELECT ${spec.columns.map((c)=>`"${c}"`).join(',')} FROM "${spec.table}" WHERE id=? AND ownerId=?`,[id,ownerId]);
               if(!current||spec.columns.some((column,index)=>String(current[column]??'')!==String(values[index]??'')))throw new Error('A cloud append-only finance record conflicts with existing local history.');
             } else if(!existing){
               const columns=['id','ownerId',...spec.columns,'synced'];
-              await transaction.runAsync(`INSERT INTO "${spec.table}"(${columns.map((c)=>`"${c}"`).join(',')}) VALUES(${columns.map(()=>'?').join(',')})`,[id,ownerId,...values,1]);
+              await applySql.runAsync(`INSERT INTO "${spec.table}"(${columns.map((c)=>`"${c}"`).join(',')}) VALUES(${columns.map(()=>'?').join(',')})`,[id,ownerId,...values,1]);
             } else if(spec.mutable){
-              await transaction.runAsync(`UPDATE "${spec.table}" SET ${spec.columns.map((c)=>`"${c}"=?`).join(',')},synced=1 WHERE id=? AND ownerId=?`,[...values,id,ownerId]);
+              await applySql.runAsync(`UPDATE "${spec.table}" SET ${spec.columns.map((c)=>`"${c}"=?`).join(',')},synced=1 WHERE id=? AND ownerId=?`,[...values,id,ownerId]);
             }
             if (type === 'bill_payment_correction' && typeof data.replacementPaymentId === 'string') {
-              await transaction.runAsync('INSERT OR IGNORE INTO BillPaymentCorrectionReplacement(correctionId,replacementPaymentId) VALUES(?,?)',[id,data.replacementPaymentId]);
+              await applySql.runAsync('INSERT OR IGNORE INTO BillPaymentCorrectionReplacement(correctionId,replacementPaymentId) VALUES(?,?)',[id,data.replacementPaymentId]);
             }
             if (type === 'debt_event_correction' && typeof data.replacementEventId === 'string') {
-              await transaction.runAsync('INSERT OR IGNORE INTO DebtEventCorrectionReplacement(correctionId,replacementEventId) VALUES(?,?)',[id,data.replacementEventId]);
+              await applySql.runAsync('INSERT OR IGNORE INTO DebtEventCorrectionReplacement(correctionId,replacementEventId) VALUES(?,?)',[id,data.replacementEventId]);
             }
-            await transaction.runAsync('INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,?,?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision',[ownerId,type,id,id,serverRevision]);
-            await transaction.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType=? AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,type,id,cloudUserId]);
+            await applySql.runAsync('INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,?,?,?,?) ON CONFLICT(ownerId,entityType,localId) DO UPDATE SET cloudId=excluded.cloudId,serverRevision=excluded.serverRevision',[ownerId,type,id,id,serverRevision]);
+            await applySql.runAsync("UPDATE SyncOutbox SET status='confirmed',leaseUntil=NULL,lastErrorCategory=NULL,updatedAt=? WHERE ownerId=? AND entityType=? AND entityId=? AND cloudUserId=? AND status!='confirmed'",[now,ownerId,type,id,cloudUserId]);
           } else throw new Error('The cloud change feed contains an unsupported entity type.');
         }
-        await transaction.runAsync('UPDATE SyncCursor SET cursor=? WHERE ownerId=? AND cloudUserId=?', [nextCursor,ownerId,cloudUserId]);
+        await applySql.runAsync('UPDATE SyncCursor SET cursor=? WHERE ownerId=? AND cloudUserId=?', [nextCursor,ownerId,cloudUserId]);
       });
     },
   },
@@ -1322,11 +1596,12 @@ export const localDb = {
       }
       const id = profileId ?? Crypto.randomUUID();
       const createdAt = new Date().toISOString();
+      const traceId = getActiveAuthTraceId();
 
       try {
-        const passwordHash = await hashPassword(password);
-        const database = await getDb();
-        await withLocalWrite(database, async (transaction) => {
+        const passwordHash = await authTraceOperation(traceId, 'SQLITE_PROFILE_PASSWORD_HASH', () => hashPassword(password));
+        const database = await authTraceOperation(traceId, 'SQLITE_PROFILE_DATABASE', () => getDb());
+        await authTraceOperation(traceId, 'SQLITE_PROFILE_WRITE', () => withLocalWrite(database, async (transaction) => {
           const existing = await transaction.getFirstAsync<ExistingUserRow>(
             'SELECT id FROM User WHERE email = ? COLLATE NOCASE', [normalizedEmail],
           );
@@ -1336,7 +1611,7 @@ export const localDb = {
             [id, normalizedName, normalizedEmail, passwordHash, createdAt],
           );
           return undefined;
-        });
+        }));
       } catch (error) {
         const message = error instanceof Error ? error.message : '';
         if (/unique constraint failed:\s*user\.email/i.test(message) || message === 'An account with this email already exists.') {
@@ -1510,6 +1785,8 @@ export const localDb = {
 
     onboardingComplete: profileSetupStore.isComplete,
     completeOnboarding: profileSetupStore.complete,
+    onboardingRequired: profileSetupStore.isRequired,
+    requireOnboarding: profileSetupStore.require,
 
     findById: async (id: string): Promise<Omit<DbUser, 'passwordHash'> | null> => {
       if (!id.trim()) return null;

@@ -18,4 +18,12 @@ export const appSettings = createSettingsPreferenceStore({
     }
     await SecureStore.setItemAsync(key, value);
   },
+    async removeItem(key) {
+      if (Platform.OS === 'web') {
+        if (typeof window === 'undefined') throw new Error('Browser storage is unavailable.');
+        window.localStorage.removeItem(key);
+        return;
+      }
+      await SecureStore.deleteItemAsync(key);
+    },
 });

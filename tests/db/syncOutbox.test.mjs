@@ -5,12 +5,12 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { migrateLocalDatabase } from '../../src/db/local/migrations.ts';
-import { activeCloudUser, computeRetryDelayMs, countLocalFinancialRecords, enqueueCloudMutation, validateCloudChangePage } from '../../src/db/local/syncOutbox.ts';
+import { activeCloudUser, computeRetryDelayMs, countLocalFinancialRecords, deferPendingCloudMutations, enqueueCloudMutation, normalizeSavingsEventReferences, releasePendingCloudMutations, retryEligibleRejectedCloudChanges, validateCloudChangePage } from '../../src/db/local/syncOutbox.ts';
 
 function adapter(database) {
   return {
     async execAsync(sql) { database.exec(sql); },
-    async runAsync(sql, params = []) { database.prepare(sql).run(...params); },
+    async runAsync(sql, params = []) { return database.prepare(sql).run(...params); },
     async getFirstAsync(sql, params = []) { return database.prepare(sql).get(...params) ?? null; },
     async getAllAsync(sql, params = []) { return database.prepare(sql).all(...params); },
     async withTransactionAsync(task) { database.exec('BEGIN IMMEDIATE'); try { await task(); database.exec('COMMIT'); } catch (error) { database.exec('ROLLBACK'); throw error; } },
@@ -142,6 +142,77 @@ test('outbox retries use bounded exponential jitter and reject invalid attempts'
   assert.throws(() => computeRetryDelayMs(21),/outside the supported range/);
 });
 
+test('savings event dependencies resolve both local IDs and already-normalized cloud IDs', async () => {
+  const { database, sql } = await setup();
+  const refs = [
+    ['savings_goal','local-goal','cloud-goal'],
+    ['account','local-account','cloud-account'],
+    ['transaction','local-transaction','cloud-transaction'],
+  ];
+  for (const [entityType,localId,cloudId] of refs) {
+    database.prepare('INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,?,?,?,1)')
+      .run('local-user',entityType,localId,cloudId);
+  }
+  const localPayload = { id:'event-cloud-id',goalId:'local-goal',eventType:'contribution',amountMinor:'1000000',currency:'PKR',accountId:'local-account',transactionId:'local-transaction' };
+  const local = await normalizeSavingsEventReferences(sql,'local-user',localPayload);
+  assert.equal(local.status,'ready');
+  assert.deepEqual(local.payload,{...localPayload,goalId:'cloud-goal',accountId:'cloud-account',transactionId:'cloud-transaction'});
+  const retried = await normalizeSavingsEventReferences(sql,'local-user',local.payload);
+  assert.equal(retried.status,'ready');
+  assert.deepEqual(retried.payload,local.payload);
+  assert.deepEqual(localPayload,{id:'event-cloud-id',goalId:'local-goal',eventType:'contribution',amountMinor:'1000000',currency:'PKR',accountId:'local-account',transactionId:'local-transaction'},'normalization never mutates the original persisted object');
+  database.close();
+});
+
+test('savings event stays waiting for a pending goal and is rejected only when its mapping cannot exist', async () => {
+  const { database, sql } = await setup();
+  const payload={id:'event-1',goalId:'goal-1',eventType:'planned',amountMinor:'1000000',currency:'PKR'};
+  await enqueueCloudMutation(sql,{mutationId:'goal-create',ownerId:'local-user',cloudUserId:'cloud-user',entityType:'savings_goal',entityId:'goal-1',operation:'saving.goal.create',payload:{id:'goal-1'}});
+  assert.deepEqual(await normalizeSavingsEventReferences(sql,'local-user',payload),{status:'waiting'});
+  await sql.runAsync("UPDATE SyncOutbox SET status='rejected' WHERE mutationId='goal-create'");
+  assert.deepEqual(await normalizeSavingsEventReferences(sql,'local-user',payload),{status:'missing',category:'saving_goal_dependency_missing'});
+  database.close();
+});
+
+test('retry requeues savings failures only after goal and linked account mappings exist', async () => {
+  const { database, sql } = await setup();
+  database.prepare('INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,?,?,?,1)')
+    .run('local-user','savings_goal','goal-local','goal-cloud');
+  database.prepare('INSERT INTO CloudEntityMap(ownerId,entityType,localId,cloudId,serverRevision) VALUES(?,?,?,?,1)')
+    .run('local-user','account','account-local','account-cloud');
+  await enqueueCloudMutation(sql,{mutationId:'event-safe',ownerId:'local-user',cloudUserId:'cloud-user',entityType:'savings_goal_event',entityId:'event-safe',operation:'saving.goal.event',payload:{id:'event-safe-cloud',goalId:'goal-cloud',accountId:'account-cloud',amountMinor:'1000000'}});
+  await enqueueCloudMutation(sql,{mutationId:'event-unlinked',ownerId:'local-user',cloudUserId:'cloud-user',entityType:'savings_goal_event',entityId:'event-unlinked',operation:'saving.goal.event',payload:{id:'event-unlinked-cloud',goalId:'missing-goal',amountMinor:'1000000'}});
+  await sql.runAsync("UPDATE SyncOutbox SET status='rejected',lastErrorCategory='saving_goal_dependency_missing' WHERE entityId IN ('event-safe','event-unlinked')");
+  assert.equal(await retryEligibleRejectedCloudChanges(sql,'local-user','cloud-user','2026-10-25T12:00:00.000Z'),1);
+  const rows=database.prepare("SELECT mutationId,status,lastErrorCategory,payloadJson FROM SyncOutbox WHERE entityId IN ('event-safe','event-unlinked') ORDER BY entityId").all();
+  const safe=rows.find((row)=>row.mutationId==='event-safe');
+  const unsafe=rows.find((row)=>row.mutationId==='event-unlinked');
+  assert.equal(safe.status,'pending');
+  assert.equal(safe.lastErrorCategory,null);
+  assert.equal(JSON.parse(safe.payloadJson).id,'event-safe-cloud','the established cloud event ID is retained');
+  assert.equal(unsafe.status,'rejected');
+  assert.equal(unsafe.lastErrorCategory,'saving_goal_dependency_missing');
+  database.close();
+});
+
+test('a shared API failure pauses only this profile’s remaining queue and manual retry releases it', async () => {
+  const { database, sql } = await setup();
+  const now = Date.parse('2026-10-25T12:00:00.000Z');
+  database.prepare('INSERT INTO User(id,fullName,email,passwordHash,createdAt) VALUES(?,?,?,?,?)')
+    .run('other-user','Other User','other@example.test','hash','2026-01-01T00:00:00.000Z');
+  database.prepare('INSERT INTO CloudIdentity(ownerId,cloudUserId,linkedAt,syncEnabled) VALUES(?,?,?,1)')
+    .run('other-user','other-cloud','2026-01-02T00:00:00.000Z');
+  await enqueueCloudMutation(sql,{mutationId:'local-pending',ownerId:'local-user',cloudUserId:'cloud-user',entityType:'account',entityId:'account-1',operation:'account.create',payload:{id:'account-1'},now:new Date(now).toISOString()});
+  await enqueueCloudMutation(sql,{mutationId:'other-profile',ownerId:'other-user',cloudUserId:'other-cloud',entityType:'account',entityId:'account-2',operation:'account.create',payload:{id:'account-2'},now:new Date(now).toISOString()});
+  await sql.runAsync("UPDATE SyncOutbox SET status='rejected' WHERE mutationId='other-profile'");
+  await deferPendingCloudMutations(sql,'local-user',now,60_000);
+  assert.equal(database.prepare('SELECT nextAttemptAt FROM SyncOutbox WHERE mutationId=?').get('local-pending').nextAttemptAt,now+60_000);
+  assert.equal(database.prepare('SELECT status FROM SyncOutbox WHERE mutationId=?').get('other-profile').status,'rejected');
+  await releasePendingCloudMutations(sql,'local-user',now+5_000);
+  assert.equal(database.prepare('SELECT nextAttemptAt FROM SyncOutbox WHERE mutationId=?').get('local-pending').nextAttemptAt,0);
+  database.close();
+});
+
 test('recurring schedules, bill schedules and occurrence history enqueue stable sync operations', async () => {
   const { database } = await setup();
   const accountId='00000000-0000-4000-8000-000000000001';
@@ -229,5 +300,8 @@ test('empty-profile linking guard counts schedules and asset history, not only c
     VALUES(?,?,?,?,?,?,?,?)`).run('valuation','local-user','asset',90000,'2026-02-01','estimate','valuation-key','2026-02-01');
   assert.equal(await countLocalFinancialRecords(sql,'local-user'),4);
   assert.equal(await countLocalFinancialRecords(sql,'another-user'),0);
+  database.prepare('INSERT INTO Project(id,ownerId,name,kind,status,currency,startDate,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run('project-history','local-user','Trip','shared','active','PKR','2026-01-01','2026-01-03','2026-01-03');
+  assert.equal(await countLocalFinancialRecords(sql,'local-user'),5,'project history must be disclosed during cloud linking');
   database.close();
 });

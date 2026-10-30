@@ -195,7 +195,7 @@ export default function SettingsScreen() {
   };
 
   return (
-    <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950">
+    <SafeAreaView className="flex-1 bg-gray-50 dark:bg-neutral-950" edges={['left', 'right', 'bottom']}>
       <GlobalHeader title="Settings" description="Manage your profile and app preferences" />
       <ScrollView className="flex-1 px-4 pt-3" contentContainerStyle={{ paddingBottom: 36 }} showsVerticalScrollIndicator={false}>
         {sessionNotice ? <Text accessibilityRole="alert" className="font-body mb-3 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-800 dark:bg-amber-950 dark:text-amber-200">{sessionNotice}</Text> : null}
@@ -250,7 +250,7 @@ export default function SettingsScreen() {
           <SettingRow icon={CalendarClock} title="Manage bill reminders" onPress={() => router.push('/obligations')} />
         </Section>
 
-        <Section title="Data & privacy" description="Each device keeps its own profiles and records. Leverage saves changes on this device first, then sends supported records to Neon when connected. Offline changes wait here until they sync. Cloud Sync shows items still waiting or needing attention; check it before using another device. Backups include every profile on this device. Keep the backup file and its passphrase safe; a forgotten passphrase cannot be recovered. Android device backup is off. Native encryption and restore still need Android testing.">
+        <Section title="Data & privacy" description="Changes are saved on this device and synced to your Neon account when connected. Offline changes wait here until they sync. Open Cloud sync to check the last successful sync, pending records, or items needing attention before changing devices. Backups include every profile on this device. Keep the backup file and its passphrase safe; a forgotten passphrase cannot be recovered. Android device backup is off. Native encryption and restore still need Android testing.">
           <SettingRow icon={Database} title="Storage" value="Local database + optional cloud sync" />
           {disposableVerificationBuild ? <SettingRow icon={DatabaseCheck} title="Native storage verification" value="Disposable test only" onPress={() => router.push('/native-verification' as Href)} /> : null}
           <SettingRow icon={DatabaseBackup} title="Encrypted backup & restore" value={Platform.OS === 'web' ? 'Unavailable in browser' : 'Available'} onPress={Platform.OS === 'web' ? undefined : () => setRecoveryOpen(true)} />
@@ -258,7 +258,7 @@ export default function SettingsScreen() {
 
         <Section title="About" description="Personal finance tracking designed to work offline. Leverage does not connect to banks or provide live investment prices.">
           <SettingRow icon={Info} title="Leverage version" value={version} />
-          <SettingRow icon={Cloud} title="Cloud sync" value={Platform.OS === 'web' ? 'Unavailable in browser' : cloudApiConfigured ? 'Connect account' : 'Not configured'} onPress={Platform.OS === 'web' ? undefined : () => setCloudSyncOpen(true)} />
+          <SettingRow icon={Cloud} title="Cloud sync" value={cloudApiConfigured ? 'View sync status' : 'Not configured'} onPress={cloudApiConfigured ? () => setCloudSyncOpen(true) : undefined} />
         </Section>
 
         <Section title="Session">

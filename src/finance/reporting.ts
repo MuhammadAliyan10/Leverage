@@ -19,6 +19,7 @@ export interface FinancialReportRow {
   linkedDestinationCurrency: string | null;
   linkedRootType: string | null;
   linkedRootId: string | null;
+  linkedRootAccountId?: string | null;
   linkedRootCurrency: string | null;
 }
 
@@ -42,6 +43,78 @@ export interface FinancialBucket {
 }
 
 export interface FinancialBucketTotals { incomeMinor: number; expenseMinor: number }
+
+export type CashFlowSection = 'operating' | 'investing' | 'financing';
+export interface CashFlowSectionSummary {
+  section: CashFlowSection;
+  inflowsMinor: number;
+  outflowsMinor: number;
+  netMinor: number;
+}
+
+const INVESTING_CASH_CATEGORIES = new Set([
+  'asset_purchase', 'asset_sale_proceeds', 'investment_purchase', 'investment_sale_proceeds', 'investment_dividend',
+]);
+const FINANCING_CASH_CATEGORIES = new Set([
+  'debt_borrowing', 'debt_lending', 'debt_principal_repayment', 'debt_receivable_payment', 'debt_settlement',
+]);
+
+/**
+ * Cash-basis personal cash flow. Own-account transfers are excluded; loans,
+ * principal movements, and asset/investment transactions are classified outside
+ * ordinary income and spending. All values remain in the selected currency.
+ */
+export function calculateCashFlowSections(
+  rows: readonly FinancialReportRow[],
+  currency: string,
+  range: { startDate: string; endDate: string },
+): CashFlowSectionSummary[] {
+  if (!currency.trim()) throw new Error('A cash-flow currency is required.');
+  const startMs = new Date(range.startDate).getTime();
+  const endMs = new Date(range.endDate).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) throw new Error('Cash-flow date range is invalid.');
+
+  const values: Record<CashFlowSection, { inflows: bigint; outflows: bigint }> = {
+    operating: { inflows: 0n, outflows: 0n },
+    investing: { inflows: 0n, outflows: 0n },
+    financing: { inflows: 0n, outflows: 0n },
+  };
+
+  for (const row of rows) {
+    const timestamp = transactionDateTimestamp(row.date);
+    if (!Number.isFinite(timestamp)) throw new Error(`Transaction ${row.id} has an invalid date.`);
+    if (timestamp < startMs || timestamp >= endMs || row.accountCurrency !== currency) continue;
+    if (!row.id || !row.ownerId || !Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0) throw new Error('A cash-flow transaction is invalid.');
+    if (!['Income', 'Expense', 'Transfer', 'Refund', 'Reversal'].includes(row.type)) throw new Error(`Transaction ${row.id} has an unsupported type.`);
+
+    // A transfer only moves money between the user's own accounts. Its reversal
+    // is also excluded, so neither can inflate the total cash flow.
+    if (row.type === 'Transfer' || (row.type === 'Reversal' && row.linkedOriginalType === 'Transfer')) continue;
+    if ((row.type === 'Refund' || row.type === 'Reversal') && (!row.reversalOfId || !row.linkedCategory)) {
+      throw new Error(`Transaction ${row.id} is missing its linked correction details.`);
+    }
+
+    const category = row.type === 'Refund' || row.type === 'Reversal' ? row.linkedCategory! : row.category;
+    const section: CashFlowSection = FINANCING_CASH_CATEGORIES.has(category)
+      ? 'financing'
+      : INVESTING_CASH_CATEGORIES.has(category) ? 'investing' : 'operating';
+    let signedMovement: bigint;
+    if (row.type === 'Income' || row.type === 'Refund') signedMovement = BigInt(row.amountMinor);
+    else if (row.type === 'Expense') signedMovement = -BigInt(row.amountMinor);
+    else if (row.linkedOriginalType === 'Income' || row.linkedOriginalType === 'Refund') signedMovement = -BigInt(row.amountMinor);
+    else if (row.linkedOriginalType === 'Expense') signedMovement = BigInt(row.amountMinor);
+    else throw new Error(`Transaction ${row.id} has an unsupported correction type.`);
+
+    if (signedMovement >= 0n) values[section].inflows += signedMovement;
+    else values[section].outflows += -signedMovement;
+  }
+
+  return (['operating', 'investing', 'financing'] as const).map((section) => {
+    const inflowsMinor = safeNumber(values[section].inflows, `${section} cash inflows`);
+    const outflowsMinor = safeNumber(values[section].outflows, `${section} cash outflows`);
+    return { section, inflowsMinor, outflowsMinor, netMinor: safeNumber(values[section].inflows - values[section].outflows, `${section} net cash flow`) };
+  });
+}
 
 const NON_OPERATING_CASH_CATEGORIES = new Set([
   'debt_borrowing', 'debt_lending', 'debt_principal_repayment', 'debt_receivable_payment', 'debt_settlement',
@@ -109,6 +182,7 @@ export function buildFinancialReportQuery(ownerId: string, startDate: string, en
         originalDestination.currency AS linkedDestinationCurrency,
         rootOriginal.type AS linkedRootType,
         rootOriginal.id AS linkedRootId,
+        rootOriginal.accountId AS linkedRootAccountId,
         rootAccount.currency AS linkedRootCurrency
       FROM "Transaction" t
       LEFT JOIN Account a ON a.id = t.accountId AND a.ownerId = t.ownerId
@@ -285,6 +359,38 @@ export function calculateFinancialReport(
     largestExpenses: largestExpenses.slice(0, 5),
     excludedCurrencies: Array.from(excluded).sort(),
   };
+}
+
+/** Groups signed, refund-adjusted ordinary spending by the account funding it. */
+export function calculateSpendingByAccountTotals(
+  rows: readonly FinancialReportRow[],
+  currency: string,
+  range: { startDate: string; endDate: string },
+): { accountId: string | null; amountMinor: number }[] {
+  if (!currency.trim()) throw new Error('A report currency is required.');
+  const startMs = new Date(range.startDate).getTime();
+  const endMs = new Date(range.endDate).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) throw new Error('Financial report date range is invalid.');
+  const totals = new Map<string | null, bigint>();
+  const add = (accountId: string | null, amount: bigint) => totals.set(accountId, (totals.get(accountId) ?? 0n) + amount);
+  for (const row of rows) {
+    const timestamp = transactionDateTimestamp(row.date);
+    if (!Number.isFinite(timestamp)) throw new Error(`Transaction ${row.id} has an invalid date.`);
+    if (timestamp < startMs || timestamp >= endMs || row.accountCurrency !== currency || isNonOperatingMovement(row)) continue;
+    if (!row.id || !row.ownerId || !Number.isSafeInteger(row.amountMinor) || row.amountMinor <= 0) throw new Error('A financial report row is invalid.');
+    if (!['Income', 'Expense', 'Transfer', 'Refund', 'Reversal'].includes(row.type)) throw new Error(`Transaction ${row.id} has an unsupported type.`);
+    if (row.type === 'Refund' && (row.linkedOriginalType !== 'Expense' || !row.reversalOfId || !row.linkedOriginalAccountId || row.accountCurrency !== row.linkedCurrency)) throw new Error(`Refund ${row.id} does not refer to a compatible expense.`);
+    if (row.type === 'Reversal' && (!row.reversalOfId || !row.linkedOriginalType || row.accountId !== row.linkedOriginalAccountId || row.accountCurrency !== row.linkedCurrency)) throw new Error(`Reversal ${row.id} does not refer to a compatible transaction.`);
+    const amount = BigInt(row.amountMinor);
+    if (row.type === 'Expense') add(row.accountId, amount);
+    else if (row.type === 'Refund') add(row.linkedOriginalAccountId ?? row.accountId, -amount);
+    else if (row.type === 'Reversal' && row.linkedOriginalType === 'Expense') add(row.accountId, -amount);
+    else if (row.type === 'Reversal' && row.linkedOriginalType === 'Refund') add(row.linkedRootAccountId ?? row.accountId, amount);
+  }
+  return [...totals]
+    .filter(([, amount]) => amount !== 0n)
+    .map(([accountId, amount]) => ({ accountId, amountMinor: safeNumber(amount, 'Account spending total') }))
+    .sort((a, b) => Math.abs(b.amountMinor) - Math.abs(a.amountMinor) || (a.accountId ?? '').localeCompare(b.accountId ?? ''));
 }
 
 /**

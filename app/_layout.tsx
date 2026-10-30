@@ -1,11 +1,11 @@
 import { PRIMARY_COLOR } from '../src/constants/themeColors';
 // app/_layout.tsx
-import { Stack, useRouter, useSegments } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter, useSegments } from 'expo-router';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Notifications from 'expo-notifications';
 import { useEffect, useRef } from 'react';
-import { ActivityIndicator, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Toast from 'react-native-toast-message';
@@ -15,6 +15,8 @@ import { LockScreen } from '../components/ui/LockScreen';
 import { AuthProvider, useAuth } from '../src/context/AuthContext';
 import { reconcileProfileReminders } from '../src/security/localReminders';
 import { mayOpenReminder, readReminderIdentity } from '../src/security/reminderPolicy';
+import { decideOnboardingRoute } from '../src/security/onboardingRoutePolicy';
+import { authTraceEvent, authTraceOperation, getActiveAuthTraceId } from '../src/security/authDiagnostics';
 import '../global.css';
 
 SplashScreen.preventAutoHideAsync();
@@ -32,7 +34,8 @@ const queryClient = new QueryClient({
 function RootNavigator() {
   const router = useRouter();
   const segments = useSegments();
-  const { session, status, user, isLoading, lock, unlockWithPassword, unlockAfterBiometric, profileSettings, pendingProfileEmail } = useAuth();
+  const { manual: manualOnboardingParam } = useLocalSearchParams<{ manual?: string }>();
+  const { session, status, user, isLoading, lock, unlockWithPassword, unlockAfterBiometric, profileSettings, pendingProfileEmail, retrySessionRestore, signOut } = useAuth();
   const { biometricAvailability, authenticateBiometric } = useAppLock(status === 'signedIn' && profileSettings.appLockEnabled, lock);
   const reminderErrorShown = useRef<string | null>(null);
 
@@ -77,6 +80,15 @@ function RootNavigator() {
   }, [user, isLoading]);
 
   useEffect(() => {
+    const traceId = getActiveAuthTraceId();
+    if (traceId) authTraceEvent('NAVIGATION_GUARD_EVALUATED', {
+      status,
+      isLoading,
+      fontsLoaded: loaded || Boolean(fontError),
+      route: segments.join('/') || 'root',
+    }, traceId);
+    if (traceId && isLoading) authTraceEvent('NAVIGATION_BLOCKED', { reason: 'session_restoration' }, traceId);
+    if (traceId && !isLoading && !loaded && !fontError) authTraceEvent('NAVIGATION_BLOCKED', { reason: 'font_initialization' }, traceId);
     if (isLoading || (!loaded && !fontError)) return;
 
     const inAuthGroup = segments[0] === '(auth)';
@@ -89,25 +101,72 @@ function RootNavigator() {
 
     if (status === 'signedIn' && inAuthGroup) {
       // Authenticated — send to tabs
+      if (traceId) authTraceEvent('NAVIGATION_START', { destination: 'tabs' }, traceId);
       router.replace('/(tabs)');
+      if (traceId) authTraceEvent('NAVIGATION_DISPATCHED', { destination: 'tabs' }, traceId);
       return;
     }
 
-    if (status === 'signedIn' && user && (segments[0] === '(tabs)' || segments[0] === 'onboarding')) {
+    // Only a newly registered profile is forced through first-run setup. A
+    // returning cloud user may not have local rows until the first pull completes.
+    const onDashboardEntry = segments[0] === '(tabs)' && segments.length === 1;
+    if (status === 'signedIn' && user && (onDashboardEntry || segments[0] === 'onboarding')) {
       let active = true;
-      void localDb.user.onboardingComplete(user.id).then((complete) => {
+      void (async () => {
+        if (traceId) authTraceEvent('ONBOARDING_ROUTE_CHECK_START', { route: segments.join('/') || 'root' }, traceId);
+        const complete = await authTraceOperation(traceId, 'ONBOARDING_COMPLETE_CHECK', () => localDb.user.onboardingComplete(user.id));
         if (!active) return;
-        if (!complete && segments[0] === '(tabs)') router.replace('/onboarding');
-        else if (complete && segments[0] === 'onboarding') router.replace('/(tabs)');
-      }).catch(() => {
+        const onboardingRequired = !complete && await authTraceOperation(traceId, 'ONBOARDING_REQUIRED_CHECK', () => localDb.user.onboardingRequired(user.id));
+        if (!active) return;
+        // Cloud sync is already started by AuthProvider. Never hold navigation on
+        // a network pull: an empty new-device database must open the dashboard while
+        // cloud records arrive in the background.
+        const destination = decideOnboardingRoute({
+          isSignedIn: status === 'signedIn',
+          isComplete: complete,
+          isRequired: onboardingRequired,
+          onDashboardEntry: segments[0] === '(tabs)' && segments.length === 1,
+          onOnboarding: segments[0] === 'onboarding',
+          manualRequest: manualOnboardingParam === '1',
+        });
+        if (destination === 'onboarding') {
+          if (traceId) authTraceEvent('NAVIGATION_START', { destination: 'onboarding' }, traceId);
+          router.replace('/onboarding');
+        } else if (destination === 'tabs') {
+          if (traceId) authTraceEvent('NAVIGATION_START', { destination: 'tabs' }, traceId);
+          router.replace('/(tabs)');
+        }
+        if (traceId) authTraceEvent('ONBOARDING_ROUTE_CHECK_END', { destination }, traceId);
+      })().catch(() => {
+        if (traceId) authTraceEvent('ONBOARDING_ROUTE_CHECK_ERROR', { errorKind: 'operation_failed' }, traceId);
         // Keep the current screen visible and allow a retry; do not guess completion.
       });
       return () => { active = false; };
     }
-  }, [status, user, isLoading, segments, loaded, fontError, router, pendingProfileEmail]);
+  }, [status, user, isLoading, segments, loaded, fontError, router, pendingProfileEmail, manualOnboardingParam]);
 
   if (!loaded && !fontError) return null;
   if (isLoading) return <View className="flex-1 items-center justify-center bg-gray-50 dark:bg-neutral-950"><ActivityIndicator color={PRIMARY_COLOR} /><Text className="font-body mt-3 text-sm text-gray-600 dark:text-neutral-300">Checking this device…</Text></View>;
+
+  if (session.status === 'restoreError') {
+    return (
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <View className="flex-1 justify-center bg-gray-50 px-6 dark:bg-neutral-950">
+          <View className="rounded-sm border border-gray-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
+            <Text className="font-heading text-xl font-bold text-gray-900 dark:text-white">Your profile is still saved</Text>
+            <Text accessibilityRole="alert" className="font-body mt-3 text-sm leading-6 text-gray-600 dark:text-neutral-300">{session.message}</Text>
+            <Pressable accessibilityRole="button" onPress={retrySessionRestore} className="mt-5 items-center bg-primary px-4 py-3">
+              <Text className="font-body font-semibold text-white">Retry</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={() => { void signOut(); }} className="mt-3 items-center border border-gray-300 px-4 py-3 dark:border-neutral-700">
+              <Text className="font-body font-semibold text-gray-700 dark:text-neutral-200">Sign out and sign in online</Text>
+            </Pressable>
+          </View>
+          <Toast />
+        </View>
+      </GestureHandlerRootView>
+    );
+  }
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -130,6 +189,8 @@ function RootNavigator() {
         <Stack.Screen name="account/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="obligations" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="assets" options={{ headerShown: false, presentation: 'modal' }} />
+        <Stack.Screen name="projects/index" options={{ headerShown: false }} />
+        <Stack.Screen name="projects/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="native-verification" options={{ headerShown: false, presentation: 'modal' }} />
       </Stack>
       <Toast />

@@ -185,7 +185,7 @@ export default function SavingsScreen() {
       {accounts.length === 0 && !accountsQuery.isLoading && !accountsQuery.error ? <Pressable accessibilityRole="link" onPress={() => router.push('/accounts')} className="mt-4 rounded-md bg-amber-50 p-3 dark:bg-amber-950"><Text className="font-body text-sm text-amber-800 dark:text-amber-200">Create an account before setting aside or transferring savings. Open accounts →</Text></Pressable> : null}
     </ScrollView>
 
-    <ActionSheet visible={activeDrawer !== null} title={drawerTitle} onClose={() => setActiveDrawer(null)} height={activeDrawer === 'goal-event' || activeDrawer === 'emergency-event' ? '90%' : '78%'}>
+    <ActionSheet visible={activeDrawer !== null} title={drawerTitle} onClose={() => setActiveDrawer(null)}>
       {renderFeedback()}
       {activeDrawer === 'goal' ? <>
         <Text className="font-body text-xs font-semibold text-gray-600 dark:text-neutral-300">Currency</Text>{currencyChoices(goalCurrency, setGoalCurrency)}
